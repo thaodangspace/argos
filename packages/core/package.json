@@ -16,6 +16,10 @@
     "./playbook": {
       "types": "./dist/playbook/index.d.ts",
       "import": "./dist/playbook/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine/index.d.ts",
+      "import": "./dist/engine/index.js"
     }
   },
   "files": [
