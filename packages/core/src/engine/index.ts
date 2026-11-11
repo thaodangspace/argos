@@ -17,6 +17,7 @@ export {
   type AttemptOutcome,
   type AttemptRecord,
   type CreateRunRecordInput,
+  type ExhaustedRecord,
   type GateChoiceRecord,
   type GateComment,
   type GateKind,

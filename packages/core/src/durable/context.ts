@@ -8,7 +8,7 @@
  */
 
 import type { ArgosErrorCode } from "../errors.js";
-import type { Scalar } from "../playbook/ir.js";
+import type { OutputDefIR, Scalar } from "../playbook/ir.js";
 
 // ------------------------------------------------------------------ clock
 
@@ -49,7 +49,7 @@ export function launchLabel(runId: string, stepId: string, attempt: number): str
 // ------------------------------------------------------------------ executor port
 
 /** Everything the executor needs to create or adopt one agent launch. */
-export interface LaunchInput {
+export interface StepAgentContext {
   /** Idempotency key: `argos:<runId>:<stepId>:<attempt>`. */
   readonly requestId: string;
   /** `argos/run=…,argos/step=…,argos/attempt=…` — the reconciliation label (Phase 6). */
@@ -59,8 +59,12 @@ export interface LaunchInput {
   readonly attempt: number;
   /** Working directory: the run worktree when isolation is on, otherwise the run cwd. */
   readonly cwd: string;
-  /** `provider/model` when the step resolved an agent target. */
+  /** First resolved `provider/model` of the step (the preferred target). */
   readonly target?: string;
+  /** Ordered candidates: preferred target first, then role/playbook fallbacks (FR24). */
+  readonly targets?: readonly string[];
+  /** Provider settings of the preferred target (`modeId`/`thinking`). */
+  readonly agentConfig?: AgentStepConfig;
   readonly prompt?: string;
   /**
    * Feedback from the loop/gate that re-queued this step (`{{ feedback }}`). Also interpolated
@@ -71,32 +75,74 @@ export interface LaunchInput {
   readonly outcomes: readonly string[];
   /** Output names declared by the step. */
   readonly outputs: readonly string[];
+  /** Output definitions (type/enum/required/default) for the structured-result schema (D12). */
+  readonly outputDefs: Readonly<Record<string, OutputDefIR>>;
+  /** Targets the run already recorded as quota-exhausted, with their exhaustion time (FR24). */
+  readonly exhausted?: readonly ExhaustedTarget[];
+}
+
+/** Provider settings for the preferred target. */
+export interface AgentStepConfig {
+  readonly provider: string;
+  readonly model: string;
+  readonly modeId?: string;
+  readonly thinking?: string;
+}
+
+/** A `provider/model` skipped until `at + window` (mirrors the run record's `exhausted`). */
+export interface ExhaustedTarget {
+  readonly target: string;
+  readonly at: number;
+}
+
+/** Launch input: the agent context plus the crash-reconciliation hint. */
+export interface LaunchInput extends StepAgentContext {
+  /**
+   * True when an earlier `launch` invocation already marked "create attempted" in the
+   * checkpoint. With an unsupported label filter that must fail `launch_uncertain` instead of
+   * creating a possible duplicate (the crash window from FR16).
+   */
+  readonly priorCreateAttempt?: boolean;
 }
 
 /** The adopted or created agent. */
 export interface AgentLaunch {
   readonly agentId: string;
   readonly target?: string;
+  /** Targets discovered quota-exhausted during this launch (FR24). */
+  readonly exhausted?: readonly ExhaustedTarget[];
 }
 
 /** Poll input: identify the agent that `launch` returned. */
-export interface AgentStatusInput {
-  readonly requestId: string;
+export interface AgentStatusInput extends StepAgentContext {
   readonly agentId: string;
-  readonly label: string;
-  readonly runId: string;
-  readonly stepId: string;
-  readonly attempt: number;
-  readonly cwd: string;
+  /** True after the one allowed handover relaunch (agent archived mid-step). */
+  readonly handoverAttempted?: boolean;
+}
+
+/** The provider's raw result, carried in the checkpoint so `collect` validates after a restart. */
+export interface RawStepOutput {
+  readonly output?: unknown;
+  readonly text?: string | null;
+  readonly provider?: string;
 }
 
 /**
  * What a status poll reports. `running` keeps the step task asleep for another `pollMs`; `done`
  * carries the engine-shaped result of the attempt. An `errorCode` on a `done` status is a step
  * failure, not a task failure: the run records it through `stepSettled`.
+ *
+ * `running` may carry a replacement `agentId` (the handover relaunch) plus `handover: true`, and
+ * `exhausted` targets discovered while relaunching.
  */
 export type StepAgentStatus =
-  | { readonly state: "running" }
+  | {
+      readonly state: "running";
+      readonly agentId?: string;
+      readonly target?: string;
+      readonly handover?: boolean;
+      readonly exhausted?: readonly ExhaustedTarget[];
+    }
   | {
       readonly state: "done";
       readonly outcome?: string;
@@ -104,6 +150,9 @@ export type StepAgentStatus =
       readonly errorCode?: ArgosErrorCode;
       readonly usage?: Readonly<Record<string, number>>;
       readonly feedback?: string;
+      readonly exhausted?: readonly ExhaustedTarget[];
+      /** Raw provider result; `collect` re-validates it with the step schema. */
+      readonly raw?: RawStepOutput;
     };
 
 /** Input of the optional final collection pass (structured-output parsing lives here in Phase 6). */
@@ -118,6 +167,7 @@ export interface CollectResult {
   readonly errorCode?: ArgosErrorCode;
   readonly usage?: Readonly<Record<string, number>>;
   readonly feedback?: string;
+  readonly exhausted?: readonly ExhaustedTarget[];
 }
 
 /**
@@ -152,6 +202,8 @@ export interface StepTaskResult {
   readonly target?: string;
   readonly usage?: Readonly<Record<string, number>>;
   readonly feedback?: string;
+  /** Quota-exhausted targets observed by this attempt (merged into the run record, FR24). */
+  readonly exhausted?: readonly ExhaustedTarget[];
 }
 
 /** Terminal result of one `argos.run` task, mirroring the run's final status. */

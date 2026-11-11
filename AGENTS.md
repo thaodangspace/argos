@@ -2,7 +2,8 @@
 
 Argos — durable YAML playbook engine for Paseo agents. Implementation plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_impl_argos_yaml_playbook_engine.md`.
-Current state: **Phase 5 (gates, decisions, after-tasks)**. Phase 6 (Paseo adapter) is next.
+Current state: **Phase 6 (Paseo adapter) complete**. Phase 7 (script steps, worktree isolation,
+read-only guard) is next.
 
 ## Layout
 
@@ -276,12 +277,15 @@ Host APIs added in Phase 5: `decideGate`, `getGate(runId, gateId)` (typed `GateD
 npm test                                        # all workspaces + durable suite
 npm run typecheck
 npx vitest run --project core packages/core/test/durable   # just the durable suite
+npx vitest run --project core packages/core/test/paseo     # just the Paseo adapter suite
 ```
 
 Fixtures: `test/fakes/clock.ts` (fake `now()`/`setTimer()` + `advance()` that fires due timers and
-flushes queued work) and `test/fakes/executor.ts` (agents keyed by `requestId`, manual completion or
+flushes queued work), `test/fakes/executor.ts` (agents keyed by `requestId`, manual completion or
 a scripted `complete(agent)` callback per attempt, blockable launches, creation counts per step,
-and the captured `prompt`/`feedback` of every launch). The suite covers: home/db modes and pid
+and the captured `prompt`/`feedback` of every launch), and `test/fakes/paseo.ts` (a labelled-agent
+daemon fake: seeded agents, quota targets, `blockCreate()` for the crash window, scripted
+`complete`/timeout/handover). The durable suite covers: home/db modes and pid
 single-writer (stale pid replacement, `storage_locked`), mirror-vs-checkpoint equality for every
 record-changing commit, the D6 generation/model guard, checkpoint JSON round-trip byte-identity, a
 diamond that closes mid-step and reopens the same SQLite file with exactly one agent per step, a
@@ -290,6 +294,132 @@ open/`sleeping` evidence, one-writer decisions with `gate_already_decided`, a pe
 survives close/reopen, loop-limit approve/reject, the gate comment reaching the next attempt's
 `feedback`/prompt, and auto/manual after-tasks (`test/durable/{gates,after}.test.ts`;
 `src/engine/decide.test.ts` covers the pure decision path).
+
+The Paseo suite (`test/paseo/`) covers: create arguments (provider/cwd/rendered prompt/labels/
+compiled `outputSchema`), adoption after a crash with **zero** additional `create`, `launch_uncertain`
+without a second create when labels are unsupported, exactly one handover then `agent_missing`,
+`waitForFinish` timeout → local retry → `step_timeout`, quota fallback without consuming `retries`
+plus `RunRecord.exhausted`, all-targets-blocked `provider_exhausted`, `invalid_output` after
+retries, fenced-JSON fallback only when outputs are declared, `startRun` refusal with
+`model_unavailable` and no task, and the publish-time import guard.
+
+## Paseo adapter (Phase 6)
+
+`packages/core/src/paseo/` is the real-agent half of FR16/FR17/FR24 (D11/D12). It is exposed as
+the `argos-core/paseo` subpath, never from the package root. `src/paseo/client.ts` is the **only**
+file allowed to import `@getpaseo/*` (`test/paseo/isolation.test.ts` enforces it); every test uses
+`test/fakes/paseo.ts`, so no test opens a socket.
+
+### Port and error taxonomy
+
+`port.ts` is plain data + typed errors; `agent-step.ts` never sees an SDK handle.
+
+```ts
+interface PaseoPort {
+  readonly supportsLabelFilter: boolean;                 // "unsupported" != "none found"
+  listByLabels(labels): Promise<AgentRef[]>;             // throws LabelFilterUnsupportedError
+  create(input: CreateAgentInput): Promise<AgentRef>;
+  refresh(agentId): Promise<AgentInfo | null>;           // throws when the daemon rejects
+  waitForFinish(agentId, timeoutMs): Promise<FinishResult>; // status includes "timeout"
+  archive(agentId): Promise<void>;
+  providersSnapshot(): Promise<ProviderCatalog>;         // { providers: [{ provider, enabled, models }] }
+}
+```
+
+| Port error                    | Argos code / behaviour                              |
+|-------------------------------|-----------------------------------------------------|
+| `PaseoUnreachableError`       | `paseo_unreachable` (poll-time parks until deadline) |
+| `LabelFilterUnsupportedError` | `launch_uncertain` in the crash window               |
+| `QuotaError`                  | next fallback target; all blocked → `provider_exhausted` |
+| `AgentMissingError`           | one handover relaunch, then `agent_missing`         |
+| `ProviderTimeoutError`        | step keeps polling; the durable deadline owns retries |
+
+Classification is centralized in `port.ts` (`isQuotaError`, `isLabelFilterUnsupported`,
+`isConnectionError`, `isAgentMissing`, `classifyPaseoFailure`): message/code/HTTP-status matching,
+because the daemon exposes no typed quota enum. `client.ts` maps connect/auth failures to
+`paseo_unreachable`, redacts `ARGOS_PASEO_PASSWORD` from every message, connects lazily, reuses the
+client between calls, and disables the SDK's internal reconnect loop (Argos paces retries).
+
+### Target resolution, quota fallback, exhaustion (FR24)
+
+`model-catalog.ts` loads `providers.snapshot()` and exposes a `TargetCatalog`:
+
+- `resolveStepTargets(step)` = resolved step agent (`step.agent`, which already carries
+  step > role > playbook > defaults) followed by `step.fallbacks` / role fallbacks, deduped.
+- `ModelCatalog.missingTargets(ir, inputs)` checks the main graph **and** after-task steps, renders
+  whole-value `{{ inputs.x }}` in provider/model, accepts aliases, and returns every unknown
+  target sorted. `ArgosHost.startRun` refuses the run with `model_unavailable` **before any task is
+  created** when this list is non-empty. `ArgosHostOptions.modelCatalog` is optional, so Phase 4
+  tests that do not use Paseo are unchanged.
+- `availableTargets` / `isTargetExhausted` implement the configurable skip window (default 15 min).
+
+Quota is a **target** hop, not a retry: `agent-step.ts` keeps an in-memory ledger merged with the
+run record's `exhausted`, tries candidates in order, and returns/throws the entries. `argos.step`
+carries them in `StepTaskResult.exhausted`; `argos.run`'s `settle` merges them into
+`RunRecord.exhausted: [{ target, at }]` (one entry per target, latest `at`, stable order) before it
+mirrors the record. `retries` is not decremented. All targets blocked → `provider_exhausted`.
+The primary target's `modeId`/`thinking` are applied; fallback targets carry provider/model only.
+
+### Structured output (FR17, D12)
+
+`output.ts` compiles `outputs` + `outcomes` into one object schema:
+`{ type:"object", properties:{ <outputs>, outcome?: {enum} }, required:[required outputs, outcome],
+additionalProperties:false }`. Types are string/number/boolean/enum; declared defaults fill missing
+optional outputs. `validateStepOutput` returns `{ outcome, outputs }` or a precise `invalid_output`
+error (`output count: expected number, received string`). `parseStepResult` prefers a structured
+`output`; when that fails validation it does **not** re-parse prose. Plain text is parsed only when
+the step declares `outputs`, and only from one fenced ```json block or a bare JSON object; two
+fences is ambiguous → `invalid_output`. `invalid_output` retries like a timeout, per `retries`.
+`PROVIDER_OUTPUT_CAPABILITIES` records the manual probe result (unknown providers default to
+`structured`); the parser always accepts both shapes.
+
+### Launch, crash window, handover
+
+- `launch` adopts the first non-archived agent matching `{ "argos/launch": requestId }`, else
+  creates with `config.provider`, `cwd`, the rendered prompt (including `{{ feedback }}`), labels
+  `argos/launch`/`argos/run`/`argos/step`/`argos/attempt`, and `outputSchema`. `idempotencyKey` is
+  the request id.
+- The step checkpoint gained `launchAttempted`, committed **before** the executor call. If the
+  daemon cannot filter labels and a re-entry sees `launchAttempted: true`, `launch` fails
+  `launch_uncertain` instead of blind-relaunching. First attempts still create (the flag cannot be
+  checked any other way).
+- `refresh` returning null/archived or throwing `AgentMissingError` triggers **one** handover:
+  archive the old agent, create a replacement with `argos/handover=1` and a handover note appended
+  to the prompt, and return the new `agentId`; the task commits `handoverAttempted` and polls the
+  replacement. A second occurrence fails the step with `agent_missing`.
+- `waitForFinish`/`ProviderTimeoutError` keeps the step running; the durable deadline turns it into
+  a local retry (fresh request id/agent) and finally `step_timeout`.
+
+### Checkpoint additions (pre-release, migration-free)
+
+`argos.step` gained `launchAttempted: boolean`, optional `handoverAttempted`, `exhausted`, and the
+raw provider result (`status.raw`) so `collect` can re-validate after a restart that never
+re-enters `launch`. `StepAgentContext` also carries `targets`, `agentConfig`, `outputDefs`, and
+`exhausted`. These are additive fields; no existing Phase 4/5 assertion changed.
+
+### Manual capability probe (never in CI)
+
+```sh
+npm run build
+ARGOS_PASEO_URL=ws://127.0.0.1:6767/ws ARGOS_PASEO_PASSWORD='…' \
+  node --experimental-strip-types scripts/probe-output-schema.ts [claude codex opencode pi]
+```
+
+Creates one tiny agent per provider with the real `outputSchema`, prints whether structured output
+or a fenced-JSON text result came back, and archives the agents. Use its output to refresh
+`PROVIDER_OUTPUT_CAPABILITIES` in `src/paseo/output.ts`. It is a developer tool only: no test or CI
+job imports `scripts/`.
+
+### Documented deviations
+
+- A **launch-time** `paseo_unreachable` fails the step with `paseo_unreachable`; only poll-time
+  unreachability parks and retries until the deadline.
+- This SDK's `waitForFinish()` exposes `lastMessage` text but no structured JSON value, so the
+  production port leaves `FinishResult.output` undefined and relies on the D12 fenced-JSON
+  fallback.
+- Local retries (timeout / `invalid_output`) create fresh request ids inside one `argos.step`
+  child; the run record still shows one dispatch attempt per child (Phase 4 deviation), while the
+  fake port's `create` ledger and the step checkpoint show each local attempt.
 
 ## Commands (run from the repo root)
 
@@ -331,6 +461,8 @@ the durability suite green.
 |---|---|---|
 | `ARGOS_HOME` | `~/.argos` | state dir, mode `0700`; DB `argos.sqlite` (`0600`), `token`, `serve.pid` |
 | `ARGOS_PORT` | `7676` | `argos serve` port on `127.0.0.1` |
+| `ARGOS_PASEO_URL` | `ws://127.0.0.1:6767/ws` | Paseo daemon WebSocket URL (Phase 6, read only by `src/paseo/client.ts`) |
+| `ARGOS_PASEO_PASSWORD` | (unset) | daemon password; never logged, redacted from errors |
 
 ## Invariants
 

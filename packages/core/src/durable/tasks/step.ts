@@ -24,14 +24,16 @@
 
 import { defineTask } from "@earendil-works/pi-durable";
 
-import type { ArgosErrorCode } from "../../errors.js";
-import type { Scalar } from "../../playbook/ir.js";
+import { isArgosError, type ArgosErrorCode } from "../../errors.js";
+import type { OutputDefIR, Scalar } from "../../playbook/ir.js";
 import { retryBackoffMs } from "../../engine/index.js";
 import {
   launchLabel,
   stepRequestId,
   type AgentStatusInput,
+  type AgentStepConfig,
   type CollectResult,
+  type ExhaustedTarget,
   type StepAgentStatus,
   type StepExecutor,
   type StepTaskResult,
@@ -59,6 +61,14 @@ export interface StepTaskInput {
   readonly feedback?: string;
   readonly outcomes: readonly string[];
   readonly outputs: readonly string[];
+  /** Output definitions for the structured-result schema (D12). */
+  readonly outputDefs: Readonly<Record<string, OutputDefIR>>;
+  /** Ordered `provider/model` candidates: preferred target then role fallbacks (FR24). */
+  readonly targets?: readonly string[];
+  /** Provider settings of the preferred target. */
+  readonly agentConfig?: AgentStepConfig;
+  /** Targets the run already recorded as quota-exhausted (FR24). */
+  readonly exhausted?: readonly ExhaustedTarget[];
 }
 
 export interface StepCheckpointFields {
@@ -69,9 +79,19 @@ export interface StepCheckpointFields {
   /** Absolute epoch ms after which this local attempt times out. */
   readonly deadlineAt: number;
   readonly polls: number;
+  /**
+   * True once the `launch` phase has begun. Committed **before** the executor call: with an
+   * unsupported label filter, a re-entry that sees this flag must fail `launch_uncertain`
+   * instead of creating a possible duplicate (the crash window, FR16).
+   */
+  readonly launchAttempted: boolean;
+  /** True after the one allowed handover relaunch (agent archived mid-step). */
+  readonly handoverAttempted?: boolean;
   readonly agentId?: string;
   readonly target?: string;
   readonly launchedAt?: number;
+  /** Quota-exhausted targets seen by earlier invocations of this step (FR24). */
+  readonly exhausted: readonly ExhaustedTarget[];
   /** The polled result, carried into `collect`. */
   readonly status?: StepAgentStatus;
   readonly errorCode?: ArgosErrorCode;
@@ -137,6 +157,7 @@ function buildResult(
 ): StepTaskResult {
   const normalized = normalizeOutputs(collected.outputs);
   const errorCode = normalized.invalid ? "invalid_output" : collected.errorCode;
+  const exhausted = mergeExhausted(checkpoint.exhausted, collected.exhausted ?? []);
   const result: Record<string, unknown> = {
     stepId: input.stepId,
     attempt: checkpoint.attempt,
@@ -149,18 +170,87 @@ function buildResult(
   if (checkpoint.target !== undefined) result["target"] = checkpoint.target;
   if (collected.usage !== undefined) result["usage"] = collected.usage;
   if (collected.feedback !== undefined) result["feedback"] = collected.feedback;
+  if (exhausted.length > 0) result["exhausted"] = exhausted;
   return result as unknown as StepTaskResult;
 }
 
-function statusInput(input: StepTaskInput, checkpoint: StepCheckpoint, agentId: string): AgentStatusInput {
+/**
+ * Merge quota-exhausted targets, keeping one entry per target and the latest `at` (FR24). Insertion
+ * order is stable, so the run record's `exhausted` list is deterministic.
+ */
+function mergeExhausted(
+  current: readonly ExhaustedTarget[],
+  incoming: readonly ExhaustedTarget[],
+): readonly ExhaustedTarget[] {
+  if (incoming.length === 0) return current;
+  const merged = new Map<string, number>();
+  for (const entry of current) merged.set(entry.target, entry.at);
+  for (const entry of incoming) {
+    merged.set(entry.target, Math.max(merged.get(entry.target) ?? 0, entry.at));
+  }
+  return [...merged.entries()].map(([target, at]) => ({ target, at }));
+}
+
+/** Distinguish a stale checkpoint from a genuinely broken task. */
+function isExhaustedTarget(value: unknown): value is ExhaustedTarget {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { target?: unknown }).target === "string" &&
+    typeof (value as { at?: unknown }).at === "number"
+  );
+}
+
+/** Quota entries carried by a thrown executor error (all targets blocked, FR24). */
+function errorExhausted(error: unknown): readonly ExhaustedTarget[] {
+  const raw = (error as { exhausted?: unknown }).exhausted;
+  return Array.isArray(raw) ? raw.filter(isExhaustedTarget) : [];
+}
+
+/**
+ * Map a thrown executor error to a step result. A port/adaptor throw is a **step** failure with
+ * its stable code (e.g. `provider_exhausted`, `launch_uncertain`), not a task fault.
+ */
+function failureStatus(error: unknown): StepAgentStatus {
+  const exhausted = errorExhausted(error);
+  const code: ArgosErrorCode = isArgosError(error) ? error.code : "step_failed";
+  return {
+    state: "done",
+    errorCode: code,
+    ...(exhausted.length === 0 ? {} : { exhausted }),
+  };
+}
+
+/** The agent context shared by launch, status, and collect. */
+function agentContext(input: StepTaskInput, checkpoint: StepCheckpoint) {
   return {
     requestId: checkpoint.requestId,
-    agentId,
     label: checkpoint.label,
     runId: input.runId,
     stepId: input.stepId,
     attempt: checkpoint.attempt,
     cwd: input.cwd,
+    outcomes: input.outcomes,
+    outputs: input.outputs,
+    outputDefs: input.outputDefs,
+    ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
+    ...(input.targets === undefined ? {} : { targets: input.targets }),
+    ...(input.agentConfig === undefined ? {} : { agentConfig: input.agentConfig }),
+    ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+    ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
+    ...(checkpoint.exhausted.length === 0 ? {} : { exhausted: checkpoint.exhausted }),
+  };
+}
+
+function statusInput(
+  input: StepTaskInput,
+  checkpoint: StepCheckpoint,
+  agentId: string,
+): AgentStatusInput {
+  return {
+    ...agentContext(input, checkpoint),
+    agentId,
+    ...(checkpoint.handoverAttempted === true ? { handoverAttempted: true } : {}),
   };
 }
 
@@ -169,7 +259,38 @@ function doneCheckpoint(
   checkpoint: StepCheckpoint,
   status: StepAgentStatus,
 ): StepCheckpoint {
-  return { ...checkpoint, phase: "collect", status };
+  return {
+    ...checkpoint,
+    phase: "collect",
+    status,
+    exhausted: mergeExhausted(
+      checkpoint.exhausted,
+      status.exhausted ?? [],
+    ),
+    ...(status.state === "running" && status.agentId !== undefined
+      ? { agentId: status.agentId }
+      : {}),
+  };
+}
+
+/** A fresh local attempt: new request id/label, backoff, and a clean crash/launch window. */
+function retryCheckpoint(
+  input: StepTaskInput,
+  checkpoint: StepCheckpoint,
+  now: number,
+  attempt: number,
+): StepCheckpoint {
+  return {
+    phase: "launch",
+    requestId: stepRequestId(input.runId, input.stepId, attempt),
+    attempt,
+    label: launchLabel(input.runId, input.stepId, attempt),
+    deadlineAt: now + retryBackoffMs(checkpoint.attempt) + input.timeoutMs,
+    polls: 0,
+    launchAttempted: false,
+    exhausted: checkpoint.exhausted,
+    ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
+  };
 }
 
 // ------------------------------------------------------------------ definition
@@ -194,6 +315,8 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
       label: launchLabel(input.runId, input.stepId, input.attempt),
       deadlineAt: 0,
       polls: 0,
+      launchAttempted: false,
+      exhausted: [],
       ...(input.target === undefined ? {} : { target: input.target }),
     }),
 
@@ -209,20 +332,19 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
       },
 
       launch: async (task, runtime, context) => {
-        const checkpoint = task.state.checkpoint;
+        let checkpoint = task.state.checkpoint;
         const now = runtime.now();
+        // Commit the launch intent *before* any executor call. A re-entry (crash window) then
+        // knows a create may already have happened; with an unsupported label filter the adapter
+        // refuses to blind-relaunch (`launch_uncertain`).
+        const priorCreateAttempt = checkpoint.launchAttempted === true;
+        if (!priorCreateAttempt) {
+          checkpoint = { ...checkpoint, launchAttempted: true };
+          await runtime.commit(() => ({ status: "running", checkpoint }), context);
+        }
         const launchInput = {
-          requestId: checkpoint.requestId,
-          label: checkpoint.label,
-          runId: task.input.runId,
-          stepId: task.input.stepId,
-          attempt: checkpoint.attempt,
-          cwd: task.input.cwd,
-          outcomes: task.input.outcomes,
-          outputs: task.input.outputs,
-          ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
-          ...(task.input.prompt === undefined ? {} : { prompt: task.input.prompt }),
-          ...(task.input.feedback === undefined ? {} : { feedback: task.input.feedback }),
+          ...agentContext(task.input, checkpoint),
+          priorCreateAttempt,
         };
         try {
           const launched = await withAbort(executor.launch(launchInput), runtime.signal);
@@ -234,13 +356,13 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
             deadlineAt: now + task.input.timeoutMs,
             polls: 0,
             ...(launched.target === undefined ? {} : { target: launched.target }),
+            exhausted: mergeExhausted(checkpoint.exhausted, launched.exhausted ?? []),
           };
           await runtime.commit(() => ({ status: "running", checkpoint: next }), context);
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          // Launch failed: record a step failure, not a task fault. Phase 6 adds the
-          // `launch_uncertain` reconciliation escape hatch.
-          const status: StepAgentStatus = { state: "done", errorCode: "step_failed" };
+          // Launch failed: record a step failure (with its stable code), not a task fault.
+          const status = failureStatus(error);
           await runtime.commit(
             () => ({ status: "running", checkpoint: doneCheckpoint(checkpoint, status) }),
             context,
@@ -270,11 +392,34 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           );
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          // A transient poll error behaves like "still running" and is bounded by the deadline.
-          status = { state: "running" };
+          // A transient poll error (daemon unreachable) behaves like "still running" and is
+          // bounded by the deadline (spec: the step parks and retries with backoff). A terminal
+          // executor failure becomes a step failure with its stable code.
+          status =
+            isArgosError(error) && error.code !== "paseo_unreachable"
+              ? failureStatus(error)
+              : { state: "running" };
         }
 
         if (status.state === "done") {
+          const canRetry =
+            status.errorCode === "invalid_output" &&
+            checkpoint.attempt < task.input.attempt + task.input.retries;
+          if (canRetry) {
+            // Schema-invalid output is retried like a timeout: a fresh agent attempt after a
+            // deterministic backoff, bounded by `retries` (FR17).
+            const attempt = checkpoint.attempt + 1;
+            const retry = retryCheckpoint(task.input, checkpoint, now, attempt);
+            await runtime.commit(
+              () => ({
+                status: "sleeping",
+                until: now + retryBackoffMs(checkpoint.attempt),
+                checkpoint: retry,
+              }),
+              context,
+            );
+            return;
+          }
           await runtime.commit(
             () => ({ status: "running", checkpoint: doneCheckpoint(checkpoint, status) }),
             context,
@@ -282,27 +427,28 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           return;
         }
 
-        if (now >= checkpoint.deadlineAt) {
-          const canRetry = checkpoint.attempt < task.input.attempt + task.input.retries;
+        // A handover relaunch reports the replacement agent; merge it before the next poll.
+        const running: StepCheckpoint = {
+          ...checkpoint,
+          ...(status.agentId === undefined ? {} : { agentId: status.agentId }),
+          ...(status.target === undefined ? {} : { target: status.target }),
+          ...(status.handover === true ? { handoverAttempted: true } : {}),
+          exhausted: mergeExhausted(checkpoint.exhausted, status.exhausted ?? []),
+        };
+
+        if (now >= running.deadlineAt) {
+          const canRetry = running.attempt < task.input.attempt + task.input.retries;
           if (!canRetry) {
             const timedOut: StepAgentStatus = { state: "done", errorCode: "step_timeout" };
             await runtime.commit(
-              () => ({ status: "running", checkpoint: doneCheckpoint(checkpoint, timedOut) }),
+              () => ({ status: "running", checkpoint: doneCheckpoint(running, timedOut) }),
               context,
             );
             return;
           }
-          const attempt = checkpoint.attempt + 1;
-          const backoff = retryBackoffMs(checkpoint.attempt);
-          const retry: StepCheckpoint = {
-            phase: "launch",
-            requestId: stepRequestId(task.input.runId, task.input.stepId, attempt),
-            attempt,
-            label: launchLabel(task.input.runId, task.input.stepId, attempt),
-            deadlineAt: now + backoff + task.input.timeoutMs,
-            polls: 0,
-            ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
-          };
+          const attempt = running.attempt + 1;
+          const retry = retryCheckpoint(task.input, running, now, attempt);
+          const backoff = retryBackoffMs(running.attempt);
           await runtime.commit(
             () => ({ status: "sleeping", until: now + backoff, checkpoint: retry }),
             context,
@@ -310,7 +456,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           return;
         }
 
-        const sleeping: StepCheckpoint = { ...checkpoint, polls: checkpoint.polls + 1 };
+        const sleeping: StepCheckpoint = { ...running, polls: running.polls + 1 };
         await runtime.commit(
           () => ({ status: "sleeping", until: now + task.input.pollMs, checkpoint: sleeping }),
           context,
@@ -328,6 +474,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
                 ...(checkpoint.status.errorCode === undefined ? {} : { errorCode: checkpoint.status.errorCode }),
                 ...(checkpoint.status.usage === undefined ? {} : { usage: checkpoint.status.usage }),
                 ...(checkpoint.status.feedback === undefined ? {} : { feedback: checkpoint.status.feedback }),
+                ...(checkpoint.status.exhausted === undefined ? {} : { exhausted: checkpoint.status.exhausted }),
               };
 
         let collected = base;
@@ -349,6 +496,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
               ...(refined.errorCode === undefined ? {} : { errorCode: refined.errorCode }),
               ...(refined.usage === undefined ? {} : { usage: refined.usage }),
               ...(refined.feedback === undefined ? {} : { feedback: refined.feedback }),
+              ...(refined.exhausted === undefined ? {} : { exhausted: refined.exhausted }),
             };
           } catch (error) {
             if (runtime.signal.aborted) throw error;

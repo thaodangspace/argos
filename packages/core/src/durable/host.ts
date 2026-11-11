@@ -31,6 +31,7 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 import { ArgosError } from "../errors.js";
+import type { TargetCatalog } from "../paseo/model-catalog.js";
 import type { PlaybookIR, Scalar } from "../playbook/ir.js";
 import { argosHome, dbPath, ensureHome, pidPath } from "../paths.js";
 import {
@@ -163,6 +164,12 @@ export interface ArgosHostOptions {
   readonly clock?: Clock;
   /** Override the D6 stub (tests only; production leaves it unset). */
   readonly models?: Models;
+  /**
+   * Provider/model catalog (FR24). When supplied, `startRun` refuses a run whose resolved
+   * `provider/model` is missing with `model_unavailable` **before** creating any task. Phase 4
+   * tests leave it unset, so the durable host stays independent of Paseo.
+   */
+  readonly modelCatalog?: TargetCatalog;
 }
 
 export interface StartRunInput {
@@ -211,6 +218,7 @@ export class ArgosHost {
   readonly #executor: StepExecutor;
   readonly #clock: Clock;
   readonly #models: Models;
+  readonly #modelCatalog: TargetCatalog | undefined;
   readonly #runTask: ReturnType<typeof createRunTaskDefinition>;
   readonly #stepTask: ReturnType<typeof createStepTaskDefinition>;
   readonly #gateTask: ReturnType<typeof createGateTaskDefinition>;
@@ -224,6 +232,7 @@ export class ArgosHost {
     executor: StepExecutor;
     clock: Clock;
     models: Models;
+    modelCatalog?: TargetCatalog;
     runTask: ReturnType<typeof createRunTaskDefinition>;
     stepTask: ReturnType<typeof createStepTaskDefinition>;
     gateTask: ReturnType<typeof createGateTaskDefinition>;
@@ -235,6 +244,7 @@ export class ArgosHost {
     this.#executor = init.executor;
     this.#clock = init.clock;
     this.#models = init.models;
+    this.#modelCatalog = init.modelCatalog;
     this.#runTask = init.runTask;
     this.#stepTask = init.stepTask;
     this.#gateTask = init.gateTask;
@@ -306,6 +316,7 @@ export class ArgosHost {
       executor: options.executor,
       clock,
       models,
+      ...(options.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
       runTask,
       stepTask,
       gateTask,
@@ -332,6 +343,11 @@ export class ArgosHost {
     return this.#models;
   }
 
+  /** The injected provider/model catalog (FR24), when the host was opened with one. */
+  get modelCatalog(): TargetCatalog | undefined {
+    return this.#modelCatalog;
+  }
+
   /** `$ARGOS_HOME`, when this host owns one. */
   get home(): string | undefined {
     return this.#home;
@@ -353,6 +369,16 @@ export class ArgosHost {
    */
   async startRun(input: StartRunInput): Promise<StartedRun> {
     if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    // FR24: refuse an off-catalog run before any task exists, naming every unknown target.
+    if (this.#modelCatalog !== undefined) {
+      const missing = this.#modelCatalog.missingTargets(input.ir, input.inputs);
+      if (missing.length > 0) {
+        throw new ArgosError(
+          "model_unavailable",
+          `playbook ${input.ir.id}: unknown provider/model target(s): ${missing.join(", ")}; check providers.snapshot()`,
+        );
+      }
+    }
     const runId = input.id ?? ulid(this.#clock.now());
     const record = createRunRecord({
       id: runId,

@@ -24,6 +24,10 @@
     "./durable": {
       "types": "./dist/durable/index.d.ts",
       "import": "./dist/durable/index.js"
+    },
+    "./paseo": {
+      "types": "./dist/paseo/index.d.ts",
+      "import": "./dist/paseo/index.js"
     }
   },
   "files": [

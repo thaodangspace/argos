@@ -41,6 +41,7 @@ import {
   stepTimeoutMs,
   type Effect,
   type EngineEvent,
+  type ExhaustedRecord,
   type GateRecord,
   type RunRecord,
 } from "../../engine/index.js";
@@ -86,6 +87,8 @@ export interface StepSettlement {
   readonly target?: string;
   readonly usage?: Readonly<Record<string, number>>;
   readonly feedback?: string;
+  /** Quota-exhausted targets observed by the attempt (FR24). */
+  readonly exhausted?: readonly ExhaustedRecord[];
 }
 
 /** One gate settlement, mapped from a terminal `argos.gate` outcome (FR19). */
@@ -149,6 +152,7 @@ const StepSettlementSchema = z.strictObject({
   target: z.string().min(1).optional(),
   usage: z.record(z.string(), z.number()).optional(),
   feedback: z.string().optional(),
+  exhausted: z.array(z.strictObject({ target: z.string().min(1), at: z.number() })).optional(),
 });
 
 const GateSettlementSchema = z.strictObject({
@@ -266,6 +270,7 @@ function settlementFrom(
       ...(result.target === undefined ? {} : { target: result.target }),
       ...(result.usage === undefined ? {} : { usage: result.usage }),
       ...(result.feedback === undefined ? {} : { feedback: result.feedback }),
+      ...(result.exhausted === undefined ? {} : { exhausted: result.exhausted }),
     };
   }
   // failed / aborted / faulted / orphaned: the child task itself broke, which is a step failure.
@@ -521,8 +526,13 @@ export function renderFeedback(prompt: string, feedback: string | undefined): st
 function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): StepTaskInput | undefined {
   const definition = stepDefinition(record, effect.stepId);
   if (definition === undefined) return undefined;
-  const target =
-    definition.agent === undefined ? undefined : `${definition.agent.provider}/${definition.agent.model}`;
+  const agent = definition.agent;
+  const target = agent === undefined ? undefined : `${agent.provider}/${agent.model}`;
+  const targets = [
+    ...(target === undefined ? [] : [target]),
+    ...(definition.fallbacks ?? []).map((fallback) => `${fallback.provider}/${fallback.model}`),
+  ];
+  const uniqueTargets = [...new Set(targets)];
   const feedback = record.steps[definition.id]?.feedback;
   const prompt =
     definition.prompt === undefined ? undefined : renderFeedback(definition.prompt, feedback);
@@ -537,10 +547,46 @@ function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispat
     retries: definition.retries,
     outcomes: definition.outcomes,
     outputs: Object.keys(definition.outputs),
+    outputDefs: definition.outputs,
+    ...(uniqueTargets.length === 0 ? {} : { targets: uniqueTargets }),
+    ...(agent === undefined
+      ? {}
+      : {
+          agentConfig: {
+            provider: agent.provider,
+            model: agent.model,
+            ...(agent.modeId === undefined ? {} : { modeId: agent.modeId }),
+            ...(agent.thinking === undefined ? {} : { thinking: agent.thinking }),
+          },
+        }),
+    ...(record.exhausted.length === 0 ? {} : { exhausted: record.exhausted }),
     ...(target === undefined ? {} : { target }),
     ...(prompt === undefined ? {} : { prompt }),
     ...(feedback === undefined ? {} : { feedback }),
   };
+}
+
+/**
+ * Merge a settlement's quota-exhausted targets into the run record (FR24). One entry per target,
+ * latest `at`, stable order; the record (and its `seq`) only changes when an entry actually moves.
+ */
+function mergeExhausted(
+  current: readonly ExhaustedRecord[],
+  incoming: readonly ExhaustedRecord[],
+): readonly ExhaustedRecord[] {
+  if (incoming.length === 0) return current;
+  const merged = new Map<string, number>();
+  for (const entry of current) merged.set(entry.target, entry.at);
+  let changed = false;
+  for (const entry of incoming) {
+    const previous = merged.get(entry.target);
+    if (previous === undefined || entry.at > previous) {
+      merged.set(entry.target, entry.at);
+      changed = true;
+    }
+  }
+  if (!changed) return current;
+  return [...merged.entries()].map(([target, at]) => ({ target, at }));
 }
 
 // ------------------------------------------------------------------ after-tasks
@@ -777,6 +823,20 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
             const result = next(record, gateEvent(settlement, now));
             record = result.record;
             effects.push(...result.effects);
+          }
+
+          // FR24: the step executor owns quota detection; the run record owns the durable ledger.
+          const exhausted = mergeExhausted(
+            record.exhausted,
+            checkpoint.settles.flatMap((settlement) => settlement.exhausted ?? []),
+          );
+          if (exhausted !== record.exhausted) {
+            record = {
+              ...record,
+              exhausted,
+              updatedAt: Math.max(record.updatedAt, now),
+              seq: record.seq + 1,
+            };
           }
 
           const live = await runtime.ownedTasks(context);
