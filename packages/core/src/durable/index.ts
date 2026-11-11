@@ -13,4 +13,5 @@ export * from "./ulid.js";
 export * from "./tasks/after.js";
 export * from "./tasks/gate.js";
 export * from "./tasks/run.js";
+export * from "./tasks/script.js";
 export * from "./tasks/step.js";

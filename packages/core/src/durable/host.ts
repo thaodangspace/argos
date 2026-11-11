@@ -5,9 +5,11 @@
  * - open (or create) the home directory and the SQLite storage, with `0700`/`0600` modes;
  * - enforce the single-writer rule through `$ARGOS_HOME/serve.pid`, refusing a second live owner
  *   with `storage_locked` and replacing a stale pid file left by a dead process;
- * - install one `argos` extension containing the `argos.run` / `argos.step` tasks in a fresh
- *   registry, with a **stub** `models` (D6) that throws on any use, because the engine never
- *   consults a model for control flow;
+ * - install one `argos` extension containing the `argos.run` / `argos.step` / `argos.script` /
+ *   `argos.gate` tasks in a fresh registry, with a **stub** `models` (D6) that throws on any use,
+ *   because the engine never consults a model for control flow;
+ * - create the run's private worktree when `isolation.mode: worktree` asks for one (FR23, D9),
+ *   refusing a dirty source checkout *before* any task exists;
  * - expose `startRun`, `resume`, `close`, `getRun`, `getHistory`, `getTaskRecord`, `inspect`.
  *
  * This module — and the rest of `src/durable/` — is the only place that imports
@@ -31,8 +33,10 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 import { ArgosError } from "../errors.js";
+import type { GitRunner } from "../git/exec.js";
+import { createRunWorktree } from "../git/worktree.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
-import type { PlaybookIR, Scalar } from "../playbook/ir.js";
+import type { IsolationIR, PlaybookIR, Scalar } from "../playbook/ir.js";
 import { argosHome, dbPath, ensureHome, pidPath } from "../paths.js";
 import {
   createRunRecord,
@@ -62,6 +66,7 @@ import {
 import { planAfterRun } from "./tasks/after.js";
 import { createGateTaskDefinition } from "./tasks/gate.js";
 import { createAfterRunTask, createRunTaskDefinition, type RunCheckpoint } from "./tasks/run.js";
+import { createScriptTaskDefinition } from "./tasks/script.js";
 import { createStepTaskDefinition } from "./tasks/step.js";
 import { ulid } from "./ulid.js";
 
@@ -170,6 +175,11 @@ export interface ArgosHostOptions {
    * tests leave it unset, so the durable host stays independent of Paseo.
    */
   readonly modelCatalog?: TargetCatalog;
+  /**
+   * Injected git port for worktree creation and read-only snapshots (D9). Production leaves it
+   * unset: `execFile("git", [...])` is the only implementation that ships.
+   */
+  readonly git?: GitRunner;
 }
 
 export interface StartRunInput {
@@ -180,6 +190,11 @@ export interface StartRunInput {
   readonly deadline?: number;
   /** Explicit run id (tests / idempotent callers); default `ulid()`. */
   readonly id?: string;
+  /**
+   * Isolation override for this run (Phase 8's `argos run --isolation`). Default: the frozen IR's
+   * `isolation` block, which the loader already resolved from playbook/defaults.
+   */
+  readonly isolation?: IsolationIR;
 }
 
 export interface StartedRun {
@@ -222,6 +237,8 @@ export class ArgosHost {
   readonly #runTask: ReturnType<typeof createRunTaskDefinition>;
   readonly #stepTask: ReturnType<typeof createStepTaskDefinition>;
   readonly #gateTask: ReturnType<typeof createGateTaskDefinition>;
+  readonly #scriptTask: ReturnType<typeof createScriptTaskDefinition>;
+  readonly #git: GitRunner | undefined;
   readonly #home: string | undefined;
   readonly #ownsPid: boolean;
   #closed = false;
@@ -236,6 +253,8 @@ export class ArgosHost {
     runTask: ReturnType<typeof createRunTaskDefinition>;
     stepTask: ReturnType<typeof createStepTaskDefinition>;
     gateTask: ReturnType<typeof createGateTaskDefinition>;
+    scriptTask: ReturnType<typeof createScriptTaskDefinition>;
+    git?: GitRunner;
     home: string | undefined;
     ownsPid: boolean;
   }) {
@@ -248,6 +267,8 @@ export class ArgosHost {
     this.#runTask = init.runTask;
     this.#stepTask = init.stepTask;
     this.#gateTask = init.gateTask;
+    this.#scriptTask = init.scriptTask;
+    this.#git = init.git;
     this.#home = init.home;
     this.#ownsPid = init.ownsPid;
   }
@@ -262,12 +283,21 @@ export class ArgosHost {
     const context = BACKGROUND_CONTEXT;
     const models = options.models ?? createStubModels();
 
-    const stepTask = createStepTaskDefinition({ executor: options.executor });
+    const stepTask = createStepTaskDefinition({
+      executor: options.executor,
+      ...(options.git === undefined ? {} : { git: options.git }),
+    });
     const gateTask = createGateTaskDefinition();
-    const runTask = createRunTaskDefinition({ stepTask, gateTask });
+    const scriptTask = createScriptTaskDefinition({
+      ...(options.git === undefined ? {} : { git: options.git }),
+    });
+    const runTask = createRunTaskDefinition({ stepTask, scriptTask, gateTask });
     const registry = createRegistry();
     registry.install(
-      defineExtension({ name: ARGOS_EXTENSION_NAME, tasks: [runTask, stepTask, gateTask] }),
+      defineExtension({
+        name: ARGOS_EXTENSION_NAME,
+        tasks: [runTask, stepTask, scriptTask, gateTask],
+      }),
     );
 
     let home: string | undefined;
@@ -320,6 +350,8 @@ export class ArgosHost {
       runTask,
       stepTask,
       gateTask,
+      scriptTask,
+      ...(options.git === undefined ? {} : { git: options.git }),
       home,
       ownsPid,
     });
@@ -380,13 +412,19 @@ export class ArgosHost {
       }
     }
     const runId = input.id ?? ulid(this.#clock.now());
+    // FR23/D9: an isolated run works in its own worktree from a freshly fetched base. The worktree
+    // is created **before** the run task exists, so a dirty base or a missing ref refuses the run
+    // with `worktree_base_dirty` / `worktree_failed` and no agent is ever launched.
+    const worktree =
+      input.worktree ??
+      (await this.#prepareWorktree(input.ir, input.cwd, runId, input.isolation));
     const record = createRunRecord({
       id: runId,
       ir: input.ir,
       inputs: input.inputs,
       cwd: input.cwd,
       now: this.#clock.now(),
-      ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
+      ...(worktree === undefined ? {} : { worktree }),
       ...(input.deadline === undefined ? {} : { deadline: input.deadline }),
     });
 
@@ -409,6 +447,35 @@ export class ArgosHost {
   /** Continue every unfinished task (FR29). Idempotent. */
   resume(): void {
     this.#harness.resume();
+  }
+
+  /**
+   * Create the run's worktree when isolation asks for one. `undefined` means "work in `cwd`"
+   * (`isolation.mode: none`, the default). Errors are the D9 codes and are thrown before the run
+   * task exists: the caller (CLI/RPC) gets `worktree_base_dirty` or `worktree_failed` and no agent
+   * is ever created.
+   */
+  async #prepareWorktree(
+    ir: PlaybookIR,
+    cwd: string,
+    runId: string,
+    override: IsolationIR | undefined,
+  ): Promise<WorktreeRecord | undefined> {
+    const isolation = override ?? ir.isolation;
+    if (isolation === undefined || isolation.mode !== "worktree") return undefined;
+    if (this.#home === undefined) {
+      throw new ArgosError(
+        "worktree_failed",
+        `playbook ${ir.id}: isolation.mode "worktree" needs an ARGOS_HOME for <home>/worktrees/<runId>; open the host with one`,
+      );
+    }
+    return createRunWorktree({
+      repo: cwd,
+      home: this.#home,
+      runId,
+      ...(isolation.base === undefined ? {} : { base: isolation.base }),
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+    });
   }
 
   /** Close the harness (and with it SQLite), then release the pid file. Idempotent. */

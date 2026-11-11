@@ -127,6 +127,52 @@ export async function flush(): Promise<void> {
   await flushMicrotasks();
 }
 
+/** Give real I/O (a spawned child, a filesystem write) a chance to land, without moving the clock. */
+export async function settleIo(ms = 20): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Wait on real time for a predicate. The durable tests stay on the fake clock; only child-process
+ * work (a real script exiting, a real kill landing) needs this.
+ */
+export async function waitForReal(
+  predicate: () => boolean | Promise<boolean>,
+  options: { readonly timeoutMs?: number; readonly intervalMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const intervalMs = options.intervalMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() > deadline) throw new Error(`waitForReal: predicate still false after ${timeoutMs} ms`);
+    await settleIo(intervalMs);
+  }
+}
+
+/**
+ * Advance the fake clock (so `sleeping` phases wake) while also giving real process I/O time on
+ * every round. Used by the script tests, where a phase spawns a real executable.
+ */
+export async function driveIo(
+  clock: FakeClock,
+  predicate: () => boolean | Promise<boolean>,
+  options: { readonly stepMs?: number; readonly maxRounds?: number } = {},
+): Promise<number> {
+  const stepMs = options.stepMs ?? 250;
+  const maxRounds = options.maxRounds ?? 80;
+  await flush();
+  for (let round = 0; round <= maxRounds; round += 1) {
+    if (await predicate()) return round;
+    if (round === maxRounds) break;
+    await clock.advance(stepMs);
+    await settleIo(5);
+  }
+  throw new Error(`driveIo: predicate still false after ${maxRounds} rounds`);
+}
+
 /**
  * Advance the fake clock in `stepMs` slices until `predicate` holds. Each slice flushes
  * microtasks, so one slice is enough for a phase to commit and the next to be scheduled.

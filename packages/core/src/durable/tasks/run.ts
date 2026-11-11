@@ -59,6 +59,7 @@ import {
 } from "../mirror.js";
 import { planAfterRun, type PlannedAfterRun } from "./after.js";
 import type { GateTaskInput, GateTaskDefinition } from "./gate.js";
+import type { ScriptTaskDefinition, ScriptTaskInput } from "./script.js";
 import type { StepTaskDefinition, StepTaskInput } from "./step.js";
 
 // ------------------------------------------------------------------ shape
@@ -335,12 +336,22 @@ function gateInputFor(record: RunRecord, gate: GateRecord): GateTaskInput {
   };
 }
 
+/**
+ * One dispatch decision: which child task kind a step needs and the input it is created with. A
+ * `script` step gets an `argos.script` child (FR22); every other non-gate step keeps the Phase 6
+ * `argos.step` executor path, so the run task never needs to know how a step does its work.
+ */
+type DispatchPlan =
+  | { readonly kind: "step"; readonly input: StepTaskInput }
+  | { readonly kind: "script"; readonly input: ScriptTaskInput };
+
 interface PlanContext {
   readonly runTaskId: TaskId;
   readonly checkpoint: RunCheckpoint;
   readonly stepTask: StepTaskDefinition;
+  readonly scriptTask: ScriptTaskDefinition;
   readonly gateTask: GateTaskDefinition;
-  readonly stepInput: (effect: Extract<Effect, { type: "dispatchStep" }>) => StepTaskInput | undefined;
+  readonly dispatch: (effect: Extract<Effect, { type: "dispatchStep" }>) => DispatchPlan | undefined;
 }
 
 type PlannedState =
@@ -387,8 +398,8 @@ async function planNext(
   for (const effect of effects) {
     switch (effect.type) {
       case "dispatchStep": {
-        const input = plan.stepInput(effect);
-        if (input === undefined) {
+        const planned = plan.dispatch(effect);
+        if (planned === undefined) {
           recorded.push({
             type: "effect_skipped",
             stepId: effect.stepId,
@@ -397,9 +408,14 @@ async function planNext(
           });
           break;
         }
-        const childId = await tx.createTask(plan.stepTask, input, {
-          ownership: { kind: "task", taskId: plan.runTaskId },
-        });
+        const childId =
+          planned.kind === "script"
+            ? await tx.createTask(plan.scriptTask, planned.input, {
+                ownership: { kind: "task", taskId: plan.runTaskId },
+              })
+            : await tx.createTask(plan.stepTask, planned.input, {
+                ownership: { kind: "task", taskId: plan.runTaskId },
+              });
         childTasks[effect.stepId] = childId;
         dispatched[String(childId)] = effect.stepId;
         waiting.add(childId);
@@ -522,7 +538,7 @@ export function renderFeedback(prompt: string, feedback: string | undefined): st
   return prompt.replace(/\{\{\s*feedback\s*\}\}/g, feedback);
 }
 
-/** Build the child task input from the frozen step definition. */
+/** Build the `argos.step` child input from the frozen step definition. */
 function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): StepTaskInput | undefined {
   const definition = stepDefinition(record, effect.stepId);
   if (definition === undefined) return undefined;
@@ -563,7 +579,47 @@ function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispat
     ...(target === undefined ? {} : { target }),
     ...(prompt === undefined ? {} : { prompt }),
     ...(feedback === undefined ? {} : { feedback }),
+    // D8: a read-only role makes the step task snapshot the tree before launch and compare after.
+    ...(definition.role?.readonly === true ? { readonly: true } : {}),
   };
+}
+
+/**
+ * Build the `argos.script` child input (FR22). `cwd` is where the executable runs (the run
+ * worktree when isolated); `scriptRoot` is where `.argos/scripts` is resolved from, so a local
+ * uncommitted helper can drive an isolated run while still working on the private checkout.
+ */
+function scriptInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): ScriptTaskInput | undefined {
+  const definition = stepDefinition(record, effect.stepId);
+  const script = definition?.script;
+  if (definition === undefined || script === undefined) return undefined;
+  return {
+    runId: record.id,
+    stepId: definition.id,
+    attempt: effect.attempt,
+    requestId: effect.requestId,
+    cwd: record.worktree?.path ?? record.cwd,
+    scriptRoot: record.cwd,
+    script: script.run,
+    env: script.env,
+    pollMs: definition.pollMs,
+    timeoutMs: stepTimeoutMs(definition, record.inputs),
+    outputs: Object.keys(definition.outputs),
+    outcomes: definition.outcomes,
+    ...(definition.role?.readonly === true ? { readonly: true } : {}),
+  };
+}
+
+/** Choose the child task kind for one dispatch effect (`script` steps never reach the executor). */
+function dispatchPlanFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): DispatchPlan | undefined {
+  const definition = stepDefinition(record, effect.stepId);
+  if (definition === undefined) return undefined;
+  if (definition.kind === "script") {
+    const input = scriptInputFor(record, effect);
+    return input === undefined ? undefined : { kind: "script", input };
+  }
+  const input = stepInputFor(record, effect);
+  return input === undefined ? undefined : { kind: "step", input };
 }
 
 /**
@@ -663,6 +719,7 @@ async function guarded<S extends RunCheckpoint>(
 
 export interface RunTaskOptions {
   readonly stepTask: StepTaskDefinition;
+  readonly scriptTask: ScriptTaskDefinition;
   readonly gateTask: GateTaskDefinition;
 }
 
@@ -729,8 +786,9 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   runTaskId: task.id,
                   checkpoint,
                   stepTask: options.stepTask,
+                  scriptTask: options.scriptTask,
                   gateTask: options.gateTask,
-                  stepInput: (effect) => stepInputFor(tick.record, effect),
+                  dispatch: (effect) => dispatchPlanFor(tick.record, effect),
                 },
                 tick.record,
                 tick.effects,
@@ -860,8 +918,9 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   runTaskId: task.id,
                   checkpoint: { ...checkpoint, settles: [], gateSettles: [] },
                   stepTask: options.stepTask,
+                  scriptTask: options.scriptTask,
                   gateTask: options.gateTask,
-                  stepInput: (effect) => stepInputFor(record, effect),
+                  dispatch: (effect) => dispatchPlanFor(record, effect),
                 },
                 record,
                 effects,

@@ -14,6 +14,11 @@
  *   A failed step is a completed task carrying an `errorCode`: task failure stays reserved for
  *   broken task code.
  *
+ * D8 read-only guard (FR23): when the step's role is `readonly`, `locate` snapshots the working
+ * tree **before** launch and `collect` compares it after the turn. Any difference fails the step
+ * with `readonly_violation`; the worktree is never cleaned up, so the damage stays inspectable.
+ * The mechanism detects, it does not prevent (see `src/git/snapshot.ts`).
+ *
  * Timeouts and retries are enforced here because the run task is parked in `waiting` on its
  * children and does not tick. `retries` counts *extra* attempts (engine semantics); each retry
  * gets a fresh `requestId` and a deterministic 1s/2s/4s… backoff. The run record still records one
@@ -27,6 +32,14 @@ import { defineTask } from "@earendil-works/pi-durable";
 import { isArgosError, type ArgosErrorCode } from "../../errors.js";
 import type { OutputDefIR, Scalar } from "../../playbook/ir.js";
 import { retryBackoffMs } from "../../engine/index.js";
+import type { GitRunner } from "../../git/exec.js";
+import {
+  describeSnapshotChange,
+  snapshotChanged,
+  takeSnapshot,
+  type GitSnapshot,
+  type SnapshotComparison,
+} from "../../git/snapshot.js";
 import {
   launchLabel,
   stepRequestId,
@@ -69,6 +82,8 @@ export interface StepTaskInput {
   readonly agentConfig?: AgentStepConfig;
   /** Targets the run already recorded as quota-exhausted (FR24). */
   readonly exhausted?: readonly ExhaustedTarget[];
+  /** D8: `role.readonly` — snapshot before launch, refuse any change after the turn. */
+  readonly readonly?: boolean;
 }
 
 export interface StepCheckpointFields {
@@ -95,6 +110,12 @@ export interface StepCheckpointFields {
   /** The polled result, carried into `collect`. */
   readonly status?: StepAgentStatus;
   readonly errorCode?: ArgosErrorCode;
+  /** D8: working-tree snapshot taken before launch (read-only steps only). */
+  readonly snapshotBefore?: GitSnapshot;
+  /** D8: what the comparison found, committed before the terminal `readonly_violation`. */
+  readonly readonlyViolation?: SnapshotComparison;
+  /** Human-readable reason for a failure; the run record only carries the stable code. */
+  readonly detail?: string;
 }
 
 /**
@@ -289,6 +310,9 @@ function retryCheckpoint(
     polls: 0,
     launchAttempted: false,
     exhausted: checkpoint.exhausted,
+    // D8: the "before" snapshot belongs to the whole read-only step, not to one attempt, so a retry
+    // must not forget it (every attempt has to leave the tree alone).
+    ...(checkpoint.snapshotBefore === undefined ? {} : { snapshotBefore: checkpoint.snapshotBefore }),
     ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
   };
 }
@@ -297,6 +321,8 @@ function retryCheckpoint(
 
 export interface StepTaskOptions {
   readonly executor: StepExecutor;
+  /** Injected git port for the D8 snapshots (tests); defaults to the `execFile` runner. */
+  readonly git?: GitRunner;
 }
 
 /** The task instance type the run task creates children from. */
@@ -304,6 +330,8 @@ export type StepTaskDefinition = ReturnType<typeof createStepTaskDefinition>;
 
 export function createStepTaskDefinition(options: StepTaskOptions) {
   const { executor } = options;
+  const snapshot = (cwd: string): Promise<GitSnapshot> =>
+    takeSnapshot(cwd, { ...(options.git === undefined ? {} : { git: options.git }) });
 
   return defineTask<StepTaskInput, StepCheckpoint, StepTaskResult>({
     name: "argos.step",
@@ -323,11 +351,26 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
     phases: {
       locate: async (task, runtime, context) => {
         const now = runtime.now();
-        const checkpoint: StepCheckpoint = {
+        let checkpoint: StepCheckpoint = {
           ...task.state.checkpoint,
           phase: "launch",
           deadlineAt: now + task.input.timeoutMs,
         };
+        // D8: the "before" snapshot must be committed before the agent exists. A read-only step in
+        // a directory that is not a git working tree cannot be verified, so it fails instead of
+        // pretending the guard ran.
+        if (task.input.readonly === true) {
+          try {
+            checkpoint = { ...checkpoint, snapshotBefore: await snapshot(task.input.cwd) };
+          } catch (error) {
+            checkpoint = {
+              ...doneCheckpoint(checkpoint, { state: "done", errorCode: "step_failed" }),
+              detail: `cannot verify a read-only step in ${task.input.cwd}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            };
+          }
+        }
         await runtime.commit(() => ({ status: "running", checkpoint }), context);
       },
 
@@ -501,6 +544,40 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           } catch (error) {
             if (runtime.signal.aborted) throw error;
             // Keep the polled result; a broken collector must not lose the attempt.
+          }
+        }
+
+        // D8: a read-only turn that changed the tree never completes. The flagged checkpoint (with
+        // the changed paths) is committed before the terminal outcome, so the evidence survives a
+        // crash between the two commits and the worktree is left exactly as the step left it.
+        if (task.input.readonly === true && collected.errorCode === undefined) {
+          try {
+            const after = await snapshot(task.input.cwd);
+            const comparison =
+              checkpoint.snapshotBefore === undefined
+                ? { changed: true, headChanged: false, files: [] }
+                : snapshotChanged(checkpoint.snapshotBefore, after);
+            if (comparison.changed) {
+              const flagged: StepCheckpoint = {
+                ...checkpoint,
+                readonlyViolation: comparison,
+                detail: `read-only step changed its working tree: ${describeSnapshotChange(comparison)}`,
+              };
+              await runtime.commit(
+                () => ({ status: "running", checkpoint: flagged }),
+                context,
+              );
+              collected = { errorCode: "readonly_violation" };
+            }
+          } catch (error) {
+            const detail = `cannot verify the read-only guard afterwards: ${
+              error instanceof Error ? error.message : String(error)
+            }`;
+            await runtime.commit(
+              () => ({ status: "running", checkpoint: { ...checkpoint, detail } }),
+              context,
+            );
+            collected = { errorCode: "step_failed" };
           }
         }
 

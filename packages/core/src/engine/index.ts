@@ -28,6 +28,12 @@ export {
   type StepStatus,
   type WorktreeRecord,
 } from "./record.js";
+export {
+  filterScriptEnv,
+  isSecretEnvName,
+  SCRIPT_ENV_BASELINE,
+  SECRET_ENV_NAME_PATTERN,
+} from "./env.js";
 export { evaluateWhen, isEmpty, matches, readCondition, readySteps, type ReadySet } from "./ready.js";
 export {
   edgeKey,

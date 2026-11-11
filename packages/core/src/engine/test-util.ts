@@ -37,6 +37,8 @@ export interface PlaybookSpec {
   readonly inputs?: PlaybookIR["inputs"];
   readonly concurrency?: number;
   readonly after?: readonly AfterIR[];
+  /** Isolation block; defaults to `{ mode: "none" }` (no worktree). */
+  readonly isolation?: PlaybookIR["isolation"];
 }
 
 export function playbook(spec: PlaybookSpec): PlaybookIR {
@@ -51,7 +53,7 @@ export function playbook(spec: PlaybookSpec): PlaybookIR {
       inputs: spec.inputs ?? {},
       outputs: {},
       ...(spec.concurrency === undefined ? {} : { concurrency: spec.concurrency }),
-      isolation: { mode: "none" as const },
+      isolation: spec.isolation ?? { mode: "none" as const },
       steps: spec.steps,
       outcomes: [],
       blocks: {},

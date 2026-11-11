@@ -204,6 +204,14 @@ export interface StepTaskResult {
   readonly feedback?: string;
   /** Quota-exhausted targets observed by this attempt (merged into the run record, FR24). */
   readonly exhausted?: readonly ExhaustedTarget[];
+  /**
+   * Script steps only (FR22): the last exit code, how many times the script ran (exit-75 loops
+   * included), and why the step failed. The run record keeps the stable `errorCode`; this is the
+   * diagnostic detail the task receipt preserves (a terminal task cannot carry a checkpoint).
+   */
+  readonly exitCode?: number;
+  readonly runs?: number;
+  readonly detail?: string;
 }
 
 /** Terminal result of one `argos.run` task, mirroring the run's final status. */

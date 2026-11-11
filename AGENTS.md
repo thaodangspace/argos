@@ -2,19 +2,21 @@
 
 Argos — durable YAML playbook engine for Paseo agents. Implementation plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_impl_argos_yaml_playbook_engine.md`.
-Current state: **Phase 6 (Paseo adapter) complete**. Phase 7 (script steps, worktree isolation,
-read-only guard) is next.
+Current state: **Phase 7 (script steps, worktree isolation, read-only guard) complete**. Phase 8
+(RPC server + CLI) is next.
 
 ## Layout
 
 | Workspace | Package | Role |
 |---|---|---|
-| `packages/core` | `argos-core` | loader, engine, durable host, RPC server, Paseo adapter |
+| `packages/core` | `argos-core` | loader, engine, durable host, git helpers, RPC server, Paseo adapter |
 | `packages/cli` | `argos-cli` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite |
 | `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel + chat tools; HTTP client, never opens SQLite |
 
 No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResolution`
 `NodeNext` (relative imports need `.js` extensions), Node `>=22.5`.
+`packages/core/src/git/` is the only directory (with `durable/tasks/script.ts`) allowed to import
+`node:child_process`, and it is exported on the `argos-core/git` subpath, never the root.
 
 ## Playbook layer (Phase 2)
 
@@ -420,6 +422,128 @@ job imports `scripts/`.
 - Local retries (timeout / `invalid_output`) create fresh request ids inside one `argos.step`
   child; the run record still shows one dispatch attempt per child (Phase 4 deviation), while the
   fake port's `create` ledger and the step checkpoint show each local attempt.
+
+## Scripts, isolation, read-only (Phase 7)
+
+`src/git/` (D9/D8), `src/engine/env.ts` (D10), `src/durable/tasks/script.ts` (FR22), and the
+`readonly` field threaded through `argos.step` (FR23). Control flow is untouched: a script step is
+dispatched by the same `dispatchStep` effect and settles through the same `stepSettled` event as an
+agent step.
+
+### `argos.script` v1
+
+Phases `prepare → run → collect` (static, like every other Argos task).
+
+```ts
+argos.script v1: "prepare" | "run" | "collect"
+  { phase, attempt, runs, deadlineAt,
+    scriptPath?, exitCode?, signal?, stdout?, stderr?, lastRunAt?, detail?, errorCode?,
+    snapshotBefore?, readonlyViolation? }
+```
+
+- The run task creates an `argos.script` child for a step whose frozen IR `kind` is `script`
+  (owned by the run task, like `argos.step`); every other non-gate step keeps the Phase 6 executor.
+  `await`/`settle` map the child result exactly like a step result, so gates, loops, and `when`
+  behave identically.
+- `prepare` resolves the executable **before** anything runs and commits its absolute path plus
+  `deadlineAt = now + timeout` (the step's `timeout`, default 30m). A read-only step takes its D8
+  snapshot here too.
+- Resolution: `<script>` must be a bare file name (no `/`, no `..`, not absolute). It is looked up
+  in `.argos/scripts/` and then `.paseo/plugins/playbooks/scripts/` of the **run cwd** (the repo
+  root) and must be an executable regular file. Resolution uses the repo root so a local,
+  uncommitted helper can drive an isolated run; *execution* happens in `cwd` = `worktree.path` when
+  isolation is on, otherwise the run cwd. A missing or non-executable script fails the step with
+  `step_failed`, naming the paths it tried.
+- `run` spawns the file with `shell: false`, the filtered env (below), and bounded (8 KiB) *tails*
+  of stdout/stderr. Exit `75` (`SCRIPT_NOT_YET`) commits `sleeping { until: now + pollMs }` (D3
+  script default 5000) and re-runs on wake with `runs + 1`; any other non-zero exit is terminal
+  (`step_failed`). A script still alive when the deadline elapses is killed and fails
+  `script_timeout`, so "exit 75 forever" is bounded by the step timeout, never by a run count.
+- `collect` commits a **terminal completed** task whose result is a `StepTaskResult`. A failing
+  script is still a completed task carrying an `errorCode` (task failure stays reserved for broken
+  task code). Success reports outcome `success` (or the step's first declared outcome) and exposes
+  the declared script outputs: `stdout`, `stderr`, `exitCode`/`exit_code`, `runs`. Any other
+  declared output name is simply absent — script outputs are never parsed as JSON.
+- Diagnostics: a terminal task cannot carry a checkpoint, so the receipt result also carries
+  `exitCode`, `runs`, `signal`, and a bounded `detail` (exit code + stderr tail, or the resolution
+  error). The run record keeps only the stable `errorCode`.
+- The child is killed on `runtime.signal` abort (run cancelled, `abortTask`, harness close) and when
+  the deadline timer fires. On POSIX it is spawned `detached` and killed by process group, so a
+  script's own children die with it; the task tracks its live child so the abort handler can kill a
+  leaked process.
+
+### Script env filter (D10)
+
+`filterScriptEnv(env, declared)` in `src/engine/env.ts` (pure, covered by the purity guard):
+
+- drop every key matching `/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i` unless the step lists it in
+  `env: [...]`;
+- always keep `PATH`, `HOME`, `LANG`, `TMPDIR`, plus `TMP`, `TEMP`, and `SystemRoot` when present
+  (the win32 basics; harmless on POSIX). Baseline names match case-insensitively, declared names
+  match exactly;
+- a declared name the parent does not define is absent, not an error;
+- output keys are sorted, so a checkpoint or log comparison is byte-stable.
+
+The same pattern is reused by `src/git/exec.ts` to redact secrets from git error messages.
+
+### Worktree isolation (D9, FR23)
+
+`createRunWorktree({ repo, home, runId, base?, git? })` → `{ path, branch, baseSha }`:
+`<ARGOS_HOME>/worktrees/<runId>` on branch `argos/<runId>`, created from `origin/<base>` **after**
+`git fetch --prune origin`. Base resolution order: `isolation.base`; `refs/remotes/origin/HEAD`;
+the branch the checkout is on when `origin/<branch>` exists; `origin/main`; `origin/master`.
+
+- A source checkout with uncommitted changes is refused with `worktree_base_dirty` **before**
+  `git worktree add`; a base that does not resolve is `worktree_failed`; every other git failure is
+  `worktree_failed` with the redacted stderr tail. An unsafe base name (a leading `-`, `..`, …) is
+  rejected before it reaches git.
+- Idempotent per run id: an existing clean worktree is returned (the restart window between
+  creation and the run task's first commit), a branch without its checkout is re-attached, and a
+  dirty worktree is refused rather than silently reused.
+- `ArgosHost.startRun` creates it when the effective isolation is `{mode:"worktree"}` — from the
+  frozen IR, or from the `isolation` override that Phase 8's `argos run --isolation` will pass —
+  stores `{path, branch, baseSha}` in `RunRecord.worktree`, and gives every agent and script child
+  the worktree as `cwd`. Refusals happen before the run task exists, so no agent is ever launched.
+  `mode: none` keeps `cwd` as given.
+- Worktrees are never removed automatically: a failed or violating step leaves its worktree for
+  inspection. `removeRunWorktree({repo, home, runId, force?})` removes the checkout and keeps the
+  branch; `listRunWorktrees({repo})` lists them.
+- `src/git/exec.ts` is the only place that starts git: `execFile("git", [args])`, never a shell,
+  never a library. `GitRunner` is injectable so tests assert the exact argv and cwd.
+  `test/git/isolation.test.ts` enforces both "no shell string" and "`node:child_process` only in
+  `src/git/**` and `durable/tasks/script.ts`".
+
+### Read-only guard (D8)
+
+`role.readonly` becomes `readonly: true` on the `argos.step`/`argos.script` input. Before launch (or
+before a script's first execution) the task takes `takeSnapshot(cwd)` — `git rev-parse HEAD` plus
+`git status --porcelain=v1 -z` — and commits it as `snapshotBefore`; `collect` takes a second
+snapshot and compares. Any difference (HEAD moved, an entry added or removed, a status code
+changed) fails the step with `readonly_violation` and drops its outputs. The changed paths are
+committed as `readonlyViolation` before the terminal outcome, and the worktree is left exactly as
+the step left it. A read-only step in a non-git directory fails with `step_failed` instead of
+pretending the guard ran; a step whose role is not read-only is not snapshotted.
+
+**Limitation (to be recorded in `docs/compat.md`, Phase 10):** the guard *detects*, it does not
+prevent. A file created and deleted inside one step leaves no trace; a new file inside an
+already-untracked directory keeps the same `?? dir/` entry because D8 pins the default untracked
+mode; `.git`-ignored paths are invisible to it. A script that deletes files later steps needed is
+outside the engine's control (spec edge case).
+
+### Tests
+
+```sh
+npx vitest run --project core src/engine/env.test.ts          # filterScriptEnv units
+npx vitest run --project core test/git                        # git port, snapshots, worktrees, argv guard
+npx vitest run --project core test/durable/scripts.test.ts    # exit 75, timeout, kill, env, resolution
+npx vitest run --project core test/durable/worktree.test.ts   # run-level isolation + refusals
+npx vitest run --project core test/durable/readonly.test.ts   # readonly_violation
+```
+
+Fixtures: `test/fixtures/scripts/` (`exit-75-twice.mjs`, `sleep-forever.mjs`, `fail.mjs`,
+`env-keys.mjs`, `write-file.mjs`) and `test/support/git.ts` (`makeTempRepo` = checkout + local bare
+origin + pushed commit + `origin/HEAD`, `installFixtureScript`, `writeScript`). Everything lives
+under `os.tmpdir()`; no network and no daemon.
 
 ## Commands (run from the repo root)
 
