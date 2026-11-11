@@ -2,7 +2,7 @@
 
 Argos — durable YAML playbook engine for Paseo agents. Implementation plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_impl_argos_yaml_playbook_engine.md`.
-Current state: **Phase 3 (pure engine)**. Phase 4 (durable host) is next.
+Current state: **Phase 4 (durable host, fake executor)**. Phase 5 (gates/after-tasks) is next.
 
 ## Layout
 
@@ -101,6 +101,121 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
   `startAfterTask` and never change `run.status`; `manual` stay `pending`.
 - Attempt history is **not capped** in the checkpoint (Phase 4/5 write the bounded history
   document, D16). Outputs are append/overwrite only: an output key is never removed.
+
+## Durable host (Phase 4)
+
+`packages/core/src/durable/` is the only place that imports `@earendil-works/*` (later also
+`src/git/`). Everything else — loader, engine, future RPC/CLI — stays free of the storage
+dependency. The public surface is the `argos-core/durable` subpath; it is deliberately **not**
+re-exported from the package root so the CLI and plugin cannot open SQLite by accident.
+
+`ArgosHost` (`host.ts`) owns one SQLite file:
+
+- `ArgosHost.open({ home?, storage?, executor, clock?, models? })` → ensures `$ARGOS_HOME` (`0700`),
+  takes `$ARGOS_HOME/serve.pid`, opens `argos.sqlite` (`0600`), installs the `argos` extension, and
+  calls `resume()`. `storage` is an injection point for tests (`MemoryStorage`); passing it skips
+  the home/pid setup.
+- **Single writer.** A pid file naming a live process refuses the open with
+  `ArgosError("storage_locked", "<serve.pid>: another argos process (pid N) owns this home")`.
+  `pid === process.pid` is also refused (a second host in one process). A dead pid (or unreadable
+  content) is stale and replaced. `close()` removes the pid file only when it still names this
+  process, and `close()` is idempotent.
+- `startRun({ ir, inputs, cwd, worktree?, deadline?, id? })` → `{ runId, taskId }`. `runId` is a
+  dependency-free ULID (monotonic within one process); `taskId` is pi-durable's numeric task id,
+  stringified at the public boundary. The run task is created **conversation-owned** by the root
+  conversation (D5) and the initial mirror is written in the same commit.
+- `resume()` / `close()` / `getRun(runId)` / `getHistory(runId)` / `getTaskRecord(taskId)` /
+  `inspect()`. `startRun` and `open` both call `resume()`, so scheduling never depends on the
+  caller.
+- `models` (D6) is a Proxy stub: `Harness.open` reads `getAuth` once (to bind it into its identity
+  wrapper), so the property returns a function that throws when **called**; everything else
+  throws on call too, and `has` reports `false` so the wrapper stays immutable. The engine never
+  asks for a model, and no `pi.generation` task may ever appear in `inspect()`.
+
+### Tasks (kind `argos.run` v1, `argos.step` v1)
+
+Checkpoints are discriminated unions of per-phase shapes (pi-durable narrows each handler with
+`Extract<S, {phase: P}>`; one interface with a union `phase` becomes `never`).
+
+```ts
+argos.run  v1: "select" | "await" | "settle" | "gate" | "done"
+  { phase, record: RunRecord,
+    childTasks: { [stepId]: TaskId },          // latest child per step
+    dispatched: { [String(taskId)]: stepId },  // every child ever created
+    awaiting: TaskId[], settles: StepSettlement[],
+    gateTasks?: { [gateId]: TaskId },          // reserved for Phase 5
+    finished?: { status, outcome?, errorCode? } }
+
+argos.step v1: "locate" | "launch" | "await" | "collect"
+  { phase, requestId, attempt, label, deadlineAt, polls,
+    agentId?, target?, launchedAt?, status?, errorCode? }
+```
+
+`select` feeds `next(record, {type:"tick"})` to the engine, creates one `argos.step` child per
+`dispatchStep` effect in the same commit as the mirror/history, then commits
+`waiting { on: childIds, policy: "allSettled" }` (phase `await`). `await` reads
+`runtime.outcomes(awaiting)` and maps each outcome to an engine `stepSettled`; the checkpoint
+carries those settlements into `settle`, which applies them through `next()` (the reducer decides
+the next ready set, transitions, loops, and the run outcome) and creates/dispatches whatever the
+reducer asks for. `gate` is Phase 4-minimal: with a pending gate it sleeps on the D7 2 s poll and
+re-checks; Phase 5 adds `argos.gate` and decisions. `done` commits the terminal outcome
+(`completed` → completed, `failed` → failed, `cancelled` → aborted).
+
+`argos.step` calls the injected `StepExecutor` (`context.ts`):
+
+1. `locate` commits `{ requestId, label, attempt, deadlineAt }` **before** any executor call.
+2. `launch` calls `launch()` and commits `agentId` immediately (the reconcile point).
+   `launch` must adopt by `requestId` (`argos:<runId>:<stepId>:<attempt>`) and never create twice.
+3. `await` calls `status()` and parks in `sleeping { until: now + pollMs }` while running
+   (D3 step default 3000). The first status call happens on entry, then on every wake.
+4. `collect` optionally calls `collect()`, normalizes outputs to scalars (`invalid_output` on a
+   non-scalar), and commits a **terminal completed** task whose result is
+   `{ stepId, attempt, requestId, outcome?, outputs?, errorCode?, agentId?, target?, usage? }`.
+   A failed step is a completed task with an `errorCode`; task failure is reserved for broken
+   task code.
+
+Errors are explicit: `startAfterTask` and `decisionRejected` effects are logged as
+`effect_skipped` history events (Phase 5 implements them); `scheduleWake` narrows the next poll;
+a phase that throws commits a cancelled, mirrored run plus a `task_error` history event and a
+failed task outcome, so a run is never abandoned without a terminal state.
+
+### Documents (D4)
+
+| Kind | Key | Content |
+|---|---|---|
+| `argos.run` | `runId` | `{ taskId, record }` — the complete mirrored `RunRecord` |
+| `argos.history` | `runId` | `{ events: [{ at, seq, type, stepId, attempt, detail }] }`, capped at 500 |
+
+Both are **session-scoped document families** written inside the same `runtime.commit()` as the
+task checkpoint, so a reader never sees a state older than the engine (FR13). The history is
+append-only and drops the oldest events past `HISTORY_LIMIT = 500` (D16). Chord stores no document
+change when the value is identical, so a commit that only advances the phase still writes the same
+mirror without a new document revision — this is expected, not a missing write.
+
+### Retries and timeouts (documented deviation)
+
+The run task is parked in `waiting` on its children and does not tick, so per-step `timeout` and
+`retries` are enforced inside `argos.step`: a poll after `deadlineAt` either re-launches with a
+fresh attempt number/requestId after a deterministic 1s/2s/4s… backoff, or collects
+`step_timeout`. The `RunRecord` records one dispatch attempt per child task; the extra local
+attempts are visible in the step task's checkpoint/history. Moving retry scheduling back into the
+engine is Phase 5/6 work once parked runs can be woken for `notBefore`.
+
+### Tests
+
+```sh
+npm test                                        # all workspaces + durable suite
+npm run typecheck
+npx vitest run --project core packages/core/test/durable   # just the durable suite
+```
+
+Fixtures: `test/fakes/clock.ts` (fake `now()`/`setTimer()` + `advance()` that fires due timers and
+flushes queued work) and `test/fakes/executor.ts` (agents keyed by `requestId`, manual completion,
+blockable launches, creation counts per step). The suite covers: home/db modes and pid single-writer
+(stale pid replacement, `storage_locked`), mirror-vs-checkpoint equality for every record-changing
+commit, the D6 generation/model guard, checkpoint JSON round-trip byte-identity, a diamond that
+closes mid-step and reopens the same SQLite file with exactly one agent per step, a crash inside
+`launch` that re-enters `launch` and adopts the same agent, and timeout + one retry.
 
 ## Commands (run from the repo root)
 

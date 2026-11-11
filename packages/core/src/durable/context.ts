@@ -1,0 +1,155 @@
+/**
+ * The durable host's ports and shared value types.
+ *
+ * `StepExecutor` is the whole seam between the durable task layer and whatever actually runs a
+ * step (the fake in Phase 4, the Paseo adapter in Phase 6, scripts in Phase 7). The tasks never
+ * import a client, a process, or a clock: everything comes through these interfaces, which is what
+ * keeps the durability tests deterministic and the engine free of I/O.
+ */
+
+import type { ArgosErrorCode } from "../errors.js";
+import type { Scalar } from "../playbook/ir.js";
+
+// ------------------------------------------------------------------ clock
+
+/**
+ * The host clock. `now()` is used for every durable decision (timeouts, poll deadlines, event
+ * times); `setTimer` arms the pi-durable scheduler. Tests inject a fake implementation and
+ * advance it explicitly instead of sleeping.
+ */
+export interface Clock {
+  now(): number;
+  setTimer?(
+    callback: () => void,
+    delayMs: number,
+    options: { readonly background: boolean },
+  ): (() => void) | undefined;
+}
+
+/** The production clock: wall time plus `setTimeout`, exactly pi-durable's default. */
+export const systemClock: Clock = {
+  now: () => Date.now(),
+};
+
+// ------------------------------------------------------------------ ids (D14)
+
+/** `argos:<runId>:<stepId>:<attempt>` — stable across restarts, the launch idempotency key. */
+export function stepRequestId(runId: string, stepId: string, attempt: number): string {
+  return `argos:${runId}:${stepId}:${attempt}`;
+}
+
+/** The Paseo label set carried by every agent launch (Phase 6 reads it for reconciliation). */
+export function launchLabel(runId: string, stepId: string, attempt: number): string {
+  return `argos/run=${runId},argos/step=${stepId},argos/attempt=${attempt}`;
+}
+
+// ------------------------------------------------------------------ executor port
+
+/** Everything the executor needs to create or adopt one agent launch. */
+export interface LaunchInput {
+  /** Idempotency key: `argos:<runId>:<stepId>:<attempt>`. */
+  readonly requestId: string;
+  /** `argos/run=…,argos/step=…,argos/attempt=…` — the reconciliation label (Phase 6). */
+  readonly label: string;
+  readonly runId: string;
+  readonly stepId: string;
+  readonly attempt: number;
+  /** Working directory: the run worktree when isolation is on, otherwise the run cwd. */
+  readonly cwd: string;
+  /** `provider/model` when the step resolved an agent target. */
+  readonly target?: string;
+  readonly prompt?: string;
+  /** Outcome names declared by the step; an executor may compile them into a schema. */
+  readonly outcomes: readonly string[];
+  /** Output names declared by the step. */
+  readonly outputs: readonly string[];
+}
+
+/** The adopted or created agent. */
+export interface AgentLaunch {
+  readonly agentId: string;
+  readonly target?: string;
+}
+
+/** Poll input: identify the agent that `launch` returned. */
+export interface AgentStatusInput {
+  readonly requestId: string;
+  readonly agentId: string;
+  readonly label: string;
+  readonly runId: string;
+  readonly stepId: string;
+  readonly attempt: number;
+  readonly cwd: string;
+}
+
+/**
+ * What a status poll reports. `running` keeps the step task asleep for another `pollMs`; `done`
+ * carries the engine-shaped result of the attempt. An `errorCode` on a `done` status is a step
+ * failure, not a task failure: the run records it through `stepSettled`.
+ */
+export type StepAgentStatus =
+  | { readonly state: "running" }
+  | {
+      readonly state: "done";
+      readonly outcome?: string;
+      readonly outputs?: Readonly<Record<string, Scalar>>;
+      readonly errorCode?: ArgosErrorCode;
+      readonly usage?: Readonly<Record<string, number>>;
+      readonly feedback?: string;
+    };
+
+/** Input of the optional final collection pass (structured-output parsing lives here in Phase 6). */
+export interface CollectInput extends AgentStatusInput {
+  readonly status: StepAgentStatus;
+}
+
+/** The refined result of a finished attempt. Collect may override the polled status. */
+export interface CollectResult {
+  readonly outcome?: string;
+  readonly outputs?: Readonly<Record<string, Scalar>>;
+  readonly errorCode?: ArgosErrorCode;
+  readonly usage?: Readonly<Record<string, number>>;
+  readonly feedback?: string;
+}
+
+/**
+ * Launch, poll, and optionally collect one agent step.
+ *
+ * `launch` is **idempotent by `requestId`**: it must adopt an existing agent carrying the label
+ * instead of creating a second one, because a crash can re-run the launch phase. `status` is a
+ * pure read. `collect` is optional; when present it runs once per finished attempt and may
+ * validate structured output.
+ */
+export interface StepExecutor {
+  launch(input: LaunchInput): Promise<AgentLaunch>;
+  status(input: AgentStatusInput): Promise<StepAgentStatus>;
+  collect?(input: CollectInput): Promise<CollectResult>;
+}
+
+// ------------------------------------------------------------------ task results
+
+/**
+ * The `argos.step` task result consumed by `argos.run`. A step that fails is still a *completed*
+ * task carrying an `errorCode`: task failure is reserved for a broken task, while a failed step is
+ * an ordinary engine transition (`step_failed`, `step_timeout`, …).
+ */
+export interface StepTaskResult {
+  readonly stepId: string;
+  readonly attempt: number;
+  readonly requestId: string;
+  readonly outcome?: string;
+  readonly outputs?: Readonly<Record<string, Scalar>>;
+  readonly errorCode?: ArgosErrorCode;
+  readonly agentId?: string;
+  readonly target?: string;
+  readonly usage?: Readonly<Record<string, number>>;
+  readonly feedback?: string;
+}
+
+/** Terminal result of one `argos.run` task, mirroring the run's final status. */
+export interface RunTaskResult {
+  readonly runId: string;
+  readonly status: "completed" | "failed" | "cancelled";
+  readonly outcome?: string;
+  readonly errorCode?: ArgosErrorCode;
+}
