@@ -1,0 +1,21 @@
+title: Alias surface
+defaults:
+  agent:
+    provider: claude
+    model: sonnet
+steps:
+  - id: review
+    prompt: "Review the change"
+    poll_ms: 25
+  - id: approve
+    needs: [review]
+    gate: "Ship it?"
+    choices: [approve, reject]
+  - id: publish
+    needs: [approve]
+    script: publish.mjs
+    poll: "1s"
+  - id: delegate
+    needs: [publish]
+    playbook:
+      name: child

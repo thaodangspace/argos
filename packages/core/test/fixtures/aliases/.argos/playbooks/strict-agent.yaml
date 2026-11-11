@@ -1,0 +1,8 @@
+title: Strict agent block
+steps:
+  - id: work
+    prompt: "Work"
+    agent:
+      provider: claude
+      model: sonnet
+      modle: opus

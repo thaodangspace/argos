@@ -1,0 +1,10 @@
+title: After with use
+steps:
+  - id: main
+    prompt: "Main"
+after:
+  - id: cleanup
+    trigger: manual
+    steps:
+      - id: reuse
+        use: child

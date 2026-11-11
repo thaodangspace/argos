@@ -88,9 +88,14 @@ async function buildDependencies(home: string, io: CliIo): Promise<Dependencies>
   if (process.env["ARGOS_FAKE_PASEO"] === "1") {
     io.stderr("[argos] ARGOS_FAKE_PASEO=1: using the deterministic test-only executor\n");
     const catalog = ModelCatalog.fromSnapshot(fakeProviderCatalog());
+    // File-backed by default so a restarted `argos serve` adopts the fake agents it created in
+    // its previous lifetime (Phase 10 D17). `ARGOS_FAKE_PASEO_DIR` moves the state elsewhere.
+    const fakeDir = process.env["ARGOS_FAKE_PASEO_DIR"];
     const host = await openHost({
       home,
-      executor: createFakeStepExecutor(),
+      executor: createFakeStepExecutor({
+        statePath: fakeDir === undefined ? home : resolve(fakeDir),
+      }),
       modelCatalog: catalog,
     });
     return {

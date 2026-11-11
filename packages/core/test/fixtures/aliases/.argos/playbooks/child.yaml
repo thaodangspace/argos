@@ -1,0 +1,9 @@
+title: Child
+steps:
+  - id: work
+    prompt: "Do the child work"
+    poll_ms: 30
+    agent:
+      provider: claude
+      model: sonnet
+      mode_id: plan

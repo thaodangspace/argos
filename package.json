@@ -14,6 +14,7 @@
     "build": "tsc -b",
     "postbuild": "node packages/cli/scripts/make-bin-executable.mjs",
     "test": "npm run build && vitest run",
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
     "typecheck": "tsc -b && npm run typecheck:tests --workspaces --if-present"
   },
   "devDependencies": {
