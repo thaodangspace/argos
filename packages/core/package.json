@@ -1,0 +1,32 @@
+{
+  "name": "argos-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Argos playbook loader, engine, RPC server, and Paseo adapter",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./paths": {
+      "types": "./dist/paths.d.ts",
+      "import": "./dist/paths.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "typecheck": "tsc -b",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@getpaseo/client": "0.15.4"
+  }
+}

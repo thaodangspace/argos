@@ -1,0 +1,23 @@
+{
+  "name": "argos",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Durable YAML playbook engine for Paseo agents",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc -b && npm run typecheck:tests --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

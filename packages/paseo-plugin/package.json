@@ -1,0 +1,27 @@
+{
+  "name": "argos-paseo-plugin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Paseo plugin surface for Argos runs and gates",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "paseo-plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "typecheck": "tsc -b",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.15.4",
+    "@getpaseo/plugin": "0.15.4"
+  }
+}

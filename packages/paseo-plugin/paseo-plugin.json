@@ -1,0 +1,9 @@
+{
+  "id": "argos",
+  "name": "Argos",
+  "version": "0.0.0",
+  "description": "List Argos runs, follow step status, and decide gates from Paseo.",
+  "requirements": {
+    "paseo": ">=0.15.3"
+  }
+}
