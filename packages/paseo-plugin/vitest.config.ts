@@ -4,6 +4,6 @@ export default defineConfig({
   test: {
     name: "paseo-plugin",
     environment: "node",
-    include: ["src/**/*.test.ts", "*.test.ts"],
+    include: ["src/**/*.test.ts", "test/**/*.test.ts"],
   },
 });

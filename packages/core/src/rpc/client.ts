@@ -71,6 +71,15 @@ export interface RpcClientOptions {
   readonly timeoutMs?: number;
 }
 
+/**
+ * Build a client for `argos serve`. The CLI, the Paseo plugin, and tests all go through this
+ * factory instead of `new RpcClient(...)` so the `ARGOS_PORT` / `$ARGOS_HOME/token` defaults (D2,
+ * FR27) live in exactly one place.
+ */
+export function createRpcClient(options: RpcClientOptions = {}): RpcClient {
+  return new RpcClient(options);
+}
+
 /** The token file's content, or `undefined` when it does not exist yet. */
 export function readTokenFile(home: string = argosHome()): string | undefined {
   try {

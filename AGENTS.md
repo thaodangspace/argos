@@ -2,7 +2,7 @@
 
 Argos — durable YAML playbook engine for Paseo agents. Implementation plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_impl_argos_yaml_playbook_engine.md`.
-Current state: **Phase 8 (RPC server + CLI) complete**. Phase 9 (Paseo plugin) is next.
+Current state: **Phase 9 (Paseo plugin) complete**. Phase 10 (durability E2E + docs) is next.
 
 ## Layout
 
@@ -667,6 +667,80 @@ preload denies `node:sqlite`, `@earendil-works/*`, and any `argos.sqlite` open i
 child; the test also asserts a second `argos serve` on the same home fails `storage_locked` naming
 `serve.pid`, and that `argos doctor` reports the live server.
 
+## Paseo plugin (Phase 9)
+
+`packages/paseo-plugin` is a **thin HTTP client** of `argos serve` (FR28, FR29): a sidebar row, a
+screen that lists runs/steps/gates, and four chat tools. It never opens SQLite and keeps no run
+state, which is why a plugin reload cannot kill a run (D2: the engine lives in `argos serve`).
+
+| File | Role |
+|---|---|
+| `paseo-plugin.json` | manifest: `id: argos`, `requirements.paseo: ">=0.15.3"` (validated by `test/manifest.test.ts`) |
+| `index.server.ts` | default-exports `contribute(server)`; adds `agent.open.before`; teardown removes the hook and closes the HTTP client |
+| `index.client.tsx` | default-exports `contribute(client)`; `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), theme tokens from props |
+| `src/rpc-client.ts` | `createArgosClient()` — the only connection code; `PluginRpcError`, SSE parser/opener |
+| `src/panel.ts` | pure panel model, `loadPanel`, `decideGateOnce`, `subscribeRuns`, `runView`/`panelView` |
+| `src/tools.ts` | the four `defineAgentTool` definitions + `appendArgosTools` (dedupe by name) |
+| `src/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` (the server wiring) |
+| `src/index.ts` | `PLUGIN_ID`, `REQUIRED_PASEO_VERSION` (cross-checked with the manifest) |
+
+**Tool names (FR28, exact).** `argos_start_playbook` (`POST /runs`; `playbook_invalid`,
+`invalid_request`, `playbook_cycle`, `playbook_missing`, and `worktree_base_dirty` all render as
+`{isError:true, structuredContent:{error:{code:"playbook_invalid"}}}`), `argos_run_status`
+(`GET /runs/:id`; step titles/statuses/error codes + gate choices, never prompts),
+`argos_decide_gate` (`POST /runs/:id/gates/:gateId`, preserves `gate_already_decided`),
+`argos_cancel_run` (`POST /runs/:id/cancel`, preserves `run_terminal`). Tools never throw: any
+failure becomes a stable `{error:{code,message}}`. Inputs reuse the contract schemas
+(`StartRunRequestSchema`, `DecideGateRequestSchema`) plus `runId`/`gateId`; a start call generates a
+`clientRequestId` (D15) unless the caller supplies one.
+
+**Server contribution.** `createArgosContribution({createClient?})` is the test seam; the default
+export is the same factory with no options. One call creates one runtime (client + tools), registers
+exactly one `agent.open.before` hook that returns
+`{...request, tools: appendArgosTools(request.tools, runtime.tools)}`, and returns an idempotent
+teardown that removes that hook and calls `client.close()` (which aborts every event stream). No
+settings screen: `ARGOS_PORT`/`ARGOS_HOME` are read once per client (D2).
+
+**Panel model (`src/panel.ts`, no React).** `PanelModel = {runs, gates (pending only), inFlight,
+busyRuns, loading, connected, error, loadedAt}`; `loadPanel` sorts by `updatedAt` desc;
+`decideGateOnce(model, action, {client, onModel})` publishes the in-flight model first (buttons
+disable), performs **exactly one** `decideGate`, refreshes through `GET /runs`, returns
+`decided | already_decided | failed | duplicate` (an action for a gate already in `inFlight` calls
+nothing; `gate_already_decided` refreshes and never retries); `subscribeRuns({openEvents, onSnapshot,
+onRun, onStatus, onReconnect, reconnect})` consumes `GET /events` (snapshot = full list, run = one
+entry) and reconnects with capped exponential backoff (1 s doubling to 8 s), calling `onReconnect`
+so the store re-fetches everything. `runView`/`panelView` map statuses to labels and semantic tones
+(`neutral|accent|success|warning|danger`); `index.client.tsx` maps tones to `theme.colors`.
+
+**Reload behaviour (FR29).** The plugin holds no durable state: teardown closes only HTTP, the run
+continues in `argos serve`, and a new instance reconnects and sees the terminal status. The test
+proves it in-process: a real `ArgosHost` (temp home, real SQLite) + `createRpcServer` + a
+release-blocked fake executor; the panel sees `running`, the plugin is torn down, the run finishes,
+and a second plugin instance sees `completed` with one launch per step.
+
+**Import-graph rule (enforced by `test/import-graph.test.ts`).** No file under
+`packages/paseo-plugin/src/` or either `index.*` entry may import `argos-core/durable`,
+`argos-core/git`, `argos-core/paseo`, `argos-core/engine`, `argos-core/playbook`,
+`argos-core/rpc/server`, the `argos-core` root, `@earendil-works/*`, `node:sqlite`, `node:fs`, or
+`node:child_process`. The only `argos-core` subpath is `argos-core/rpc`; other imports are limited to
+`@getpaseo/*`, `react`, and `zod`. `argos-core` is an exact workspace dependency (`0.0.0`);
+`react`/`@types/react` are exact dev dependencies for the `.tsx` typecheck.
+
+Typecheck is split so the JSX never leaks into the server graph: `tsconfig.json` (builds `src/` to
+`dist/`), `tsconfig.test.json` (tests), `tsconfig.entry.json` (`index.server.ts`, node types),
+`tsconfig.client.json` (`index.client.tsx`, `jsx: react-jsx` + DOM lib). All four run under
+`npm run typecheck`.
+
+```sh
+npx vitest run --project paseo-plugin                              # all plugin tests
+npx vitest run --project paseo-plugin test/manifest.test.ts        # manifest schema + entry
+npx vitest run --project paseo-plugin test/contribute.test.ts      # hook, dedupe, teardown
+npx vitest run --project paseo-plugin test/panel.test.ts           # decide-once, SSE reconnect
+npx vitest run --project paseo-plugin test/tools.test.ts           # tool names + error shape
+npx vitest run --project paseo-plugin test/reload.test.ts          # run survives a plugin reload
+npx vitest run --project paseo-plugin test/import-graph.test.ts    # no storage/git/SQLite import
+```
+
 ## Commands (run from the repo root)
 
 ```sh
@@ -696,10 +770,12 @@ the durability suite green.
 | `vitest` | `5.1.0` | root dev | test runner |
 | `@types/node` | `26.6.6` | root dev | Node types |
 | `yaml` | `2.9.1` | `packages/core` | playbook parser |
-| `zod` | `4.6.7` | `packages/core` | schema validation (also the future RPC contract) |
+| `zod` | `4.6.7` | `packages/core`, `packages/paseo-plugin` | playbook schema, RPC contract, and tool inputs |
+| `react` | `19.3.0` | `packages/paseo-plugin` dev | the `.tsx` client entry; matches the SDK peer range |
+| `@types/react` | `19.3.0` | `packages/paseo-plugin` dev | types for the same JSX |
 
-`@getpaseo/plugin` peer-depends on React `>=19.1.0 <20`; npm installs the peer
-(`react@19.3.0` in the lock file) and it is not a direct dependency.
+`@getpaseo/plugin` peer-depends on React `>=19.1.0 <20`; `react@19.3.0` is installed (the peer and
+the plugin workspace's pinned dev dependency are the same version).
 
 ## Environment
 

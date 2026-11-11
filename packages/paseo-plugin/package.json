@@ -12,16 +12,25 @@
   },
   "files": [
     "dist",
+    "src",
+    "index.server.ts",
+    "index.client.tsx",
     "paseo-plugin.json"
   ],
   "scripts": {
     "build": "tsc -b",
     "test": "vitest run",
     "typecheck": "tsc -b",
-    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.entry.json && tsc --noEmit -p tsconfig.client.json"
   },
   "dependencies": {
     "@getpaseo/client": "0.15.4",
-    "@getpaseo/plugin": "0.15.4"
+    "@getpaseo/plugin": "0.15.4",
+    "argos-core": "0.0.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "react": "19.3.0"
   }
 }
