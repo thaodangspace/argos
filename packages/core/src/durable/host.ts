@@ -35,20 +35,32 @@ import type { PlaybookIR, Scalar } from "../playbook/ir.js";
 import { argosHome, dbPath, ensureHome, pidPath } from "../paths.js";
 import {
   createRunRecord,
+  decideGate,
+  isTerminalRunStatus,
+  type GateRecord,
   type RunRecord,
   type WorktreeRecord,
 } from "../engine/index.js";
 import type { Clock, StepExecutor } from "./context.js";
 import { systemClock } from "./context.js";
 import {
+  GateDocFamily,
   HistoryDocFamily,
   RunDocFamily,
+  appendRunHistory,
+  gateKey,
+  toGateDoc,
   toRunDoc,
+  writeGateDecision,
   writeRunState,
+  type GateDoc,
   type HistoryDocValue,
   type RunDoc,
+  type RunDocValue,
 } from "./mirror.js";
-import { createRunTaskDefinition } from "./tasks/run.js";
+import { planAfterRun } from "./tasks/after.js";
+import { createGateTaskDefinition } from "./tasks/gate.js";
+import { createAfterRunTask, createRunTaskDefinition, type RunCheckpoint } from "./tasks/run.js";
 import { createStepTaskDefinition } from "./tasks/step.js";
 import { ulid } from "./ulid.js";
 
@@ -168,6 +180,31 @@ export interface StartedRun {
   readonly taskId: string;
 }
 
+/** What `decideGate` wrote; idempotent by `gateId` (the first writer wins). */
+export interface GateDecisionReceipt {
+  readonly runId: string;
+  readonly gateId: string;
+  readonly decision: string;
+  readonly comment?: string;
+  readonly decidedBy?: string;
+  readonly decidedVia?: string;
+  readonly decidedAt: number;
+}
+
+export interface DecideGateOptions {
+  readonly comment?: string;
+  readonly decidedBy?: string;
+  readonly decidedVia?: string;
+}
+
+/** Result of `startAfterTask` (FR11). `started: false` means it was already started/settled. */
+export interface StartedAfterTask {
+  readonly runId: string;
+  readonly afterId: string;
+  readonly started: boolean;
+  readonly taskId?: string;
+}
+
 export class ArgosHost {
   readonly #harness: Harness;
   readonly #context: Context;
@@ -176,6 +213,7 @@ export class ArgosHost {
   readonly #models: Models;
   readonly #runTask: ReturnType<typeof createRunTaskDefinition>;
   readonly #stepTask: ReturnType<typeof createStepTaskDefinition>;
+  readonly #gateTask: ReturnType<typeof createGateTaskDefinition>;
   readonly #home: string | undefined;
   readonly #ownsPid: boolean;
   #closed = false;
@@ -188,6 +226,7 @@ export class ArgosHost {
     models: Models;
     runTask: ReturnType<typeof createRunTaskDefinition>;
     stepTask: ReturnType<typeof createStepTaskDefinition>;
+    gateTask: ReturnType<typeof createGateTaskDefinition>;
     home: string | undefined;
     ownsPid: boolean;
   }) {
@@ -198,6 +237,7 @@ export class ArgosHost {
     this.#models = init.models;
     this.#runTask = init.runTask;
     this.#stepTask = init.stepTask;
+    this.#gateTask = init.gateTask;
     this.#home = init.home;
     this.#ownsPid = init.ownsPid;
   }
@@ -213,9 +253,12 @@ export class ArgosHost {
     const models = options.models ?? createStubModels();
 
     const stepTask = createStepTaskDefinition({ executor: options.executor });
-    const runTask = createRunTaskDefinition({ stepTask });
+    const gateTask = createGateTaskDefinition();
+    const runTask = createRunTaskDefinition({ stepTask, gateTask });
     const registry = createRegistry();
-    registry.install(defineExtension({ name: ARGOS_EXTENSION_NAME, tasks: [runTask, stepTask] }));
+    registry.install(
+      defineExtension({ name: ARGOS_EXTENSION_NAME, tasks: [runTask, stepTask, gateTask] }),
+    );
 
     let home: string | undefined;
     let ownsPid = false;
@@ -265,6 +308,7 @@ export class ArgosHost {
       models,
       runTask,
       stepTask,
+      gateTask,
       home,
       ownsPid,
     });
@@ -356,6 +400,152 @@ export class ArgosHost {
   async getRun(runId: string): Promise<RunDoc | undefined> {
     const value = await this.#harness.snapshot(RunDocFamily, runId, this.#context);
     return value === undefined ? undefined : toRunDoc(value);
+  }
+
+  /** The decision document of one gate, or `undefined` when the gate was never opened. */
+  async getGate(runId: string, gateId: string): Promise<GateDoc | undefined> {
+    const value = await this.#harness.snapshot(
+      GateDocFamily,
+      gateKey(runId, gateId),
+      this.#context,
+    );
+    return value === undefined ? undefined : toGateDoc(value);
+  }
+
+  /**
+   * Decide one gate (FR19, FR20). The document read and the decision write happen inside **one**
+   * commit, so the first writer wins: a second decision fails with `gate_already_decided` naming
+   * the winning decision, an unknown gate or an out-of-choice decision fails with `gate_unknown`,
+   * and a finished run fails with `run_terminal`. The run task applies the decision through the
+   * engine reducer as soon as its `argos.gate` child reads it (a 2 s poll, D7).
+   */
+  async decideGate(
+    runId: string,
+    gateId: string,
+    decision: string,
+    options: DecideGateOptions = {},
+  ): Promise<GateDecisionReceipt> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const runDoc = await this.#harness.snapshot(RunDocFamily, runId, this.#context);
+    if (runDoc === undefined) {
+      throw new ArgosError("gate_unknown", `unknown run "${runId}": gate ${gateId} cannot be decided`);
+    }
+    const runTaskId = Number(runDoc.taskId);
+    const decidedAt = this.#clock.now();
+    const receipt: GateDecisionReceipt = {
+      runId,
+      gateId,
+      decision,
+      decidedAt,
+      ...(options.comment === undefined ? {} : { comment: options.comment }),
+      ...(options.decidedBy === undefined ? {} : { decidedBy: options.decidedBy }),
+      ...(options.decidedVia === undefined ? {} : { decidedVia: options.decidedVia }),
+    };
+
+    await this.#harness.commit(async (tx) => {
+      // Re-read the live checkpoint inside the commit: it is fresher than the mirror when the run
+      // task is still working (the mirror is written in the same commit, so they never diverge).
+      const task = Number.isInteger(runTaskId)
+        ? await tx.task(runTaskId as TaskId)
+        : undefined;
+      const state = task?.state;
+      const record =
+        state !== undefined && "checkpoint" in state && state.checkpoint !== undefined
+          ? (state.checkpoint as unknown as RunCheckpoint).record
+          : (runDoc.record as unknown as RunRecord);
+      const plan = decideGate(record, {
+        gateId,
+        decision,
+        decidedAt,
+        ...(options.comment === undefined ? {} : { comment: options.comment }),
+        ...(options.decidedBy === undefined ? {} : { decidedBy: options.decidedBy }),
+        ...(options.decidedVia === undefined ? {} : { decidedVia: options.decidedVia }),
+      });
+      if (plan.rejection !== undefined) {
+        throw new ArgosError(plan.rejection.code, plan.rejection.message);
+      }
+      const gate = plan.gate as GateRecord;
+      const written = await writeGateDecision(tx, runId, gate, {
+        decision,
+        decidedAt,
+        ...(options.comment === undefined ? {} : { comment: options.comment }),
+        ...(options.decidedBy === undefined ? {} : { decidedBy: options.decidedBy }),
+        ...(options.decidedVia === undefined ? {} : { decidedVia: options.decidedVia }),
+      });
+      if (!written.written) {
+        throw new ArgosError(
+          "gate_already_decided",
+          `gate ${gateId} was already decided "${written.decision ?? "unknown"}" at ${written.decidedAt ?? 0}`,
+        );
+      }
+    }, this.#context);
+
+    this.#harness.resume();
+    return receipt;
+  }
+
+  /**
+   * Start a `manual` after-task (FR11). The run must have reached a terminal status, the entry
+   * must exist, and it starts at most once: an entry that is already running/settled returns
+   * `started: false`. The child is conversation-owned (pi-durable refuses a child of a terminal
+   * owner) and carries the parent link, so it reports its own completion into the parent mirror's
+   * `after[id]` state.
+   */
+  async startAfterTask(runId: string, afterId: string): Promise<StartedAfterTask> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const runDoc = await this.#harness.snapshot(RunDocFamily, runId, this.#context);
+    if (runDoc === undefined) {
+      throw new ArgosError("playbook_missing", `unknown run "${runId}": no after-task ${afterId}`);
+    }
+    const record = runDoc.record as unknown as RunRecord;
+    const after = record.ir.after.find((candidate) => candidate.id === afterId);
+    if (after === undefined) {
+      throw new ArgosError(
+        "playbook_missing",
+        `run ${runId}: after-task "${afterId}" is not part of playbook ${record.playbookId}`,
+      );
+    }
+    if (!isTerminalRunStatus(record.status)) {
+      throw new ArgosError(
+        "run_terminal",
+        `run ${runId} is ${record.status}; after-tasks start once the main graph is terminal`,
+      );
+    }
+    const state = record.after[afterId];
+    if (state === undefined || state.status !== "pending") {
+      return { runId, afterId, started: false };
+    }
+
+    const now = this.#clock.now();
+    const planned = planAfterRun(record, after, now);
+    const root = await this.#harness.root(this.#context);
+    const taskId = await this.#harness.commit(async (tx) => {
+      const doc = await tx.doc(RunDocFamily, runId, {
+        taskId: runDoc.taskId,
+        record: runDoc.record,
+      });
+      const current = doc.record as unknown as RunRecord;
+      const entry = current.after[afterId];
+      if (entry === undefined || entry.status !== "pending") return undefined;
+      const patched: RunRecord = {
+        ...current,
+        after: { ...current.after, [afterId]: { status: "running", startedAt: now } },
+        updatedAt: Math.max(current.updatedAt, now),
+        seq: current.seq + 1,
+      };
+      doc.record = patched as unknown as RunDocValue["record"];
+      const id = await createAfterRunTask(tx, this.#runTask, planned, {
+        ownership: { kind: "conversation" },
+        conversationId: root.id,
+        history: { type: "run_started", detail: `${runId}/${afterId}` },
+      });
+      await appendRunHistory(tx, runId, patched, { type: "after_start", detail: afterId });
+      return id;
+    }, this.#context);
+
+    this.#harness.resume();
+    if (taskId === undefined) return { runId, afterId, started: false };
+    return { runId, afterId, started: true, taskId: String(taskId) };
   }
 
   /** The bounded history document of one run. */

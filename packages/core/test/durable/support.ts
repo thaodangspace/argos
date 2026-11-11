@@ -59,6 +59,64 @@ export function singleStepPlaybook(options: {
   });
 }
 
+/** `draft → review(gate)`: the gate step and its `revise` goto exercise a decision plus feedback. */
+export function gatedPlaybook(): PlaybookIR {
+  return playbook({
+    id: "gated",
+    steps: [
+      step({ id: "draft", prompt: "Draft the change.\nFeedback so far: {{ feedback }}" }),
+      step({
+        id: "review",
+        kind: "gate",
+        needs: ["draft"],
+        outcomes: ["approve", "revise"],
+        gate: {
+          question: "Ship it?",
+          choices: {
+            approve: { label: "Approve", comment: "optional" },
+            revise: { label: "Revise", comment: "required" },
+          },
+        },
+        on: {
+          approve: { kind: "end", outcome: "approved" },
+          revise: { kind: "goto", target: "draft" },
+        },
+      }),
+    ],
+  });
+}
+
+/** `fix → review`, where `changes` goes back to `fix` at most once (`max_loops: 1`). */
+export function loopPlaybook(): PlaybookIR {
+  return playbook({
+    id: "loopy",
+    steps: [
+      step({ id: "fix", prompt: "Fix it.\nReviewer feedback: {{ feedback }}" }),
+      step({
+        id: "review",
+        needs: ["fix"],
+        outcomes: ["changes", "approve"],
+        on: {
+          changes: { kind: "goto", target: "fix", maxLoops: 1 },
+          approve: { kind: "end", outcome: "approved" },
+        },
+      }),
+    ],
+  });
+}
+
+/** One main step plus one `auto` and one `manual` after-task (FR11). */
+export function afterPlaybook(): PlaybookIR {
+  return playbook({
+    id: "with-after",
+    steps: [step({ id: "main" })],
+    after: [
+      { id: "report", title: "Report", trigger: "auto", steps: [step({ id: "report-step" })] },
+      { id: "cleanup", title: "Cleanup", trigger: "manual", steps: [step({ id: "cleanup-step" })] },
+    ],
+  });
+}
+
 /** Read the mirrored run. */
 export async function readRun(host: ArgosHost, runId: string): Promise<RunDoc | undefined> {
   return host.getRun(runId);

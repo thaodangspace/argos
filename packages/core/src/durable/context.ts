@@ -31,6 +31,9 @@ export const systemClock: Clock = {
   now: () => Date.now(),
 };
 
+/** D3: gate wake poll (FR19). The gate task re-reads its decision document on every wake. */
+export const GATE_POLL_MS = 2_000;
+
 // ------------------------------------------------------------------ ids (D14)
 
 /** `argos:<runId>:<stepId>:<attempt>` — stable across restarts, the launch idempotency key. */
@@ -59,6 +62,11 @@ export interface LaunchInput {
   /** `provider/model` when the step resolved an agent target. */
   readonly target?: string;
   readonly prompt?: string;
+  /**
+   * Feedback from the loop/gate that re-queued this step (`{{ feedback }}`). Also interpolated
+   * into `prompt` by the run task, so an executor that reads only the prompt still sees it.
+   */
+  readonly feedback?: string;
   /** Outcome names declared by the step; an executor may compile them into a schema. */
   readonly outcomes: readonly string[];
   /** Output names declared by the step. */
@@ -152,4 +160,24 @@ export interface RunTaskResult {
   readonly status: "completed" | "failed" | "cancelled";
   readonly outcome?: string;
   readonly errorCode?: ArgosErrorCode;
+}
+
+/**
+ * Terminal result of one `argos.gate` task: exactly what the run task needs to feed
+ * `gateDecided` into the reducer.
+ */
+export interface GateTaskResult {
+  readonly runId: string;
+  readonly gateId: string;
+  readonly decision: string;
+  readonly comment?: string;
+  readonly decidedBy?: string;
+  readonly decidedVia?: string;
+  readonly decidedAt: number;
+}
+
+/** Link from an after-task run back to the run that started it (FR11). */
+export interface AfterTaskLink {
+  readonly parentRunId: string;
+  readonly afterId: string;
 }

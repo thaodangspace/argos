@@ -37,6 +37,10 @@ export interface FakeAgent {
   readonly label: string;
   readonly cwd: string;
   readonly target?: string;
+  /** The prompt the run task handed to the executor (with `{{ feedback }}` rendered). */
+  readonly prompt?: string;
+  /** Feedback the run task attached to this attempt (`{{ feedback }}`), if any. */
+  readonly feedback?: string;
   status: "running" | "done";
   result: FakeAgentResult;
   polls: number;
@@ -47,6 +51,11 @@ export interface FakeExecutorOptions {
   readonly completeAfterPolls?: number;
   /** Outcome reported on completion; default `"success"` (the engine test helper's default). */
   readonly defaultOutcome?: string;
+  /**
+   * Decide the completion of one attempt on every status poll: returning a result completes it.
+   * This is how loop/gate tests script outcomes per attempt without counting polls.
+   */
+  readonly complete?: (agent: FakeAgent) => FakeAgentResult | undefined;
 }
 
 interface LaunchGate {
@@ -89,6 +98,8 @@ export class FakeExecutor implements StepExecutor {
         label: input.label,
         cwd: input.cwd,
         ...(input.target === undefined ? {} : { target: input.target }),
+        ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+        ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
         status: "running",
         result: {},
         polls: 0,
@@ -114,6 +125,13 @@ export class FakeExecutor implements StepExecutor {
       if (agent.polls >= this.#options.completeAfterPolls) {
         agent.status = "done";
         agent.result = { outcome: this.#options.defaultOutcome ?? "success" };
+      }
+    }
+    if (agent.status === "running" && this.#options.complete !== undefined) {
+      const scripted = this.#options.complete(agent);
+      if (scripted !== undefined) {
+        agent.status = "done";
+        agent.result = { outcome: this.#options.defaultOutcome ?? "success", ...scripted };
       }
     }
     if (agent.status === "running") return { state: "running" };
@@ -189,5 +207,17 @@ export class FakeExecutor implements StepExecutor {
       throw new Error(`FakeExecutor: step ${stepId} has ${agents.length} agents, expected 1`);
     }
     return agents[0] as FakeAgent;
+  }
+
+  /** Every agent of a step, in attempt order. */
+  agentsForStep(stepId: string): FakeAgent[] {
+    return [...this.agents.values()]
+      .filter((agent) => agent.stepId === stepId)
+      .sort((left, right) => left.attempt - right.attempt);
+  }
+
+  /** The newest attempt of a step, when one was launched. */
+  latestAgentForStep(stepId: string): FakeAgent | undefined {
+    return this.agentsForStep(stepId).at(-1);
   }
 }

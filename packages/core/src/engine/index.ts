@@ -54,3 +54,9 @@ export {
   type EngineEvent,
   type NextResult,
 } from "./reducer.js";
+export {
+  decideGate,
+  type GateDecisionPlan,
+  type GateDecisionRejection,
+  type GateDecisionRequest,
+} from "./decide.js";

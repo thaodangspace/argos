@@ -3,24 +3,29 @@
  *
  * Phases: `select → await → settle → gate → done` (static, so the definition never depends on
  * playbook content). The reducer `next()` is the **only** decision maker: this task feeds it
- * `tick` / `stepSettled` events and executes the returned effects (create one `argos.step` child
- * per `dispatchStep`, mirror the record, open/close the run). It never decides readiness,
- * transitions, loop limits, or timeouts itself.
+ * `tick` / `stepSettled` / `gateDecided` events and executes the returned effects (create one
+ * `argos.step` or `argos.gate` child per effect, mirror the record, open/close the run). It never
+ * decides readiness, transitions, loop limits, decisions, or timeouts itself.
  *
  * Atomicity: every state change commits the checkpoint **and** `argos.run.<runId>` **and**
  * `argos.history.<runId>` inside one `runtime.commit()`, so the mirror is never older than the
  * engine (FR13).
  *
- * Phase 4 scope:
- * - `gate` keeps the phase and sleeps on a 2 s poll (D7); decision handling is Phase 5.
- * - `startAfterTask` and `decisionRejected` effects are recorded as skipped history events with an
- *   explicit note. `scheduleWake` is reduced to a lower bound for the next poll. Nothing is
- *   silently dropped.
+ * Phase 5:
+ * - `openGate` creates the `argos.gate` child and its decision document in the same commit as
+ *   the checkpoint/mirror (D4, FR19). The run then waits on it (`allSettled`) like a step child.
+ * - `await` maps a gate child's result to an engine `gateDecided` event, applied in `settle`;
+ *   `gate` is the recovery path that re-opens a pending gate whose child broke or was lost (a
+ *   restart never renumbers a gate id).
+ * - `done` starts every `trigger: auto` after-task as its own `argos.run` child (owned by this
+ *   task) and then commits the terminal outcome; `after[id].status` is host-owned bookkeeping and
+ *   never changes `run.status` (FR11). A manual after-task is started by
+ *   `ArgosHost.startAfterTask`.
  * - A phase error is caught and turns into a cancelled, mirrored run plus a `task_error` history
  *   event and a failed task outcome, so a run is never abandoned without a terminal state.
  */
 
-import { defineTask, type NextTaskState, type RunningTask, type TaskId, type TaskRuntime, type Tx } from "@earendil-works/pi-durable";
+import { defineTask, type ConversationId, type NextTaskState, type RunningTask, type Task, type TaskId, type TaskOwnership, type TaskRuntime, type Tx } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
 import { z } from "zod";
 
@@ -36,27 +41,38 @@ import {
   stepTimeoutMs,
   type Effect,
   type EngineEvent,
+  type GateRecord,
   type RunRecord,
 } from "../../engine/index.js";
 import { deepFreeze } from "../../playbook/ir.js";
-import type { RunTaskResult, StepTaskResult } from "../context.js";
-import { skippedEffectDetail, writeRunState, type NewHistoryEvent } from "../mirror.js";
-import type { StepTaskInput, StepTaskDefinition } from "./step.js";
+import type { AfterTaskLink, GateTaskResult, RunTaskResult, StepTaskResult } from "../context.js";
+import {
+  appendRunHistory,
+  mergeAfterFromMirror,
+  openGateDoc,
+  skippedEffectDetail,
+  writeAfterStatus,
+  writeRunState,
+  RunDocFamily,
+  type NewHistoryEvent,
+} from "../mirror.js";
+import { planAfterRun, type PlannedAfterRun } from "./after.js";
+import type { GateTaskInput, GateTaskDefinition } from "./gate.js";
+import type { StepTaskDefinition, StepTaskInput } from "./step.js";
 
 // ------------------------------------------------------------------ shape
 
 export type RunPhase = "select" | "await" | "settle" | "gate" | "done";
 
-/** D7: gate wake poll. */
-export const GATE_POLL_MS = 2_000;
-
-/** Defensive poll when the engine has no runnable step and no wake time. */
+/** Defensive poll when the engine has no runnable step, no child, and no wake time. */
 export const IDLE_POLL_MS = 1_000;
 
 export interface RunTaskInput {
   readonly runId: string;
   /** The freshly created checkpoint; `initial()` copies it into the task checkpoint. */
   readonly record: RunRecord;
+  /** Set on an after-task child: the run that started it (FR11). */
+  readonly after?: AfterTaskLink;
 }
 
 /** One child settlement, mapped from a terminal `argos.step` outcome. */
@@ -72,6 +88,17 @@ export interface StepSettlement {
   readonly feedback?: string;
 }
 
+/** One gate settlement, mapped from a terminal `argos.gate` outcome (FR19). */
+export interface GateSettlement {
+  readonly taskId: TaskId;
+  readonly gateId: string;
+  readonly decision: string;
+  readonly comment?: string;
+  readonly decidedBy?: string;
+  readonly decidedVia?: string;
+  readonly decidedAt: number;
+}
+
 export interface RunFinished {
   readonly status: "completed" | "failed" | "cancelled";
   readonly outcome?: string;
@@ -82,14 +109,18 @@ export interface RunCheckpointFields {
   readonly record: RunRecord;
   /** Latest child task per step id (goto re-runs replace the entry). */
   readonly childTasks: Readonly<Record<string, TaskId>>;
-  /** Every child task id ever created for this run, keyed `String(taskId)` → step id. */
+  /** Every step child task id ever created for this run, keyed `String(taskId)` → step id. */
   readonly dispatched: Readonly<Record<string, string>>;
   /** Child task ids of the current wait. Empty outside `await`. */
   readonly awaiting: readonly TaskId[];
-  /** Settlements carried from `await` into `settle`. */
+  /** Step settlements carried from `await` into `settle`. */
   readonly settles: readonly StepSettlement[];
-  /** Reserved for the Phase 5 `argos.gate` child tasks. */
-  readonly gateTasks?: Readonly<Record<string, TaskId>>;
+  /** Latest `argos.gate` child task per gate id (D14 ids, never renumbered). */
+  readonly gateTasks: Readonly<Record<string, TaskId>>;
+  /** Gate settlements carried from `await` into `settle`. */
+  readonly gateSettles: readonly GateSettlement[];
+  /** `argos.run` child task per after-task id (FR11). */
+  readonly afterTasks: Readonly<Record<string, TaskId>>;
   readonly finished?: RunFinished;
 }
 
@@ -120,6 +151,16 @@ const StepSettlementSchema = z.strictObject({
   feedback: z.string().optional(),
 });
 
+const GateSettlementSchema = z.strictObject({
+  taskId: z.number().int().positive(),
+  gateId: z.string().min(1),
+  decision: z.string().min(1),
+  comment: z.string().optional(),
+  decidedBy: z.string().min(1).optional(),
+  decidedVia: z.string().min(1).optional(),
+  decidedAt: z.number(),
+});
+
 const RunFinishedSchema = z.strictObject({
   status: z.enum(["completed", "failed", "cancelled"]),
   outcome: z.string().min(1).optional(),
@@ -133,7 +174,9 @@ export const RunCheckpointSchema = z.strictObject({
   dispatched: z.record(z.string(), z.string().min(1)),
   awaiting: z.array(z.number().int().positive()),
   settles: z.array(StepSettlementSchema),
-  gateTasks: z.record(z.string(), z.number().int().positive()).optional(),
+  gateTasks: z.record(z.string(), z.number().int().positive()),
+  gateSettles: z.array(GateSettlementSchema),
+  afterTasks: z.record(z.string(), z.number().int().positive()),
   finished: RunFinishedSchema.optional(),
 });
 
@@ -173,7 +216,7 @@ export function hydrateRunCheckpoint(json: string | unknown): RunCheckpoint {
   return deepFreeze(checkpoint);
 }
 
-// ------------------------------------------------------------------ helpers
+// ------------------------------------------------------------------ event mapping
 
 function stepEvents(settlement: StepSettlement, now: number): EngineEvent {
   return {
@@ -190,11 +233,23 @@ function stepEvents(settlement: StepSettlement, now: number): EngineEvent {
   };
 }
 
+function gateEvent(settlement: GateSettlement, now: number): EngineEvent {
+  return {
+    type: "gateDecided",
+    gateId: settlement.gateId,
+    decision: settlement.decision,
+    decidedAt: settlement.decidedAt,
+    now,
+    ...(settlement.comment === undefined ? {} : { comment: settlement.comment }),
+    ...(settlement.decidedBy === undefined ? {} : { decidedBy: settlement.decidedBy }),
+    ...(settlement.decidedVia === undefined ? {} : { decidedVia: settlement.decidedVia }),
+  };
+}
+
 function settlementFrom(
   checkpoint: RunCheckpoint,
   taskId: TaskId,
-  outcome: { status: string; result?: unknown; error?: { message: string } },
-  now: number,
+  outcome: { status: string; result?: unknown },
 ): StepSettlement | undefined {
   const stepId = checkpoint.dispatched[String(taskId)];
   if (stepId === undefined) return undefined;
@@ -214,15 +269,34 @@ function settlementFrom(
     };
   }
   // failed / aborted / faulted / orphaned: the child task itself broke, which is a step failure.
-  // `now` is unused for the settlement shape but keeps the signature symmetric with the engine.
-  void now;
   return { ...base, errorCode: "step_failed" };
 }
 
-function historyForEffects(
-  record: RunRecord,
-  effects: readonly Effect[],
-): NewHistoryEvent {
+/**
+ * Map a completed `argos.gate` child to a gate settlement. A gate task that ended any other way
+ * broke (or was aborted): no settlement is produced and the caller drops its checkpoint entry, so
+ * the `gate` phase opens a fresh child for the still-pending gate.
+ */
+function gateSettlementFrom(
+  taskId: TaskId,
+  gateId: string,
+  outcome: { status: string; result?: unknown },
+): GateSettlement | undefined {
+  if (outcome.status !== "completed") return undefined;
+  const result = outcome.result as Partial<GateTaskResult> | undefined;
+  if (result === undefined || typeof result.decision !== "string") return undefined;
+  return {
+    taskId,
+    gateId,
+    decision: result.decision,
+    decidedAt: typeof result.decidedAt === "number" ? result.decidedAt : 0,
+    ...(result.comment === undefined ? {} : { comment: result.comment }),
+    ...(result.decidedBy === undefined ? {} : { decidedBy: result.decidedBy }),
+    ...(result.decidedVia === undefined ? {} : { decidedVia: result.decidedVia }),
+  };
+}
+
+function historyForEffects(effects: readonly Effect[]): NewHistoryEvent {
   const dispatch = effects.find((effect) => effect.type === "dispatchStep");
   if (dispatch !== undefined && dispatch.type === "dispatchStep") {
     return { type: "dispatch", stepId: dispatch.stepId, attempt: dispatch.attempt };
@@ -236,17 +310,38 @@ function historyForEffects(
   }
   const gate = effects.find((effect) => effect.type === "openGate");
   if (gate !== undefined && gate.type === "openGate") {
-    return { type: "gate", stepId: gate.stepId, detail: gate.gateId };
+    return { type: "gate", stepId: gate.stepId, detail: `${gate.gateId} ${gate.kind}` };
   }
   return { type: "select" };
+}
+
+/** Build one `argos.gate` child input from the run record's gate (D14 ids, never renumbered). */
+function gateInputFor(record: RunRecord, gate: GateRecord): GateTaskInput {
+  return {
+    runId: record.id,
+    gateId: gate.id,
+    stepId: gate.stepId,
+    kind: gate.kind,
+    ...(gate.edge === undefined ? {} : { edge: gate.edge }),
+    ...(gate.target === undefined ? {} : { target: gate.target }),
+    question: gate.question,
+    choices: gate.choices,
+    createdAt: gate.createdAt,
+  };
 }
 
 interface PlanContext {
   readonly runTaskId: TaskId;
   readonly checkpoint: RunCheckpoint;
   readonly stepTask: StepTaskDefinition;
+  readonly gateTask: GateTaskDefinition;
   readonly stepInput: (effect: Extract<Effect, { type: "dispatchStep" }>) => StepTaskInput | undefined;
 }
+
+type PlannedState =
+  | { readonly status: "running"; readonly checkpoint: RunCheckpoint }
+  | { readonly status: "waiting"; readonly checkpoint: RunCheckpoint; readonly on: readonly TaskId[]; readonly policy: "allSettled" }
+  | { readonly status: "sleeping"; readonly checkpoint: RunCheckpoint; readonly until: number };
 
 /**
  * Turn the reducer's output into the next task state, creating child tasks and writing the
@@ -259,26 +354,37 @@ async function planNext(
   effects: readonly Effect[],
   now: number,
   liveTaskIds: ReadonlySet<number>,
-): Promise<
-  | { readonly status: "running"; readonly checkpoint: RunCheckpoint }
-  | { readonly status: "waiting"; readonly checkpoint: RunCheckpoint; readonly on: readonly TaskId[]; readonly policy: "allSettled" }
-  | { readonly status: "sleeping"; readonly checkpoint: RunCheckpoint; readonly until: number }
-> {
+): Promise<PlannedState> {
   const previous = plan.checkpoint;
   const childTasks: Record<string, TaskId> = { ...previous.childTasks };
   const dispatched: Record<string, string> = { ...previous.dispatched };
-  const gateTasks: Record<string, TaskId> = { ...(previous.gateTasks ?? {}) };
+  const gateTasks: Record<string, TaskId> = {};
+  const afterTasks: Record<string, TaskId> = { ...previous.afterTasks };
   const waiting = new Set<TaskId>();
   let finished: RunFinished | undefined = previous.finished;
   let wakeAt: number | undefined;
-  const skipped: NewHistoryEvent[] = [];
+  const recorded: NewHistoryEvent[] = [];
+
+  // Reconcile the gate children recorded by earlier phases. A pending gate whose child is gone
+  // (or broke) is dropped so the `gate` phase opens a fresh one; a decided gate keeps its task id
+  // for auditability. Re-opening never renumbers the gate id (D14).
+  for (const [gateId, taskId] of Object.entries(previous.gateTasks)) {
+    const gate = record.gates.find((candidate) => candidate.id === gateId);
+    if (gate === undefined) continue;
+    if (liveTaskIds.has(Number(taskId))) {
+      gateTasks[gateId] = taskId;
+      waiting.add(taskId);
+      continue;
+    }
+    if (gate.status === "decided") gateTasks[gateId] = taskId;
+  }
 
   for (const effect of effects) {
     switch (effect.type) {
       case "dispatchStep": {
         const input = plan.stepInput(effect);
         if (input === undefined) {
-          skipped.push({
+          recorded.push({
             type: "effect_skipped",
             stepId: effect.stepId,
             attempt: effect.attempt,
@@ -295,13 +401,22 @@ async function planNext(
         break;
       }
       case "openGate": {
-        // Phase 5 creates the `argos.gate` child task. The gate itself lives on the run record,
-        // which is already mirrored, so the UI can show it now.
-        skipped.push({
-          type: "effect_skipped",
-          stepId: effect.stepId,
-          detail: skippedEffectDetail("openGate", `gate ${effect.gateId} awaits the Phase 5 gate task`),
+        if (gateTasks[effect.gateId] !== undefined) break; // already open (idempotent)
+        const gate = record.gates.find((candidate) => candidate.id === effect.gateId);
+        if (gate === undefined) {
+          recorded.push({
+            type: "effect_skipped",
+            stepId: effect.stepId,
+            detail: skippedEffectDetail("openGate", `gate ${effect.gateId} missing from the run record`),
+          });
+          break;
+        }
+        const childId = await tx.createTask(plan.gateTask, gateInputFor(record, gate), {
+          ownership: { kind: "task", taskId: plan.runTaskId },
         });
+        await openGateDoc(tx, record.id, gate);
+        gateTasks[gate.id] = childId;
+        waiting.add(childId);
         break;
       }
       case "finishRun": {
@@ -313,14 +428,12 @@ async function planNext(
         break;
       }
       case "startAfterTask": {
-        skipped.push({
-          type: "effect_skipped",
-          detail: skippedEffectDetail("startAfterTask", `after-task ${effect.id} is Phase 5 work`),
-        });
+        // Executed by the `done` phase, which creates one `argos.run` child per auto after-task.
+        recorded.push({ type: "after_queued", detail: effect.id });
         break;
       }
       case "decisionRejected": {
-        skipped.push({
+        recorded.push({
           type: "effect_skipped",
           detail: skippedEffectDetail("decisionRejected", `${effect.code} on gate ${effect.gateId}`),
         });
@@ -355,14 +468,15 @@ async function planNext(
     awaiting: [] as readonly TaskId[],
     settles: [] as readonly StepSettlement[],
     gateTasks,
+    gateSettles: [] as readonly GateSettlement[],
+    afterTasks,
     ...(finished === undefined ? {} : { finished }),
   };
 
-  const history = historyForEffects(record, effects);
-  await writeRunState(tx, plan.runTaskId, record, history);
-  for (const skippedEvent of skipped) {
-    // Same commit: the skip record lands with the checkpoint it describes.
-    await writeRunState(tx, plan.runTaskId, record, skippedEvent);
+  await writeRunState(tx, plan.runTaskId, record, historyForEffects(effects));
+  for (const event of recorded) {
+    // Same commit: the skip/queue record lands with the checkpoint it describes.
+    await appendRunHistory(tx, record.id, record, event);
   }
 
   if (finished !== undefined) {
@@ -379,7 +493,8 @@ async function planNext(
     };
   }
 
-  if (record.gates.some((gate) => gate.status === "pending")) {
+  // A gate is pending with no child task: the `gate` phase opens one (a restart never renumbers).
+  if (record.gates.some((gate) => gate.status === "pending" && gateTasks[gate.id] === undefined)) {
     return { status: "running", checkpoint: { ...base, phase: "gate" } };
   }
 
@@ -392,12 +507,25 @@ async function planNext(
   };
 }
 
+/**
+ * Render `{{ feedback }}` into a prompt. Feedback is the only template variable the run task
+ * interpolates (the rest is Phase 6): a gate comment or a loop's feedback text must reach the next
+ * attempt's prompt (FR15).
+ */
+export function renderFeedback(prompt: string, feedback: string | undefined): string {
+  if (feedback === undefined) return prompt;
+  return prompt.replace(/\{\{\s*feedback\s*\}\}/g, feedback);
+}
+
 /** Build the child task input from the frozen step definition. */
 function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): StepTaskInput | undefined {
   const definition = stepDefinition(record, effect.stepId);
   if (definition === undefined) return undefined;
   const target =
     definition.agent === undefined ? undefined : `${definition.agent.provider}/${definition.agent.model}`;
+  const feedback = record.steps[definition.id]?.feedback;
+  const prompt =
+    definition.prompt === undefined ? undefined : renderFeedback(definition.prompt, feedback);
   return {
     runId: record.id,
     stepId: definition.id,
@@ -410,8 +538,27 @@ function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispat
     outcomes: definition.outcomes,
     outputs: Object.keys(definition.outputs),
     ...(target === undefined ? {} : { target }),
-    ...(definition.prompt === undefined ? {} : { prompt: definition.prompt }),
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(feedback === undefined ? {} : { feedback }),
   };
+}
+
+// ------------------------------------------------------------------ after-tasks
+
+/**
+ * `after` entries whose child must be created now: `auto` entries the reducer already moved to
+ * `running` and that have no child task yet. A manual entry is never started here (FR11).
+ */
+function plannedAfterTasks(checkpoint: RunCheckpoint, now: number): PlannedAfterRun[] {
+  const planned: PlannedAfterRun[] = [];
+  for (const after of checkpoint.record.ir.after) {
+    if (after.trigger !== "auto") continue;
+    if (checkpoint.afterTasks[after.id] !== undefined) continue;
+    const state = checkpoint.record.after[after.id];
+    if (state === undefined || state.status !== "running") continue;
+    planned.push(planAfterRun(checkpoint.record, after, now));
+  }
+  return planned;
 }
 
 // ------------------------------------------------------------------ error recovery
@@ -443,6 +590,7 @@ async function guarded<S extends RunCheckpoint>(
       record: cancelled.record,
       awaiting: [] as readonly TaskId[],
       settles: [] as readonly StepSettlement[],
+      gateSettles: [] as readonly GateSettlement[],
       finished: { status: "failed" as const, errorCode: "step_failed" as const },
     };
     try {
@@ -469,10 +617,41 @@ async function guarded<S extends RunCheckpoint>(
 
 export interface RunTaskOptions {
   readonly stepTask: StepTaskDefinition;
+  readonly gateTask: GateTaskDefinition;
+}
+
+/**
+ * Start one `argos.run` child as an after-task (FR11). Shared by the `done` phase (auto) and
+ * `ArgosHost.startAfterTask` (manual) so both write the child mirror identically.
+ */
+export async function createAfterRunTask(
+  tx: Tx,
+  runTask: Task<RunTaskInput, RunCheckpoint, RunTaskResult, object>,
+  planned: PlannedAfterRun,
+  options: {
+    readonly ownership: TaskOwnership;
+    /** Required for a conversation-owned child created outside a task commit. */
+    readonly conversationId?: ConversationId;
+    readonly history?: NewHistoryEvent;
+  },
+): Promise<TaskId> {
+  const childId = await tx.createTask(
+    runTask,
+    { runId: planned.record.id, record: planned.record, after: planned.link },
+    {
+      ownership: options.ownership,
+      ...(options.conversationId === undefined ? {} : { conversationId: options.conversationId }),
+    },
+  );
+  await writeRunState(tx, childId, planned.record, options.history ?? {
+    type: "run_started",
+    detail: planned.afterId,
+  });
+  return childId;
 }
 
 export function createRunTaskDefinition(options: RunTaskOptions) {
-  return defineTask<RunTaskInput, RunCheckpoint, RunTaskResult>({
+  const runTask = defineTask<RunTaskInput, RunCheckpoint, RunTaskResult>({
     name: "argos.run",
     version: 1,
 
@@ -483,6 +662,9 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
       dispatched: {},
       awaiting: [],
       settles: [],
+      gateTasks: {},
+      gateSettles: [],
+      afterTasks: {},
     }),
 
     phases: {
@@ -501,6 +683,7 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   runTaskId: task.id,
                   checkpoint,
                   stepTask: options.stepTask,
+                  gateTask: options.gateTask,
                   stepInput: (effect) => stepInputFor(tick.record, effect),
                 },
                 tick.record,
@@ -519,10 +702,24 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
           const now = runtime.now();
           const outcomes = await runtime.outcomes(checkpoint.awaiting, context);
           const settles: StepSettlement[] = [];
+          const gateSettles: GateSettlement[] = [];
+          const gateTasks: Record<string, TaskId> = { ...checkpoint.gateTasks };
+          const gateByTask = new Map<number, string>();
+          for (const [gateId, taskId] of Object.entries(checkpoint.gateTasks)) {
+            gateByTask.set(Number(taskId), gateId);
+          }
           for (const [index, outcome] of outcomes.entries()) {
             const taskId = checkpoint.awaiting[index];
             if (taskId === undefined) continue;
-            const settlement = settlementFrom(checkpoint, taskId, outcome, now);
+            const gateId = gateByTask.get(Number(taskId));
+            if (gateId !== undefined) {
+              const settlement = gateSettlementFrom(taskId, gateId, outcome);
+              // A gate child that broke is forgotten so the `gate` phase opens a fresh one.
+              if (settlement === undefined) delete gateTasks[gateId];
+              else gateSettles.push(settlement);
+              continue;
+            }
+            const settlement = settlementFrom(checkpoint, taskId, outcome);
             if (settlement !== undefined) settles.push(settlement);
           }
           const nextCheckpoint: RunCheckpoint = {
@@ -530,12 +727,14 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
             phase: "settle",
             awaiting: [],
             settles,
+            gateTasks,
+            gateSettles,
           };
           await runtime.commit(
             async (tx) => {
               await writeRunState(tx, task.id, nextCheckpoint.record, {
                 type: "settle",
-                detail: `${settles.length} step(s) settled`,
+                detail: `${settles.length} step(s), ${gateSettles.length} gate(s) settled`,
               });
               return { status: "running", checkpoint: nextCheckpoint };
             },
@@ -548,6 +747,25 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
         await guarded(task, runtime, context, async () => {
           const checkpoint = task.state.checkpoint;
           const now = runtime.now();
+          if (checkpoint.settles.length === 0 && checkpoint.gateSettles.length === 0) {
+            // Nothing settled (e.g. a broken gate child): re-select so the `gate` phase can repair.
+            const reset: RunCheckpoint = {
+              ...checkpoint,
+              phase: "select",
+              awaiting: [],
+              settles: [],
+              gateSettles: [],
+            };
+            await runtime.commit(
+              async (tx) => {
+                await writeRunState(tx, task.id, reset.record);
+                return { status: "running", checkpoint: reset };
+              },
+              context,
+            );
+            return;
+          }
+
           let record = checkpoint.record;
           const effects: Effect[] = [];
           for (const settlement of checkpoint.settles) {
@@ -555,56 +773,95 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
             record = result.record;
             effects.push(...result.effects);
           }
+          for (const settlement of checkpoint.gateSettles) {
+            const result = next(record, gateEvent(settlement, now));
+            record = result.record;
+            effects.push(...result.effects);
+          }
+
           const live = await runtime.ownedTasks(context);
           const liveIds = new Set(live.map((child) => child.id as number));
+          const settledGates = checkpoint.gateSettles;
           await runtime.commit(
-            async (tx) =>
-              planNext(
+            async (tx) => {
+              for (const settlement of settledGates) {
+                const gateStep = checkpoint.record.gates.find(
+                  (gate) => gate.id === settlement.gateId,
+                )?.stepId;
+                await appendRunHistory(tx, record.id, record, {
+                  type: "gate_decided",
+                  ...(gateStep === undefined ? {} : { stepId: gateStep }),
+                  detail: `${settlement.gateId} ${settlement.decision}`,
+                });
+              }
+              return planNext(
                 tx,
                 {
                   runTaskId: task.id,
-                  checkpoint: { ...checkpoint, settles: [] },
+                  checkpoint: { ...checkpoint, settles: [], gateSettles: [] },
                   stepTask: options.stepTask,
+                  gateTask: options.gateTask,
                   stepInput: (effect) => stepInputFor(record, effect),
                 },
                 record,
                 effects,
                 now,
                 liveIds,
-              ),
+              );
+            },
             context,
           );
         });
       },
 
+      /**
+       * Recovery path: every pending gate must have a live `argos.gate` child. Runs when the
+       * reducer opened a gate but its child was lost (a crash between phases, or a broken child);
+       * it never renumbers a gate id and never resets an already-decided document.
+       */
       gate: async (task, runtime, context) => {
         await guarded(task, runtime, context, async () => {
           const checkpoint = task.state.checkpoint;
-          const now = runtime.now();
-          const pending = checkpoint.record.gates.some((gate) => gate.status === "pending");
-          if (!pending) {
-            // Nothing to wait for (the decision arrived in Phase 5): re-select immediately.
-            const nextCheckpoint: RunCheckpoint = { ...checkpoint, phase: "select" };
-            await runtime.commit(
-              async (tx) => {
-                await writeRunState(tx, task.id, nextCheckpoint.record);
-                return { status: "running", checkpoint: nextCheckpoint };
-              },
-              context,
-            );
-            return;
+          const pending = checkpoint.record.gates.filter((gate) => gate.status === "pending");
+          const live = await runtime.ownedTasks(context);
+          const liveIds = new Set(live.map((child) => child.id as number));
+          const gateTasks: Record<string, TaskId> = {};
+          for (const [gateId, taskId] of Object.entries(checkpoint.gateTasks)) {
+            const gate = checkpoint.record.gates.find((candidate) => candidate.id === gateId);
+            if (gate === undefined) continue;
+            if (gate.status === "decided" || liveIds.has(Number(taskId))) gateTasks[gateId] = taskId;
           }
-          // Phase 4: no decision channel yet. Sleep on the D7 poll and re-check. The mirror is
-          // rewritten with the unchanged record so a reopened UI still has it.
-          const until = now + GATE_POLL_MS;
           await runtime.commit(
             async (tx) => {
-              await writeRunState(tx, task.id, checkpoint.record);
-              return {
-                status: "sleeping",
-                until,
-                checkpoint: { ...checkpoint, phase: "gate" },
+              for (const gate of pending) {
+                if (gateTasks[gate.id] !== undefined) continue;
+                const childId = await tx.createTask(
+                  options.gateTask,
+                  gateInputFor(checkpoint.record, gate),
+                  { ownership: { kind: "task", taskId: task.id } },
+                );
+                await openGateDoc(tx, checkpoint.record.id, gate);
+                gateTasks[gate.id] = childId;
+              }
+              const on = pending
+                .map((gate) => gateTasks[gate.id])
+                .filter((taskId): taskId is TaskId => taskId !== undefined);
+              const nextCheckpoint: RunCheckpoint = {
+                ...checkpoint,
+                phase: on.length > 0 ? "await" : "select",
+                awaiting: on,
+                settles: [],
+                gateSettles: [],
+                gateTasks,
               };
+              await writeRunState(tx, task.id, nextCheckpoint.record, {
+                type: "gate",
+                detail: `reopened ${on.length} pending gate(s)`,
+              });
+              if (on.length > 0) {
+                return { status: "waiting", on, policy: "allSettled", checkpoint: nextCheckpoint };
+              }
+              return { status: "running", checkpoint: nextCheckpoint };
             },
             context,
           );
@@ -614,6 +871,7 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
       done: async (task, runtime, context) => {
         await guarded(task, runtime, context, async () => {
           const checkpoint = task.state.checkpoint;
+          const now = runtime.now();
           const finished =
             checkpoint.finished ??
             (checkpoint.record.status === "cancelled"
@@ -623,6 +881,43 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   ...(checkpoint.record.outcome === undefined ? {} : { outcome: checkpoint.record.outcome }),
                   ...(checkpoint.record.errorCode === undefined ? {} : { errorCode: checkpoint.record.errorCode }),
                 });
+
+          // FR11: create the `auto` after-task children first, in their own commit. pi-durable
+          // refuses new owned work in the commit that finishes the owner (spec §5.5), so the
+          // children must exist before the terminal outcome is committed.
+          const planned = plannedAfterTasks(checkpoint, now);
+          if (planned.length > 0) {
+            await runtime.commit(
+              async (tx) => {
+                const record = await mergeAfterFromMirror(tx, task.id, checkpoint.record);
+                const afterTasks: Record<string, TaskId> = { ...checkpoint.afterTasks };
+                for (const plan of planned) {
+                  const childId = await createAfterRunTask(tx, runTask, plan, {
+                    ownership: { kind: "task", taskId: task.id },
+                    history: { type: "after_start", detail: plan.afterId },
+                  });
+                  afterTasks[plan.afterId] = childId;
+                  await appendRunHistory(tx, record.id, record, {
+                    type: "after_start",
+                    detail: plan.afterId,
+                  });
+                }
+                await writeRunState(tx, task.id, record);
+                return {
+                  status: "running",
+                  checkpoint: { ...checkpoint, record, afterTasks, phase: "done" },
+                };
+              },
+              context,
+            );
+            return;
+          }
+
+          const parentLink = task.input.after;
+          const parentDoc =
+            parentLink === undefined
+              ? undefined
+              : await runtime.snapshot(RunDocFamily, parentLink.parentRunId, context);
           const result: RunTaskResult = {
             runId: checkpoint.record.id,
             status: finished.status,
@@ -631,7 +926,14 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
           };
           await runtime.commit(
             async (tx) => {
-              await writeRunState(tx, task.id, checkpoint.record);
+              const record = await mergeAfterFromMirror(tx, task.id, checkpoint.record);
+              if (parentLink !== undefined && parentDoc !== undefined) {
+                await writeAfterStatus(tx, parentDoc, parentLink.afterId, {
+                  status: finished.status === "completed" ? "completed" : "failed",
+                  endedAt: now,
+                });
+              }
+              await writeRunState(tx, task.id, record);
               if (finished.status === "completed") {
                 return { status: "terminal", outcome: { status: "completed", result } };
               }
@@ -668,7 +970,8 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
       };
       await runtime.commit(
         async (tx) => {
-          await writeRunState(tx, task.id, cancelled.record, {
+          const record = await mergeAfterFromMirror(tx, task.id, cancelled.record);
+          await writeRunState(tx, task.id, record, {
             type: "finish",
             detail: "run aborted",
           });
@@ -678,6 +981,8 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
       );
     },
   });
+
+  return runTask;
 }
 
 /** The task instance type, for the host's registry install. */

@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
  * tested without a process. This test is the enforcement, not the comment.
  */
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
-const SOURCES = ["record.ts", "ready.ts", "transition.ts", "loops.ts", "timeouts.ts", "reducer.ts"] as const;
+const SOURCES = ["record.ts", "ready.ts", "transition.ts", "loops.ts", "timeouts.ts", "reducer.ts", "decide.ts"] as const;
 
 const FORBIDDEN: ReadonlyArray<{ readonly name: string; readonly pattern: RegExp }> = [
   { name: "node: import", pattern: /from\s+["']node:/ },

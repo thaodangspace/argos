@@ -55,6 +55,8 @@ export interface StepTaskInput {
   readonly retries: number;
   readonly target?: string;
   readonly prompt?: string;
+  /** Feedback from the loop/gate that re-queued this step (`{{ feedback }}`). */
+  readonly feedback?: string;
   readonly outcomes: readonly string[];
   readonly outputs: readonly string[];
 }
@@ -220,6 +222,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           outputs: task.input.outputs,
           ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
           ...(task.input.prompt === undefined ? {} : { prompt: task.input.prompt }),
+          ...(task.input.feedback === undefined ? {} : { feedback: task.input.feedback }),
         };
         try {
           const launched = await withAbort(executor.launch(launchInput), runtime.signal);
