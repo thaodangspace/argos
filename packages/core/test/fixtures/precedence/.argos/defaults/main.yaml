@@ -1,0 +1,3 @@
+agent:
+  provider: defaults-provider
+  model: defaults-model

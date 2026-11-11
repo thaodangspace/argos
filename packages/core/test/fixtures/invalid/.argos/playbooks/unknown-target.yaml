@@ -1,0 +1,6 @@
+title: Unknown transition target
+steps:
+  - id: a
+    prompt: Do A
+    on:
+      success: { goto: ghost }

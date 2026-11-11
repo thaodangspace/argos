@@ -1,0 +1,19 @@
+# Repo-wide agent defaults. Precedence: step > role > playbook > these > the manager's own.
+# Switching provider is one edit here: change the tiers, every `agent: { tier: … }` follows.
+tiers:
+  cheap:                       # a list: when claude is out of tokens, the step moves to the next entry
+    - { provider: claude, model: claude-haiku-5-5 }
+    - { provider: codex, model: gpt-5-mini }
+  worker: { provider: claude, model: claude-opus-5-5 }
+  advisor: { provider: claude, model: claude-opus-5-5, thinking: high }
+providers:
+  exhausted_for: 1h            # an exhausted provider/model is skipped this long, then tried again (default 1h)
+  fallback: [claude/claude-opus-5-5]  # every step falls back to these, after its tier's own entries
+agent:
+  tier: worker
+  mode: bypassPermissions      # steps run unattended (shell commands included)
+manager:
+  mode: default                # the manager never edits files
+  compact: { above_tokens: 150000 }   # never | on_step | on_gate_decided | { above_tokens: N }
+# isolation: worktree          # every run works in its own git worktree, so runs can share a workspace
+# reload_stale_sessions: false   # default true: after a plugin update, reload idle agents' sessions that hold the old tools

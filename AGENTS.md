@@ -2,7 +2,7 @@
 
 Argos — durable YAML playbook engine for Paseo agents. Implementation plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_impl_argos_yaml_playbook_engine.md`.
-Current state: **Phase 1 (scaffold)**.
+Current state: **Phase 2 (loader, IR, validator)**. Phase 3 (pure engine) is next.
 
 ## Layout
 
@@ -14,6 +14,25 @@ Current state: **Phase 1 (scaffold)**.
 
 No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResolution`
 `NodeNext` (relative imports need `.js` extensions), Node `>=22.5`.
+
+## Playbook layer (Phase 2)
+
+`packages/core/src/playbook/` is the compatibility contract: `schema.ts` (zod raw YAML),
+`load.ts` (discovery + read-only pipeline), `resolve.ts` (agent precedence, input wiring,
+condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` (graph checks),
+`hash.ts` (canonical JSON + sha256), `ir.ts` (the frozen JSON IR later phases consume).
+
+- Discovery: `.argos/playbooks/*.yaml` then `.paseo/plugins/playbooks/*.yaml` (same fallback for
+  `roles/`, `defaults/main.yaml`, `scripts/`); playbook id = filename. `loadPlaybook(repoDir, id)`
+  returns a deep-frozen `PlaybookIR` with `hash`; it never writes.
+- Aliases normalized: `poll_ms` | `pollMs` | `poll` -> `pollMs` (plan D3 defaults 3000/2000/5000);
+  `mode` | `mode_id` -> `modeId`; `playbook: {name}` | `use: id` -> sub-playbook; flat
+  `gate`/`choices`/`script` and paseo block forms both load.
+- Errors are `ArgosError` with the plan's stable code; loader/validator failures are
+  `playbook_invalid`, `playbook_cycle`, or `playbook_missing` and always name file + step.
+- Golden compat fixtures live in `packages/core/test/fixtures/compat/` (copied from
+  `lerenn/paseo-playbooks`, MIT; see `test/fixtures/ATTRIBUTION.md`). Invalid, sub-playbook,
+  precedence, `when`/`branch`, and discovery fixtures sit next to them.
 
 ## Commands (run from the repo root)
 
@@ -43,6 +62,8 @@ the durability suite green.
 | `typescript` | `7.0.2` | root dev | compiler |
 | `vitest` | `5.1.0` | root dev | test runner |
 | `@types/node` | `26.6.6` | root dev | Node types |
+| `yaml` | `2.9.1` | `packages/core` | playbook parser |
+| `zod` | `4.6.7` | `packages/core` | schema validation (also the future RPC contract) |
 
 `@getpaseo/plugin` peer-depends on React `>=19.1.0 <20`; npm installs the peer
 (`react@19.3.0` in the lock file) and it is not a direct dependency.

@@ -1,0 +1,7 @@
+title: Unknown need
+steps:
+  - id: a
+    prompt: Do A
+  - id: b
+    prompt: Do B
+    needs: [ghost]

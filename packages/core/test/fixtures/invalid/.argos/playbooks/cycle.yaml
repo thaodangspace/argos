@@ -1,0 +1,8 @@
+title: Dependency cycle
+steps:
+  - id: a
+    prompt: Do A
+    needs: [b]
+  - id: b
+    prompt: Do B
+    needs: [a]

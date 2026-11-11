@@ -1,0 +1,15 @@
+title: Child
+inputs:
+  request: { type: string, required: true }
+outputs:
+  plan: { type: string }
+steps:
+  - id: investigate
+    prompt: "Plan {{ inputs.request }}"
+    inputs: [request]
+    outputs:
+      plan: { type: string }
+  - id: implement
+    prompt: "Implement {{ inputs.plan }}"
+    needs: [investigate]
+    inputs: [plan]

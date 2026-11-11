@@ -1,0 +1,7 @@
+title: Step wins
+agent: { provider: playbook-provider, model: playbook-model }
+steps:
+  - id: a
+    prompt: Do A
+    role: worker
+    agent: { provider: step-provider, model: step-model }

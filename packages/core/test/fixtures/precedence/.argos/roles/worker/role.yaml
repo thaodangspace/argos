@@ -1,0 +1,4 @@
+title: Worker
+agent:
+  provider: role-provider
+  model: role-model

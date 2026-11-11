@@ -1,0 +1,10 @@
+title: Parent
+inputs:
+  request: { type: string, required: true }
+steps:
+  - id: pr
+    use: child
+    inputs: [request]
+  - id: finish
+    prompt: Finish
+    needs: [pr]

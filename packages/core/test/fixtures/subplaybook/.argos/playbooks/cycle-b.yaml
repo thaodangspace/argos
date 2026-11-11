@@ -1,0 +1,4 @@
+title: Cycle B
+steps:
+  - id: hop
+    use: cycle-a

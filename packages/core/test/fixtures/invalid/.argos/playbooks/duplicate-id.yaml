@@ -1,0 +1,6 @@
+title: Duplicate id
+steps:
+  - id: dup
+    prompt: First
+  - id: dup
+    prompt: Second

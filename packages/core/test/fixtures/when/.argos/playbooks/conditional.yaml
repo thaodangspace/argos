@@ -1,0 +1,21 @@
+title: Conditional
+inputs:
+  mode:
+    type: enum
+    values: [service, infra]
+    default: service
+steps:
+  - id: classify
+    prompt: Classify the change
+    outputs:
+      kind: { type: string }
+  - id: route
+    needs: [classify]
+    branch:
+      cases:
+        - { name: service, if: { steps.classify.outputs.kind: service } }
+        - { name: other }
+  - id: ship
+    needs: [route]
+    when: { steps.route.outcome: service }
+    prompt: Ship it

@@ -1,0 +1,95 @@
+title: Docs check
+description: Compare the docs with the code, fix the gaps, review and check in parallel, loop until clean, then a human gate.
+manager:
+  prompt: In the approve gate's details, list each changed document with one line on what changed.
+
+inputs:
+  focus:
+    type: string
+    default: README.md, OVERVIEW.md (and its translations OVERVIEW.fr.md and OVERVIEW.zh-CN.md, which must say the same), skills/paseo-playbooks/SKILL.md and the website/ pages
+    description: Which documents to check
+  strictness:
+    type: enum
+    values: [light, thorough]
+    default: light
+    description: light = only wrong or missing facts; thorough = also clarity
+
+outputs:
+  changes: { type: string }                # auto-matched from the write step
+
+steps:
+  - id: investigate
+    role:
+      name: doc_investigator
+      prompt: |
+        Documents to check: {{ inputs.focus }}
+        Strictness: {{ inputs.strictness }}
+    inputs: [focus, strictness]
+    outputs:
+      gaps: { type: string, description: "Numbered list of doc statements that disagree with the code" }
+      gap_count: { type: number }
+
+  - id: write
+    role:
+      name: doc_writer
+      agent: { mode: acceptEdits }
+      prompt: |
+        Fix these gaps in {{ inputs.focus }}:
+        {{ inputs.gaps }}
+    needs: [investigate]
+    inputs: [focus, gaps]
+    outputs:
+      changes: { type: string, description: "What you changed, per file" }
+    timeout: 20m
+
+  - id: review
+    role:
+      name: doc_reviewer
+      prompt: |
+        The writer reports these changes (uncommitted in this checkout):
+        {{ inputs.changes }}
+    needs: [write]
+    inputs: [changes]
+    outputs:
+      findings: { type: string }
+      blocking: { type: boolean }
+
+  - id: consistency
+    role:
+      name: consistency_checker
+      prompt: |
+        Gaps found earlier:
+        {{ inputs.gaps }}
+
+        Changes made:
+        {{ inputs.changes }}
+    needs: [write]
+    inputs: [gaps, changes]
+    outputs:
+      remaining: { type: string, description: "Gaps still open, or none" }
+      all_fixed: { type: boolean }
+
+  - id: verdict
+    role:
+      name: doc_editor
+      prompt: |
+        Review findings (blocking: {{ inputs.blocking }}):
+        {{ inputs.findings }}
+
+        Remaining gaps (all fixed: {{ inputs.all_fixed }}):
+        {{ inputs.remaining }}
+    needs: [review, consistency]
+    inputs: [findings, blocking, remaining, all_fixed]
+    outcomes: [ready, changes_requested]
+    on:
+      changes_requested: { goto: write, max_loops: 2 }
+
+  - id: approve
+    needs: [verdict]
+    gate:
+      question: The docs are updated, uncommitted. Approve to finish, or request changes to send them back to the writer.
+      choices:
+        approved: { label: Approve }
+        rejected: { label: Request changes, comment: required, color: danger }
+    on:
+      rejected: { goto: write }

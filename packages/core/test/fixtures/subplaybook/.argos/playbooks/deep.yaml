@@ -1,0 +1,4 @@
+title: Too deep
+steps:
+  - id: sub
+    use: deep-child

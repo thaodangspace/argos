@@ -1,0 +1,78 @@
+export { canonicalJson, playbookHash, sha256Hex } from "./hash.js";
+export {
+  DEFAULTS_FILES,
+  PLAYBOOK_DIRS,
+  ROLE_DIRS,
+  SCRIPT_DIRS,
+  defaultsFile,
+  discoverPlaybooks,
+  discoverRoles,
+  discoverScripts,
+  loadPlaybook,
+  type LoadOptions,
+  type PlaybookEntry,
+  type RoleEntry,
+  type ScriptEntry,
+} from "./load.js";
+export {
+  DEFAULT_GATE_CHOICES,
+  DEFAULT_POLL_MS,
+  IMPLICIT_AGENT_OUTCOMES,
+  durationToMs,
+  resolveAgentCore,
+  resolvePlaybook,
+  type LoadedDefaults,
+  type LoadedRole,
+  type ResolveContext,
+} from "./resolve.js";
+export { expandPlaybook, type ExpandOptions } from "./expand.js";
+export { validatePlaybook } from "./validate.js";
+export {
+  RawAfterSchema,
+  RawAgentSchema,
+  RawDefaultsSchema,
+  RawIsolationSchema,
+  RawPlaybookSchema,
+  RawRoleFileSchema,
+  RawStepSchema,
+  RawTransitionSchema,
+} from "./schema.js";
+export { deepFreeze, toPlainJson } from "./ir.js";
+export type {
+  AfterIR,
+  AgentSettingsIR,
+  AgentTargetIR,
+  AskChoiceIR,
+  BlockIR,
+  BranchCaseIR,
+  BranchIR,
+  DeciderIR,
+  DefaultsIR,
+  GateChoiceIR,
+  GateIR,
+  InputBindingIR,
+  InputDefIR,
+  InputType,
+  IsolationIR,
+  OutputDefIR,
+  PlaybookIR,
+  RoleIR,
+  Scalar,
+  ScriptIR,
+  StepIR,
+  StepKind,
+  TransitionIR,
+  UnhashedPlaybookIR,
+  UseProvenanceIR,
+  WhenIR,
+  WhenOperandIR,
+} from "./ir.js";
+export {
+  ARGOS_ERROR_CODES,
+  ArgosError,
+  argosError,
+  errorLocation,
+  isArgosError,
+  type ArgosErrorCode,
+  type ArgosErrorDetails,
+} from "../errors.js";

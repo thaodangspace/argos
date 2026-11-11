@@ -1,0 +1,6 @@
+title: Playbook wins
+agent: { provider: playbook-provider, model: playbook-model }
+steps:
+  - id: a
+    prompt: Do A
+    role: plain

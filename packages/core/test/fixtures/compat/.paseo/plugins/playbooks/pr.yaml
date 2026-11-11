@@ -1,0 +1,85 @@
+title: Pull request
+description: Investigate a request, implement it, open a PR and babysit it until it is green.
+manager:
+  prompt: Before you accept the implement step, check that its PR exists and targets the base branch.
+
+inputs:
+  request:
+    type: string
+    required: true
+    description: What to change
+  base_branch:
+    type: string
+    default: main
+    description: Branch the PR targets
+
+outputs:
+  pr_url: { type: string }     # auto-matched from the implement step
+  pr_number:
+    type: number
+    value: "{{ steps.implement.outputs.pr_number }}"
+
+steps:
+  - id: investigate
+    role:
+      name: investigator
+      prompt: |
+        Request: {{ inputs.request }}
+    inputs: [request]
+    outputs:
+      plan: { type: string, description: Implementation plan }
+
+  - id: implement
+    role:
+      name: implementer
+      prompt: |
+        Request: {{ inputs.request }}
+
+        Plan:
+        {{ inputs.plan }}
+
+        Open (or update) the pull request against {{ inputs.base_branch }}.
+    needs: [investigate]
+    inputs: [request, plan, base_branch]
+    outputs:
+      pr_url: { type: string }
+      pr_number: { type: number }
+      branch: { type: string }
+    retries: 1
+    timeout: 1h
+
+  - id: review
+    role: { name: reviewer, prompt: "Review the pull request {{ inputs.pr_url }}." }
+    needs: [implement]
+    inputs: [pr_url]
+    outputs:
+      findings: { type: string }
+
+  - id: local_qa
+    role: { name: local_qa, prompt: "Test the branch {{ inputs.branch }}." }
+    needs: [implement]
+    inputs: [branch]
+    outputs:
+      report: { type: string }
+      tests_passed: { type: boolean }
+
+  - id: babysit
+    role:
+      name: babysitter
+      prompt: |
+        Pull request: {{ inputs.pr_url }}
+
+        Review findings:
+        {{ inputs.review }}
+
+        Local QA report:
+        {{ inputs.qa }}
+    needs: [review, local_qa]
+    inputs:
+      pr_url: ~
+      review: "{{ steps.review.outputs.findings }}"
+      qa: "{{ steps.local_qa.outputs.report }}"
+    outcomes: [ready, changes_requested]
+    timeout: 2h
+    on:
+      changes_requested: { goto: implement, max_loops: 3, decider: { by: role, role: gatekeeper } }

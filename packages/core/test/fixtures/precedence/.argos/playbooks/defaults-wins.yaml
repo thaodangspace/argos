@@ -1,0 +1,5 @@
+title: Defaults win
+steps:
+  - id: a
+    prompt: Do A
+    role: plain

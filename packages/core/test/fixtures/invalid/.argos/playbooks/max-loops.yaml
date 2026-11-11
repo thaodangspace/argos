@@ -1,0 +1,6 @@
+title: Bad loop limit
+steps:
+  - id: a
+    prompt: Do A
+    on:
+      success: { goto: a, max_loops: 0 }
