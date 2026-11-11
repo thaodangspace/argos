@@ -32,6 +32,14 @@
     "./git": {
       "types": "./dist/git/index.d.ts",
       "import": "./dist/git/index.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc/index.d.ts",
+      "import": "./dist/rpc/index.js"
+    },
+    "./rpc/server": {
+      "types": "./dist/rpc/server.d.ts",
+      "import": "./dist/rpc/server.js"
     }
   },
   "files": [

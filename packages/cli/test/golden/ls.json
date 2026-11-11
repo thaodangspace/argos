@@ -1,0 +1,62 @@
+{
+  "runs": [
+    {
+      "id": "run-1",
+      "playbookId": "gated",
+      "playbookHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "status": "waiting",
+      "inputs": {
+        "issue": "42"
+      },
+      "cwd": "/repo",
+      "worktree": {
+        "path": "/home/worktrees/run-1",
+        "branch": "argos/run-1",
+        "baseSha": "abc123"
+      },
+      "steps": [
+        {
+          "id": "draft",
+          "title": "Draft the change",
+          "kind": "agent",
+          "status": "completed",
+          "attemptCount": 1,
+          "startedAt": 1000,
+          "endedAt": 2000
+        },
+        {
+          "id": "review",
+          "title": "Review",
+          "kind": "gate",
+          "status": "waiting",
+          "attemptCount": 0
+        }
+      ],
+      "gates": [
+        {
+          "runId": "run-1",
+          "gateId": "review:1",
+          "stepId": "review",
+          "kind": "step",
+          "question": "Ship it?",
+          "choices": {
+            "approve": {
+              "label": "Approve",
+              "comment": "optional"
+            },
+            "revise": {
+              "label": "Revise",
+              "comment": "required",
+              "color": "danger"
+            }
+          },
+          "status": "pending"
+        }
+      ],
+      "after": [],
+      "createdAt": 1000,
+      "updatedAt": 2000,
+      "seq": 4
+    }
+  ]
+}

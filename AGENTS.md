@@ -2,8 +2,7 @@
 
 Argos — durable YAML playbook engine for Paseo agents. Implementation plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_impl_argos_yaml_playbook_engine.md`.
-Current state: **Phase 7 (script steps, worktree isolation, read-only guard) complete**. Phase 8
-(RPC server + CLI) is next.
+Current state: **Phase 8 (RPC server + CLI) complete**. Phase 9 (Paseo plugin) is next.
 
 ## Layout
 
@@ -545,6 +544,129 @@ Fixtures: `test/fixtures/scripts/` (`exit-75-twice.mjs`, `sleep-forever.mjs`, `f
 origin + pushed commit + `origin/HEAD`, `installFixtureScript`, `writeScript`). Everything lives
 under `os.tmpdir()`; no network and no daemon.
 
+## RPC + CLI (Phase 8)
+
+`packages/core/src/rpc/` is the control-plane contract (FR25–27). It has two subpaths:
+`argos-core/rpc` (`contracts.ts` + `client.ts`; imports **no** durable code, safe for the CLI and the
+plugin) and `argos-core/rpc/server` (`server.ts`; imports the durable host and is imported only by
+`argos serve`). `rpc/summary.ts` projects mirrored documents to the public read model; it is
+server-side only. The CLI source never imports `argos-core/durable`, `argos-core/git`, `node:sqlite`,
+or `@earendil-works/*`, and only `commands/serve.ts` may import `argos-core/rpc/server`
+(`packages/cli/test/import-graph.test.ts`).
+
+### Contract (`contracts.ts`)
+
+All bodies are strict zod schemas; `RPC_ERROR_STATUS` is the single code → HTTP status map.
+
+```ts
+StartRunRequest  { playbookId, inputs?: {name: scalar}, cwd?, isolation?: {mode, base?}, clientRequestId? }
+StartRunResponse { runId, taskId }
+DecideGateRequest { decision, comment?, decidedBy?, decidedVia?, clientRequestId? }
+GateDecisionResponse { runId, gateId, decision, comment?, decidedBy?, decidedVia?, decidedAt }
+RetryRequest { stepId }
+CancelRunResponse { runId, status }
+ErrorResponse { error: { code, message, details? } }
+RunSummary { id, playbookId, playbookHash, status, inputs, cwd, worktree?,
+             steps: [{id,title,kind,status,errorCode?,attemptCount,startedAt?,endedAt?}],
+             gates: GateSummary[], after: [{id,title,trigger,status,...}], createdAt, updatedAt, seq }
+GateSummary { runId, gateId, stepId, kind, question, choices, status,
+              decision?, decidedBy?, decidedVia?, comment?, decidedAt? }
+RunDetail = RunSummary + history: [{at, seq, type, stepId, attempt, detail}]   // bounded (≤500)
+ServerInfo { name, rpcVersion, schemaVersion, pid, port, home, node, startedAt, uptimeMs,
+             paseo, providers, pendingGates, runs: {total, active} }
+DoctorReport = node/home/storage/schemaVersion/port/server/paseo/providers/pendingGates/runs/checks
+```
+
+`RunSummary`/`RunDetail` **never** contain `ir`, prompts, agent messages, or transcripts; inputs
+whose names look like credentials (`SECRET_ENV_NAME_PATTERN`) are omitted. `RunDetail.gates` are the
+gate documents projected to `GateSummary` (fresher than the mirrored record after a decision).
+
+### Routes (`server.ts`, FR26)
+
+| Route | Behaviour |
+|---|---|
+| `POST /runs` | load + validate the playbook from `cwd` (loader only), then `host.startRun`; `playbook_invalid` before any task |
+| `GET /runs` | `{ runs: RunSummary[] }` from `argos.run.*` mirrors (newest first) |
+| `GET /runs/:id` | `RunDetail` = summary + bounded history + gate documents |
+| `POST /runs/:id/cancel` | `host.cancelRun` → engine `cancel`; `run_terminal` if already finished |
+| `POST /runs/:id/retry` | `host.retryStep`: clone a terminal run into a fresh `argos.run` task (same `runId`), reset the step + downstream to `pending`, history `retry`; refuses non-terminal (`run_terminal`), unknown run/step (`run_unknown`/`step_unknown`) |
+| `POST /runs/:id/gates/:gateId` | `host.decideGate`; first writer wins (`gate_already_decided`), `gate_unknown`, `run_terminal` |
+| `GET /events` | SSE: `event: snapshot` (all summaries) then `event: run` per changed mirror; `: ping` heartbeat; commit-driven, no DB polling |
+| `GET /info` | `ServerInfo` for `argos doctor` |
+| `GET /health` | `{status:"ok"}` |
+
+`POST /runs` defaults `cwd` to the server's cwd; the CLI always sends the caller's cwd. Declared
+inputs are coerced (`number`/`boolean`/`enum`), defaults fill missing values, and a missing required
+input is `invalid_request`. Bodies are capped at 1 MiB.
+
+### Auth and idempotency
+
+- **Token (FR27).** `ensureToken()` writes 32 random bytes as hex to `$ARGOS_HOME/token` (`0600`) on
+  first serve; every request needs `Authorization: Bearer <token>` (SHA-256 + `timingSafeEqual`).
+  Missing/bad → 401 `unauthorized`. The token is never logged. `OPTIONS` (CORS preflight) is the
+  only unauthenticated method; CORS headers appear only when `cors` is configured.
+- **D15.** `clientRequestId` is stored in the `argos.run` checkpoint (`lastClientRequestId`) **and**
+  in the session document `argos.idempotency` keyed by the id (24 h TTL). The lookup + create is
+  inside one commit, so concurrent repeats return the same `{runId, taskId}` and create one task.
+  A gate decision is idempotent by `(gateId, decision, clientRequestId)` — an identical replay
+  returns the winning receipt instead of `gate_already_decided`.
+- **Run list.** `argos.runs` (singleton session doc) indexes every run id in the same commit that
+  creates the run task (including after-task children and retry clones), so listing never scans
+  task records. Runs created before Phase 8 are not in the index (pre-release; no migration).
+- **New stable codes (Phase 8):** `invalid_request` (400), `run_unknown` (404), `step_unknown` (404).
+  `RPC_ERROR_STATUS` also maps `unauthorized` 401, `playbook_missing` 400,
+  `playbook_invalid`/`playbook_cycle`/`model_unavailable` 422, `gate_unknown`/`run_unknown`/
+  `step_unknown` 404, `gate_already_decided`/`run_terminal`/worktree/concurrency codes 409,
+  `paseo_unreachable`/`provider_exhausted`/`storage_locked` 503, unknown codes 500.
+
+### CLI (`packages/cli`)
+
+`bin: { "argos": "dist/index.js" }` with a shebang; `npm run build` runs a root `postbuild` that
+`chmod +x`es it. `serve` is a **dynamic import**, so `argos run` never loads the durable host.
+
+| Command | `--json` shape | Exit |
+|---|---|---|
+| `argos validate [path]` | `{valid, playbooks:[{id,file,hash}], errors:[{file,stepId,code,message}]}` | 0 valid, 2 invalid, 1 usage |
+| `argos run <playbook> --input k=v [--cwd] [--isolation]` | `{runId, taskId}` | 0, 2 when the playbook/model is refused |
+| `argos ls` | `{runs: RunSummary[]}` | 0 |
+| `argos status <runId>` | `RunDetail` | 0 |
+| `argos gates` | `{gates: GateSummary[]}` (pending only) | 0 |
+| `argos decide <runId> <gateId> <decision> [--comment]` | `GateDecisionResponse` | 0 |
+| `argos cancel <runId>` | `{runId, status}` | 0 |
+| `argos retry <runId> <stepId>` | `{runId, taskId}` | 0 |
+| `argos serve [--port] [--home]` | `{port, home, pid}` | 0 |
+| `argos doctor [--home] [--port]` | `DoctorReport` | 0 (report), 1 old Node |
+
+Human output is concise; JSON is pretty-printed (except `serve`, one compact line). Global exit
+codes: **0** ok, **1** usage/runtime, **2** validation failure, **3** unauthorized/unreachable.
+`argos run` with no server prints "start it with `argos serve`" and exits 3; it never opens SQLite.
+`argos doctor` works without a server (storage path/modes, schema version, port, Node check) and adds
+`/info` data when reachable (pid, Paseo reachability, providers, pending gates, run counters).
+`argos serve` retries `ArgosHost.open` once on a transient failure, never on `storage_locked`, and
+closes server → host → Paseo port on SIGINT/SIGTERM.
+
+**`ARGOS_FAKE_PASEO=1`** is a **test-only** switch for `argos serve`: it uses
+`createFakeStepExecutor()` (in-memory agents that finish on their first poll) and a fake provider
+catalog from `argos-core/paseo`, so Phase 10's E2E needs no daemon or model. Never use it for real
+work.
+
+### Tests
+
+```sh
+npx vitest run --project core test/rpc                     # contract/auth/idempotency/SSE/retry/gates
+npx vitest run --project cli test/validate.test.ts         # exit codes + file/step diagnostics
+npx vitest run --project cli test/json-shapes.test.ts      # committed goldens (+ UPDATE_GOLDEN=1)
+npx vitest run --project cli test/import-graph.test.ts     # CLI never imports durable/git/SQLite
+npx vitest run --project cli test/sentinel.test.ts         # real serve/run children + DB sentinel
+```
+
+Goldens live in `packages/cli/test/golden/`; update deliberately with
+`UPDATE_GOLDEN=1 npx vitest run --project cli`. The sentinel spawns the **built** CLI
+(`packages/cli/dist/index.js`), so run `npm run build` first (root `npm test` already does). The
+preload denies `node:sqlite`, `@earendil-works/*`, and any `argos.sqlite` open in the `argos run`
+child; the test also asserts a second `argos serve` on the same home fails `storage_locked` naming
+`serve.pid`, and that `argos doctor` reports the live server.
+
 ## Commands (run from the repo root)
 
 ```sh
@@ -587,6 +709,7 @@ the durability suite green.
 | `ARGOS_PORT` | `7676` | `argos serve` port on `127.0.0.1` |
 | `ARGOS_PASEO_URL` | `ws://127.0.0.1:6767/ws` | Paseo daemon WebSocket URL (Phase 6, read only by `src/paseo/client.ts`) |
 | `ARGOS_PASEO_PASSWORD` | (unset) | daemon password; never logged, redacted from errors |
+| `ARGOS_FAKE_PASEO` | (unset) | `1` = test-only deterministic executor for `argos serve` (Phase 8/10) |
 
 ## Invariants
 

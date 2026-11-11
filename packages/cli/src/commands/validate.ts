@@ -1,0 +1,192 @@
+/**
+ * `argos validate [path]` (FR25, FR12) — loader only: no server, no SQLite, no side effects.
+ *
+ * With no argument it validates every playbook discovered under the current directory (the same
+ * `.argos/playbooks` / `.paseo/plugins/playbooks` roots the engine uses). A file argument is
+ * validated as that exact file, with the repository root inferred from the standard directory
+ * layout; a directory argument is treated as a repository root, unless it is itself a playbooks
+ * directory or a loose folder of YAML files. Every error keeps its file and step id, and the
+ * command exits 2 when at least one playbook is invalid.
+ */
+
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+
+import { errorLocation, isArgosError } from "argos-core";
+import {
+  discoverPlaybooks,
+  loadPlaybook,
+  type PlaybookEntry,
+} from "argos-core/playbook";
+import type { ValidateError, ValidatePlaybook, ValidateReport } from "argos-core/rpc";
+
+import type { ParsedArgs } from "../args.js";
+import { rejectUnknownFlags } from "../args.js";
+import {
+  EXIT_OK,
+  EXIT_RUNTIME,
+  EXIT_VALIDATION,
+  printJson,
+  type CliIo,
+} from "../output.js";
+
+interface Candidate {
+  readonly entry: PlaybookEntry;
+  /** True when the file is outside the standard discovery roots and must be loaded by path. */
+  readonly explicit: boolean;
+}
+
+interface ValidationResult {
+  readonly report: ValidateReport;
+  readonly repoDir: string;
+}
+
+const YAML_EXTENSIONS = new Set([".yaml", ".yml"]);
+const ROOT_MARKERS = [
+  "/.argos/playbooks",
+  "/.paseo/plugins/playbooks",
+] as const;
+
+function toPosix(path: string): string {
+  return path.split(sep).join("/");
+}
+
+/** The repository root a standard playbooks path belongs to. */
+function inferRepoRoot(file: string): string {
+  const posix = toPosix(file);
+  for (const marker of ROOT_MARKERS) {
+    const index = posix.indexOf(marker);
+    if (index > 0) return posix.slice(0, index);
+  }
+  return dirname(file);
+}
+
+function yamlFiles(directory: string): string[] {
+  return readdirSync(directory)
+    .filter((name) => YAML_EXTENSIONS.has(extname(name)))
+    .map((name) => join(directory, name))
+    .filter((file) => statSync(file).isFile())
+    .sort();
+}
+
+function candidatesFor(target: string): { repoDir: string; candidates: Candidate[] } {
+  const absolute = resolve(target);
+  if (!existsSync(absolute)) {
+    throw new Error(`path not found: ${target}`);
+  }
+  const info = statSync(absolute);
+  if (info.isFile()) {
+    const id = basename(absolute, extname(absolute));
+    return {
+      repoDir: inferRepoRoot(absolute),
+      candidates: [{ entry: { id, file: absolute, root: "" }, explicit: true }],
+    };
+  }
+  if (!info.isDirectory()) {
+    throw new Error(`not a file or directory: ${target}`);
+  }
+  const discovered = discoverPlaybooks(absolute);
+  if (discovered.length > 0) {
+    return {
+      repoDir: absolute,
+      candidates: discovered.map((entry) => ({ entry, explicit: false })),
+    };
+  }
+  const files = yamlFiles(absolute);
+  const explicit = files.map((file) => ({
+    entry: { id: basename(file, extname(file)), file, root: "" },
+    explicit: true,
+  }));
+  return { repoDir: inferRepoRoot(absolute), candidates: explicit };
+}
+
+function displayPath(repoDir: string, file: string): string {
+  const path = relative(resolve(repoDir), resolve(file));
+  return path === "" || path.startsWith("..") ? resolve(file) : toPosix(path);
+}
+
+/** Run the loader over every candidate and collect every failure (never stop at the first). */
+export function validatePlaybooks(
+  pathArg: string | undefined,
+  cwd: string = process.cwd(),
+): ValidationResult {
+  const root = resolve(cwd);
+  const { repoDir, candidates } =
+    pathArg === undefined
+      ? {
+          repoDir: root,
+          candidates: discoverPlaybooks(root).map((entry) => ({ entry, explicit: false })),
+        }
+      : candidatesFor(resolve(root, pathArg));
+
+  const playbooks: ValidatePlaybook[] = [];
+  const errors: ValidateError[] = [];
+  for (const candidate of candidates) {
+    try {
+      const ir = loadPlaybook(
+        repoDir,
+        candidate.entry.id,
+        candidate.explicit ? { file: candidate.entry.file } : {},
+      );
+      playbooks.push({
+        id: ir.id,
+        file: displayPath(repoDir, candidate.entry.file),
+        hash: ir.hash,
+      });
+    } catch (error) {
+      const file = isArgosError(error) && error.file !== undefined ? error.file : candidate.entry.file;
+      const stepId = isArgosError(error) ? (error.stepId ?? null) : null;
+      const code = isArgosError(error) ? error.code : "playbook_invalid";
+      const message = error instanceof Error ? error.message : String(error);
+      const prefix = errorLocation(file, stepId ?? undefined);
+      errors.push({
+        file: displayPath(repoDir, file),
+        stepId,
+        code,
+        message: message.startsWith(prefix) ? message.slice(prefix.length) : message,
+      });
+    }
+  }
+  return {
+    repoDir,
+    report: { valid: errors.length === 0, playbooks, errors },
+  };
+}
+
+export function validateCommand(args: ParsedArgs, io: CliIo): number {
+  const unknown = rejectUnknownFlags(args, []);
+  if (unknown !== undefined) {
+    io.stderr(`argos: ${unknown}\n`);
+    return EXIT_RUNTIME;
+  }
+  if (args.positionals.length > 1) {
+    io.stderr("argos: validate takes at most one path\n");
+    return EXIT_RUNTIME;
+  }
+  let result: ValidationResult;
+  try {
+    result = validatePlaybooks(args.positionals[0], process.cwd());
+  } catch (error) {
+    io.stderr(`argos: ${error instanceof Error ? error.message : String(error)}\n`);
+    return EXIT_RUNTIME;
+  }
+
+  if (args.json) {
+    printJson(io, result.report);
+  } else {
+    for (const playbook of result.report.playbooks) {
+      io.stdout(`ok    ${playbook.id}  ${playbook.file}  ${playbook.hash}\n`);
+    }
+    for (const error of result.report.errors) {
+      const location = error.stepId === null ? error.file : `${error.file}: step ${error.stepId}`;
+      io.stdout(`FAIL  ${location}: ${error.code}: ${error.message}\n`);
+    }
+    const total = result.report.playbooks.length + result.report.errors.length;
+    io.stdout(
+      result.report.valid
+        ? `${result.report.playbooks.length} playbook(s) valid\n`
+        : `${result.report.errors.length} of ${total} playbook(s) invalid\n`,
+    );
+  }
+  return result.report.valid ? EXIT_OK : EXIT_VALIDATION;
+}

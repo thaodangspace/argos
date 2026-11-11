@@ -1,0 +1,94 @@
+{
+  "node": {
+    "version": "<node>",
+    "required": ">=22.5",
+    "ok": true
+  },
+  "home": "<home>",
+  "storage": {
+    "path": "<home>/argos.sqlite",
+    "exists": false,
+    "homeMode": 448
+  },
+  "schemaVersion": 1,
+  "port": 0,
+  "server": {
+    "reachable": true,
+    "url": "http://127.0.0.1:<port>",
+    "pid": 0,
+    "uptimeMs": 0
+  },
+  "paseo": {
+    "mode": "fake",
+    "reachable": true
+  },
+  "providers": [
+    {
+      "provider": "claude",
+      "enabled": true,
+      "models": [
+        "claude/opus",
+        "claude/sonnet"
+      ]
+    },
+    {
+      "provider": "codex",
+      "enabled": true,
+      "models": [
+        "codex/gpt"
+      ]
+    }
+  ],
+  "pendingGates": [
+    {
+      "runId": "run-1",
+      "gateId": "review:1",
+      "stepId": "review",
+      "kind": "step",
+      "question": "Ship it?",
+      "choices": {
+        "approve": {
+          "label": "Approve",
+          "comment": "optional"
+        },
+        "revise": {
+          "label": "Revise",
+          "comment": "required",
+          "color": "danger"
+        }
+      },
+      "status": "pending"
+    }
+  ],
+  "runs": {
+    "total": 1,
+    "active": 1
+  },
+  "checks": [
+    {
+      "name": "node",
+      "ok": true,
+      "detail": "v<node> (requires >=22.5)"
+    },
+    {
+      "name": "storage",
+      "ok": true,
+      "detail": "<home>/argos.sqlite (not created yet)"
+    },
+    {
+      "name": "server",
+      "ok": true,
+      "detail": "pid <pid>"
+    },
+    {
+      "name": "paseo",
+      "ok": true,
+      "detail": "reachable"
+    },
+    {
+      "name": "gates",
+      "ok": false,
+      "detail": "1 pending"
+    }
+  ]
+}

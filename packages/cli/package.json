@@ -10,11 +10,15 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "argos": "dist/index.js"
+  },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc -b",
+    "postbuild": "chmod +x dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc -b",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"

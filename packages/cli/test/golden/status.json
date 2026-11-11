@@ -1,0 +1,107 @@
+{
+  "id": "run-1",
+  "playbookId": "gated",
+  "playbookHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "status": "completed",
+  "inputs": {
+    "issue": "42"
+  },
+  "cwd": "/repo",
+  "worktree": {
+    "path": "/home/worktrees/run-1",
+    "branch": "argos/run-1",
+    "baseSha": "abc123"
+  },
+  "steps": [
+    {
+      "id": "draft",
+      "title": "Draft the change",
+      "kind": "agent",
+      "status": "completed",
+      "attemptCount": 1,
+      "startedAt": 1000,
+      "endedAt": 2000
+    },
+    {
+      "id": "review",
+      "title": "Review",
+      "kind": "gate",
+      "status": "completed",
+      "attemptCount": 0,
+      "startedAt": 2000,
+      "endedAt": 3000
+    }
+  ],
+  "gates": [
+    {
+      "runId": "run-1",
+      "gateId": "review:1",
+      "stepId": "review",
+      "kind": "step",
+      "question": "Ship it?",
+      "choices": {
+        "approve": {
+          "label": "Approve",
+          "comment": "optional"
+        },
+        "revise": {
+          "label": "Revise",
+          "comment": "required",
+          "color": "danger"
+        }
+      },
+      "status": "decided",
+      "decision": "approve",
+      "decidedBy": "dt",
+      "decidedVia": "cli",
+      "comment": "ship it",
+      "decidedAt": 3000
+    }
+  ],
+  "after": [],
+  "createdAt": 1000,
+  "updatedAt": 3000,
+  "seq": 6,
+  "history": [
+    {
+      "at": 1000,
+      "seq": 0,
+      "type": "run_started",
+      "stepId": null,
+      "attempt": null,
+      "detail": "gated"
+    },
+    {
+      "at": 1500,
+      "seq": 1,
+      "type": "dispatch",
+      "stepId": "draft",
+      "attempt": 1,
+      "detail": null
+    },
+    {
+      "at": 2000,
+      "seq": 2,
+      "type": "gate",
+      "stepId": "review",
+      "attempt": null,
+      "detail": "review:1 step"
+    },
+    {
+      "at": 3000,
+      "seq": 3,
+      "type": "gate_decided",
+      "stepId": "review",
+      "attempt": null,
+      "detail": "review:1 approve"
+    },
+    {
+      "at": 3000,
+      "seq": 4,
+      "type": "finish",
+      "stepId": null,
+      "attempt": null,
+      "detail": "approved"
+    }
+  ]
+}

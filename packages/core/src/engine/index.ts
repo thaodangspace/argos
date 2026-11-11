@@ -3,7 +3,9 @@
  * directly, so the reducer contract stays one stable entry point.
  */
 export {
+  cloneRecord,
   createRunRecord,
+  freezeRecord,
   hydrateRunRecord,
   InvalidRunRecordError,
   invariantIssues,
@@ -67,3 +69,4 @@ export {
   type GateDecisionRejection,
   type GateDecisionRequest,
 } from "./decide.js";
+export { downstreamClosure } from "./transition.js";

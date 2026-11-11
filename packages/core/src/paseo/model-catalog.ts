@@ -28,6 +28,8 @@ export const DEFAULT_EXHAUSTED_WINDOW_MS = 15 * 60_000;
 export interface TargetCatalog {
   /** Every resolved target of the playbook (main graph and after-tasks) that is not in the catalog. */
   missingTargets(ir: PlaybookIR, inputs?: Readonly<Record<string, Scalar>>): readonly string[];
+  /** Optional read-only snapshot for `GET /info` / `argos doctor` when no Paseo probe is wired. */
+  snapshot?(): ModelCatalogSnapshot;
 }
 
 /** One provider entry in the `argos doctor` snapshot. */

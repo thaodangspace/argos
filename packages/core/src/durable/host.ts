@@ -46,14 +46,22 @@ import {
   type RunRecord,
   type WorktreeRecord,
 } from "../engine/index.js";
+import { cloneRecord, downstreamClosure, hydrateRunRecord } from "../engine/index.js";
 import type { Clock, StepExecutor } from "./context.js";
 import { systemClock } from "./context.js";
 import {
+  ARGOS_RUN_DOC_KIND,
+  EMPTY_IDEMPOTENCY_DOC,
   GateDocFamily,
   HistoryDocFamily,
+  IDEMPOTENCY_TTL_MS,
+  IdempotencyDocFamily,
   RunDocFamily,
+  RunsIndexDoc,
   appendRunHistory,
+  gateDocSeed,
   gateKey,
+  registerRun,
   toGateDoc,
   toRunDoc,
   writeGateDecision,
@@ -195,12 +203,26 @@ export interface StartRunInput {
    * `isolation` block, which the loader already resolved from playbook/defaults.
    */
   readonly isolation?: IsolationIR;
+  /**
+   * D15: idempotency key for `POST /runs`. A repeated request with the same id returns the run the
+   * first request created instead of starting a second one.
+   */
+  readonly clientRequestId?: string;
 }
 
 export interface StartedRun {
   readonly runId: string;
   readonly taskId: string;
 }
+
+/** Result of `cancelRun`: the status the mirrored record reached. */
+export interface CancelRunResult {
+  readonly runId: string;
+  readonly status: RunRecord["status"];
+}
+
+/** A run document changed (after-tasks included). Returned by {@link ArgosHost.observeRuns}. */
+export type RunChangeListener = (runId: string) => void;
 
 /** What `decideGate` wrote; idempotent by `gateId` (the first writer wins). */
 export interface GateDecisionReceipt {
@@ -217,6 +239,8 @@ export interface DecideGateOptions {
   readonly comment?: string;
   readonly decidedBy?: string;
   readonly decidedVia?: string;
+  /** D15: makes a retried `POST /runs/:id/gates/:gateId` a no-op success. */
+  readonly clientRequestId?: string;
 }
 
 /** Result of `startAfterTask` (FR11). `started: false` means it was already started/settled. */
@@ -411,6 +435,13 @@ export class ArgosHost {
         );
       }
     }
+    const now = this.#clock.now();
+    const clientRequestId = input.clientRequestId;
+    // D15 fast path: a retried write that already landed never creates a second task (or worktree).
+    if (clientRequestId !== undefined) {
+      const existing = await this.#idempotentRun(clientRequestId, now);
+      if (existing !== undefined) return existing;
+    }
     const runId = input.id ?? ulid(this.#clock.now());
     // FR23/D9: an isolated run works in its own worktree from a freshly fetched base. The worktree
     // is created **before** the run task exists, so a dirty base or a missing ref refuses the run
@@ -423,25 +454,55 @@ export class ArgosHost {
       ir: input.ir,
       inputs: input.inputs,
       cwd: input.cwd,
-      now: this.#clock.now(),
+      now,
       ...(worktree === undefined ? {} : { worktree }),
       ...(input.deadline === undefined ? {} : { deadline: input.deadline }),
     });
 
     const root = await this.#harness.root(this.#context);
-    const taskId = await this.#harness.commit(async (tx) => {
+    const started = await this.#harness.commit(async (tx) => {
+      // Re-check inside the commit: two concurrent requests with one clientRequestId serialize here.
+      if (clientRequestId !== undefined) {
+        const doc = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
+        if (doc.runId !== "" && now - doc.createdAt < IDEMPOTENCY_TTL_MS) {
+          return { runId: doc.runId, taskId: doc.taskId };
+        }
+      }
       // D4/D5: the run task is conversation-owned by the host's root conversation.
       const id = await tx.createTask(
         this.#runTask,
-        { runId, record },
+        {
+          runId,
+          record,
+          ...(clientRequestId === undefined ? {} : { clientRequestId }),
+        },
         { ownership: { kind: "conversation" }, conversationId: root.id },
       );
       await writeRunState(tx, id, record, { type: "run_started", detail: input.ir.id });
-      return id;
+      await registerRun(tx, runId);
+      if (clientRequestId !== undefined) {
+        const doc = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
+        doc.runId = runId;
+        doc.taskId = String(id);
+        doc.createdAt = now;
+      }
+      return { runId, taskId: String(id) };
     }, this.#context);
 
     this.#harness.resume();
-    return { runId, taskId: String(taskId) };
+    return started;
+  }
+
+  /** D15: the receipt of a fresh `clientRequestId`, or `undefined` when absent/expired. */
+  async #idempotentRun(clientRequestId: string, now: number): Promise<StartedRun | undefined> {
+    const value = await this.#harness.snapshot(
+      IdempotencyDocFamily,
+      clientRequestId,
+      this.#context,
+    );
+    if (value === undefined) return undefined;
+    if (value.runId === "" || now - value.createdAt >= IDEMPOTENCY_TTL_MS) return undefined;
+    return { runId: value.runId, taskId: value.taskId };
   }
 
   /** Continue every unfinished task (FR29). Idempotent. */
@@ -534,7 +595,12 @@ export class ArgosHost {
       ...(options.decidedBy === undefined ? {} : { decidedBy: options.decidedBy }),
       ...(options.decidedVia === undefined ? {} : { decidedVia: options.decidedVia }),
     };
+    // D15 fast path: the exact same client request (same gate, decision, and request id) already
+    // won the race; report the winning receipt instead of `gate_already_decided`.
+    const replay = await this.#replayedDecision(runId, gateId, decision, options.clientRequestId);
+    if (replay !== undefined) return replay;
 
+    let replayed: GateDecisionReceipt | undefined;
     await this.#harness.commit(async (tx) => {
       // Re-read the live checkpoint inside the commit: it is fresher than the mirror when the run
       // task is still working (the mirror is written in the same commit, so they never diverge).
@@ -546,6 +612,31 @@ export class ArgosHost {
         state !== undefined && "checkpoint" in state && state.checkpoint !== undefined
           ? (state.checkpoint as unknown as RunCheckpoint).record
           : (runDoc.record as unknown as RunRecord);
+      // Same re-check inside the single-writer commit: concurrent identical decisions serialize.
+      const gateRecord = record.gates.find((candidate) => candidate.id === gateId);
+      if (gateRecord !== undefined && options.clientRequestId !== undefined) {
+        const doc = await tx.doc(
+          GateDocFamily,
+          gateKey(runId, gateId),
+          gateDocSeed(runId, gateRecord),
+        );
+        if (
+          doc.status === "decided" &&
+          doc.decision === decision &&
+          doc.clientRequestId === options.clientRequestId
+        ) {
+          replayed = {
+            runId,
+            gateId,
+            decision,
+            decidedAt: doc.decidedAt ?? decidedAt,
+            ...(doc.comment === null ? {} : { comment: doc.comment }),
+            ...(doc.decidedBy === null ? {} : { decidedBy: doc.decidedBy }),
+            ...(doc.decidedVia === null ? {} : { decidedVia: doc.decidedVia }),
+          };
+          return;
+        }
+      }
       const plan = decideGate(record, {
         gateId,
         decision,
@@ -564,6 +655,9 @@ export class ArgosHost {
         ...(options.comment === undefined ? {} : { comment: options.comment }),
         ...(options.decidedBy === undefined ? {} : { decidedBy: options.decidedBy }),
         ...(options.decidedVia === undefined ? {} : { decidedVia: options.decidedVia }),
+        ...(options.clientRequestId === undefined
+          ? {}
+          : { clientRequestId: options.clientRequestId }),
       });
       if (!written.written) {
         throw new ArgosError(
@@ -574,7 +668,29 @@ export class ArgosHost {
     }, this.#context);
 
     this.#harness.resume();
-    return receipt;
+    return replayed ?? receipt;
+  }
+
+  /** D15: an already-decided gate whose stored request id matches this exact request. */
+  async #replayedDecision(
+    runId: string,
+    gateId: string,
+    decision: string,
+    clientRequestId: string | undefined,
+  ): Promise<GateDecisionReceipt | undefined> {
+    if (clientRequestId === undefined) return undefined;
+    const doc = await this.getGate(runId, gateId);
+    if (doc === undefined || doc.status !== "decided") return undefined;
+    if (doc.decision !== decision || doc.clientRequestId !== clientRequestId) return undefined;
+    return {
+      runId,
+      gateId,
+      decision,
+      decidedAt: doc.decidedAt ?? this.#clock.now(),
+      ...(doc.comment === undefined ? {} : { comment: doc.comment }),
+      ...(doc.decidedBy === undefined ? {} : { decidedBy: doc.decidedBy }),
+      ...(doc.decidedVia === undefined ? {} : { decidedVia: doc.decidedVia }),
+    };
   }
 
   /**
@@ -639,6 +755,143 @@ export class ArgosHost {
     this.#harness.resume();
     if (taskId === undefined) return { runId, afterId, started: false };
     return { runId, afterId, started: true, taskId: String(taskId) };
+  }
+
+  /**
+   * Cancel a live run (FR25 `argos cancel`). The abort handler routes the cancellation through the
+   * reducer, so the mirrored record becomes `cancelled`; the caller waits for that terminal state.
+   * A finished run is refused with `run_terminal`, an unknown one with `run_unknown`.
+   */
+  async cancelRun(runId: string): Promise<CancelRunResult> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const doc = await this.getRun(runId);
+    if (doc === undefined) {
+      throw new ArgosError("run_unknown", `unknown run "${runId}"`);
+    }
+    if (isTerminalRunStatus(doc.record.status)) {
+      throw new ArgosError(
+        "run_terminal",
+        `run ${runId} is already ${doc.record.status}; nothing to cancel`,
+      );
+    }
+    const taskId = Number(doc.taskId);
+    if (!Number.isInteger(taskId)) {
+      throw new ArgosError("run_unknown", `run ${runId}: task ${doc.taskId} is not numeric`);
+    }
+    const outcome = await this.#harness.abortTask(taskId as TaskId, this.#context);
+    if (outcome !== "terminal") {
+      await this.#harness.waitForTask(taskId as TaskId, this.#context);
+    }
+    const after = await this.getRun(runId);
+    return { runId, status: after?.record.status ?? "cancelled" };
+  }
+
+  /**
+   * Retry a terminal run from one step (FR25 `argos retry`).
+   *
+   * A **new** `argos.run` task is created from the mirrored record with the given step and every
+   * transitively downstream step reset to `pending` (outputs and attempt history are kept, loop
+   * counters and quota exhaustion stay), and the same `runId` — the old checkpoint is never
+   * mutated. The retried run then goes through the normal `select → … → done` machine, so gates,
+   * loops, and `when` behave exactly like a first run. A `retry` history event records the step.
+   */
+  async retryStep(runId: string, stepId: string): Promise<StartedRun> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const doc = await this.getRun(runId);
+    if (doc === undefined) {
+      throw new ArgosError("run_unknown", `unknown run "${runId}"`);
+    }
+    if (!isTerminalRunStatus(doc.record.status)) {
+      throw new ArgosError(
+        "run_terminal",
+        `run ${runId} is ${doc.record.status}; cancel it before retrying a step`,
+      );
+    }
+    const record = doc.record;
+    if (record.ir.steps.every((step) => step.id !== stepId)) {
+      throw new ArgosError(
+        "step_unknown",
+        `run ${runId}: step "${stepId}" is not part of playbook ${record.playbookId}`,
+      );
+    }
+
+    const now = this.#clock.now();
+    const draft = cloneRecord(record);
+    for (const id of downstreamClosure(record.ir, [stepId])) {
+      const step = draft.steps[id];
+      if (step === undefined) continue;
+      step.status = "pending";
+      delete step.notBefore;
+      delete step.outcome;
+      delete step.errorCode;
+      delete step.feedback;
+    }
+    draft.status = "pending";
+    delete draft.outcome;
+    delete draft.errorCode;
+    draft.updatedAt = Math.max(record.updatedAt, now);
+    draft.seq = record.seq + 1;
+    const retried = hydrateRunRecord(draft);
+
+    const root = await this.#harness.root(this.#context);
+    const taskId = await this.#harness.commit(async (tx) => {
+      const id = await tx.createTask(
+        this.#runTask,
+        { runId, record: retried },
+        { ownership: { kind: "conversation" }, conversationId: root.id },
+      );
+      await writeRunState(tx, id, retried, {
+        type: "retry",
+        stepId,
+        detail: `retry from ${stepId}`,
+      });
+      await registerRun(tx, runId);
+      return id;
+    }, this.#context);
+
+    this.#harness.resume();
+    return { runId, taskId: String(taskId) };
+  }
+
+  /**
+   * Every run mirror (FR25 `argos ls`, FR26 `GET /runs`). Reads the session document family only:
+   * prompts, transcripts, and task checkpoints never cross this boundary.
+   */
+  async listRuns(): Promise<RunDoc[]> {
+    const index = await this.#harness.snapshot(RunsIndexDoc, this.#context);
+    if (index === undefined) return [];
+    const runs: RunDoc[] = [];
+    for (const value of index.ids) {
+      if (typeof value !== "string") continue;
+      const doc = await this.getRun(value);
+      if (doc !== undefined) runs.push(doc);
+    }
+    return runs;
+  }
+
+  /**
+   * Observe run-mirror commits (FR26 SSE). `listener` runs inside the commit publication and must
+   * only record the id, never call the host back: the server schedules its own read (`setTimeout`)
+   * and then serves the summary. The returned function detaches the observer.
+   */
+  observeRuns(listener: RunChangeListener): () => void {
+    const observation = this.#harness.observeCommits({
+      advance: (publication) => {
+        const seen = new Set<string>();
+        for (const change of publication.changes) {
+          if (change.type !== "document") continue;
+          if (change.record.kind !== ARGOS_RUN_DOC_KIND) continue;
+          const key = change.record.key;
+          if (key === undefined || seen.has(key)) continue;
+          seen.add(key);
+          listener(key);
+        }
+      },
+      end: () => undefined,
+    });
+    return () => {
+      observation.detach();
+    };
   }
 
   /** The bounded history document of one run. */

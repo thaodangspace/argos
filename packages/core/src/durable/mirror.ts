@@ -17,7 +17,7 @@
  */
 
 import type { JsonValue } from "@earendil-works/chord/json";
-import { defineDocFamily, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { defineDoc, defineDocFamily, type TaskId, type Tx } from "@earendil-works/pi-durable";
 
 import type { GateChoiceRecord, GateKind, GateRecord, RunRecord } from "../engine/index.js";
 
@@ -25,9 +25,71 @@ import type { GateChoiceRecord, GateKind, GateRecord, RunRecord } from "../engin
 export const ARGOS_RUN_DOC_KIND = "argos.run";
 export const ARGOS_HISTORY_DOC_KIND = "argos.history";
 export const ARGOS_GATE_DOC_KIND = "argos.gate";
+/** D15: idempotency receipts for `clientRequestId` writes. */
+export const ARGOS_IDEMPOTENCY_DOC_KIND = "argos.idempotency";
+/** The session index of every run id (FR25/FR26 listing without scanning task records). */
+export const ARGOS_RUNS_INDEX_DOC_KIND = "argos.runs";
 
 /** D16: the history document keeps the newest 500 events. */
 export const HISTORY_LIMIT = 500;
+
+/** D15: a `clientRequestId` receipt is honoured for 24 hours. */
+export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+
+// ------------------------------------------------------------------ idempotency document
+
+/**
+ * One `clientRequestId` receipt (D15): the run/task the first request created. Written in the same
+ * commit as the run task, so a retried HTTP write can never create a second run. A receipt older
+ * than {@link IDEMPOTENCY_TTL_MS} is ignored and overwritten.
+ */
+export type IdempotencyDocValue = {
+  runId: string;
+  taskId: string;
+  createdAt: number;
+};
+
+export const IdempotencyDocFamily = defineDocFamily<IdempotencyDocValue, IdempotencyDocValue>({
+  kind: ARGOS_IDEMPOTENCY_DOC_KIND,
+  version: 1,
+  family: true,
+  scope: "session",
+  initial: (seed) => ({
+    runId: seed.runId,
+    taskId: seed.taskId,
+    createdAt: seed.createdAt,
+  }),
+  checkpointWhen: () => true,
+});
+
+/** The empty seed used when reading an idempotency key that may not exist yet. */
+export const EMPTY_IDEMPOTENCY_DOC: IdempotencyDocValue = {
+  runId: "",
+  taskId: "",
+  createdAt: 0,
+};
+
+// ------------------------------------------------------------------ runs index
+
+/**
+ * The session index of run ids. Written in the same commit that creates a run task (including the
+ * retry clone), so `GET /runs` can list the mirrored documents without scanning task records.
+ */
+export type RunsIndexDocValue = { ids: JsonValue[] };
+
+export const RunsIndexDoc = defineDoc<RunsIndexDocValue>({
+  kind: ARGOS_RUNS_INDEX_DOC_KIND,
+  version: 1,
+  scope: "session",
+  initial: () => ({ ids: [] }),
+  checkpointWhen: () => true,
+});
+
+/** Register `runId` in the index exactly once. Call inside the creating commit. */
+export async function registerRun(tx: Tx, runId: string): Promise<void> {
+  const doc = await tx.doc(RunsIndexDoc);
+  if (!doc.ids.includes(runId)) doc.ids.push(runId);
+}
 
 // ------------------------------------------------------------------ run document
 
@@ -81,6 +143,8 @@ export type GateDocValue = {
   decidedVia: string | null;
   comment: string | null;
   decidedAt: number | null;
+  /** D15: the request that wrote the decision, for idempotent HTTP retries. */
+  clientRequestId: string | null;
   createdAt: number;
 };
 
@@ -98,6 +162,7 @@ export interface GateDoc {
   readonly decidedVia?: string;
   readonly comment?: string;
   readonly decidedAt?: number;
+  readonly clientRequestId?: string;
   readonly createdAt: number;
 }
 
@@ -133,6 +198,7 @@ export const GateDocFamily = defineDocFamily<GateDocValue, GateDocValue>({
     decidedVia: seed.decidedVia,
     comment: seed.comment,
     decidedAt: seed.decidedAt,
+    clientRequestId: seed.clientRequestId,
     createdAt: seed.createdAt,
   }),
   checkpointWhen: () => true,
@@ -153,6 +219,7 @@ export function toGateDoc(value: Readonly<GateDocValue>): GateDoc {
     ...(value.decidedVia === null ? {} : { decidedVia: value.decidedVia }),
     ...(value.comment === null ? {} : { comment: value.comment }),
     ...(value.decidedAt === null ? {} : { decidedAt: value.decidedAt }),
+    ...(value.clientRequestId == null ? {} : { clientRequestId: value.clientRequestId }),
     createdAt: value.createdAt,
   };
 }
@@ -172,6 +239,7 @@ export function gateDocSeed(runId: string, gate: GateRecord): GateDocValue {
     decidedVia: null,
     comment: null,
     decidedAt: null,
+    clientRequestId: null,
     createdAt: gate.createdAt,
   };
 }
@@ -196,6 +264,7 @@ export async function openGateDoc(tx: Tx, runId: string, gate: GateRecord): Prom
   doc.decidedVia = null;
   doc.comment = null;
   doc.decidedAt = null;
+  doc.clientRequestId = null;
   doc.createdAt = gate.createdAt;
 }
 
@@ -213,6 +282,8 @@ export interface GateDecisionWriteInput {
   readonly comment?: string;
   readonly decidedBy?: string;
   readonly decidedVia?: string;
+  /** D15: the HTTP request that wrote it, so a retried decision is a no-op success. */
+  readonly clientRequestId?: string;
 }
 
 /**
@@ -236,6 +307,7 @@ export async function writeGateDecision(
   doc.decidedVia = input.decidedVia ?? null;
   doc.comment = input.comment ?? null;
   doc.decidedAt = input.decidedAt;
+  doc.clientRequestId = input.clientRequestId ?? null;
   return { written: true, decision: doc.decision, decidedAt: doc.decidedAt };
 }
 
@@ -339,6 +411,7 @@ export const HISTORY_EVENT_TYPES = [
   "task_error",
   "after_queued",
   "after_start",
+  "retry",
 ] as const;
 export type HistoryEventType = (typeof HISTORY_EVENT_TYPES)[number];
 

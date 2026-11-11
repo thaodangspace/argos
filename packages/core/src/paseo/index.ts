@@ -11,3 +11,4 @@ export * from "./output.js";
 export * from "./model-catalog.js";
 export * from "./agent-step.js";
 export * from "./client.js";
+export * from "./fake.js";

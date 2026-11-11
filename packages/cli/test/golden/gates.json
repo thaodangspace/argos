@@ -1,0 +1,23 @@
+{
+  "gates": [
+    {
+      "runId": "run-1",
+      "gateId": "review:1",
+      "stepId": "review",
+      "kind": "step",
+      "question": "Ship it?",
+      "choices": {
+        "approve": {
+          "label": "Approve",
+          "comment": "optional"
+        },
+        "revise": {
+          "label": "Revise",
+          "comment": "required",
+          "color": "danger"
+        }
+      },
+      "status": "pending"
+    }
+  ]
+}

@@ -51,6 +51,7 @@ import {
   appendRunHistory,
   mergeAfterFromMirror,
   openGateDoc,
+  registerRun,
   skippedEffectDetail,
   writeAfterStatus,
   writeRunState,
@@ -73,6 +74,8 @@ export interface RunTaskInput {
   readonly runId: string;
   /** The freshly created checkpoint; `initial()` copies it into the task checkpoint. */
   readonly record: RunRecord;
+  /** D15: the client request that created this run, kept in the checkpoint for auditing. */
+  readonly clientRequestId?: string;
   /** Set on an after-task child: the run that started it (FR11). */
   readonly after?: AfterTaskLink;
 }
@@ -125,6 +128,8 @@ export interface RunCheckpointFields {
   readonly gateSettles: readonly GateSettlement[];
   /** `argos.run` child task per after-task id (FR11). */
   readonly afterTasks: Readonly<Record<string, TaskId>>;
+  /** D15: the client request that created this run (`POST /runs` idempotency). */
+  readonly lastClientRequestId?: string;
   readonly finished?: RunFinished;
 }
 
@@ -182,6 +187,7 @@ export const RunCheckpointSchema = z.strictObject({
   gateTasks: z.record(z.string(), z.number().int().positive()),
   gateSettles: z.array(GateSettlementSchema),
   afterTasks: z.record(z.string(), z.number().int().positive()),
+  lastClientRequestId: z.string().min(1).optional(),
   finished: RunFinishedSchema.optional(),
 });
 
@@ -491,6 +497,9 @@ async function planNext(
     gateTasks,
     gateSettles: [] as readonly GateSettlement[],
     afterTasks,
+    ...(previous.lastClientRequestId === undefined
+      ? {}
+      : { lastClientRequestId: previous.lastClientRequestId }),
     ...(finished === undefined ? {} : { finished }),
   };
 
@@ -750,6 +759,7 @@ export async function createAfterRunTask(
     type: "run_started",
     detail: planned.afterId,
   });
+  await registerRun(tx, planned.record.id);
   return childId;
 }
 
@@ -768,6 +778,9 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
       gateTasks: {},
       gateSettles: [],
       afterTasks: {},
+      ...(input.clientRequestId === undefined
+        ? {}
+        : { lastClientRequestId: input.clientRequestId }),
     }),
 
     phases: {

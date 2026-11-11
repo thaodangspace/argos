@@ -25,6 +25,10 @@ export const ARGOS_ERROR_CODES = [
   "concurrency_limit",
   "unauthorized",
   "run_terminal",
+  // Phase 8 (RPC surface): names the request/route failure instead of guessing a domain code.
+  "invalid_request",
+  "run_unknown",
+  "step_unknown",
 ] as const;
 
 export type ArgosErrorCode = (typeof ARGOS_ERROR_CODES)[number];
