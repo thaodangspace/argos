@@ -17,9 +17,9 @@ Paseo plugin (panel + tools) ────┘        ├── $ARGOS_HOME/argos.
 
 | Process | Owns | Never does |
 |---|---|---|
-| `argos serve` | SQLite, the pi-durable harness, the run scheduler, the Paseo client, the loopback RPC server, the bearer token | nothing outside its home; no agent work itself |
+| `argos serve` | SQLite, the pi-durable harness, the schedule runner (one timer over durable schedule documents), the Paseo client, the loopback RPC server, the bearer token | nothing outside its home; no agent work itself |
 | `argos` CLI | argument parsing, HTTP calls, human/JSON rendering | open SQLite, import the durable host, launch agents |
-| Paseo plugin (`id: argos`) | a sidebar row, a run/gate panel, four chat tools | open SQLite, hold run state, keep a run alive |
+| Paseo plugin (`id: argos`) | a sidebar row, a run/gate panel, four chat tools | open SQLite, hold run state, keep a run alive, touch schedules |
 
 The split exists so that a plugin reload, a CLI exit, or a closed terminal cannot kill an
 in-flight run. It also enforces the single-writer rule mechanically: the CLI and plugin have no
@@ -125,10 +125,14 @@ Documents are session-scoped families:
 | `argos.gate` | `${runId}.${gateId}` | the one decision document (`pending`/`decided`) |
 | `argos.idempotency` | `clientRequestId` | replay cache, 24 h TTL |
 | `argos.runs` | singleton | run-id index (listing never scans tasks) |
+| `argos.schedule` | `<id>` | one schedule (playbook, cwd, cron/tz, policies, `nextFireAt`, `lastFire`, `runIds`, bounded fire log) |
+| `argos.schedules` | singleton | schedule-id index — the roster every schedule read consults |
 
 The run and history documents are written inside the same `runtime.commit()` as the task
 checkpoint, so `GET /runs/:id` never sees a state older than the engine. A gate document is
-written by the decision writer, not by the gate task.
+written by the decision writer, not by the gate task. A schedule fire writes its run task, mirror,
+history, run-index entry and the schedule document in the same commit, so the run and its fire
+marker cannot disagree.
 
 ## Durability model
 
@@ -157,7 +161,11 @@ claim exactly-once.
 built CLI starts `argos serve`, a blocked step is held, the process is `SIGKILL`ed, the release
 file appears, the server restarts on the same home, and the file-backed fake agent ledger shows
 exactly one creation per step across both lifetimes. The gate scenario kills with a pending gate,
-restarts, decides, and completes.
+restarts, decides, and completes. A third scenario kills `argos serve` **before** a schedule's
+fire time, waits for the wall clock to pass it, restarts, and asserts exactly one run for that
+instant (its ULID time prefix decodes to the fire time), one ledger creation for its step,
+`lastFire.status = "started"`, and one fire line on stderr — then kills and restarts again to prove
+the same fire time cannot run twice.
 
 Timeouts and retries live in `argos.step`, because a run parked in `waiting` does not tick.
 Per-step `timeout` (default 30m) is resolved at use time; a timed-out attempt is retried per
@@ -165,6 +173,78 @@ Per-step `timeout` (default 30m) is resolved at use time; a timed-out attempt is
 `step_timeout`. The run `deadline` fails the whole run immediately. This is a documented deviation
 from a fully ticking scheduler: the run record sees one dispatch per child task, while local
 attempts are visible in the step checkpoint/history.
+
+## Scheduler
+
+Recurring work is a **schedule document**, not a long-lived task:
+
+```
+argos.schedule.<id>   one schedule: playbook, cwd, cron + IANA tz, overlap/catchUp/keep,
+                      enabled/generation, nextFireAt, lastFire, liveRunId, runIds, fire log
+argos.schedules       the schedule-id index — the roster every read and every fire commit consults
+```
+
+`ArgosHost` owns one `ScheduleRunner` (`durable/schedules.ts`). It arms exactly one timer, at
+`min(earliest enabled nextFireAt, now + 60 s)`, and arms none when every schedule is paused. The
+timer only enqueues a tick; ticks, timer fires, and `argos schedule run` all execute one after
+another on a single promise chain, so two fires never overlap. `croner` is used only as a
+calculator (`schedule/next.ts`, built paused, with no callback): it never arms a timer.
+
+Why not a durable task per schedule, or one singleton scheduler task? A pi-durable task cannot be
+woken before its `sleeping { until }` elapses, so edit, pause, and run-now would each need
+abort-plus-recreate, and every checkpoint shape change would need `migrate()`. Durability here
+comes from the document, the fire's single commit, and the deterministic run id instead: while
+`argos serve` is down nothing is lost (the schedule is a row), and the next start catches up.
+
+### The fire commit
+
+A fire is prepared outside any commit — load the playbook at fire time, coerce inputs, pin
+scripts, cut the worktree — and then written by **one** commit that also updates the schedule
+document. Inside that commit the runner re-reads the document and aborts the fire (writing
+nothing) when any of these holds — with one exception, the already-landed run, which is adopted
+instead:
+
+- the index no longer lists the id (deleted while preparing);
+- the `uid` differs (the id was deleted and re-added);
+- `generation` changed (an edit or a pause landed);
+- the schedule is disabled;
+- `lastFire.fireAt >= fireAt` (that instant already landed, or the clock moved back);
+- the run index already lists the run id — the existing run is adopted as this fire's outcome
+  instead of starting a second one;
+- `overlap: skip` and `liveRunId` names a run that is still live.
+
+The run id is deterministic: `scheduleRunId(uid, fireAt)` is a ULID whose time part is the fire
+time and whose random part is `sha256(uid:fireAt)`. A crash after the worktree exists but before
+the commit therefore re-fires the same instant with the same id (and the same
+`<home>/worktrees/<runId>`), and two schedules due at the same instant cannot collide. `argos
+schedule run` uses a fresh ULID, because "now" is not a fire time.
+
+Catch-up: a tick takes the **latest** due fire time and counts the earlier ones (capped at
+`10000+`), then applies `catchUp` — `all` (default) always fires that latest time, `<ms>` fires it
+only inside the window, `0` only inside a 120 s grace. Earlier due times become one `missed`
+fire-log entry and never start a run. A fire at most 120 s late is `cron`; later is `catch_up`.
+Overlap: `skip` (default) records `skipped_overlap` and advances `nextFireAt` while the previous
+run is live; `allow` starts anyway. A fire that fails before the commit is recorded as `refused`
+(code plus a bounded message, `consecutiveFailures + 1`) and is retried only at the next fire time.
+
+DST follows `croner`'s documented rules, pinned by fixed-epoch tests in America/New_York,
+Europe/Berlin, and Asia/Saigon: a fixed-time job runs once on a repeated local time and, in a
+spring-forward gap, at the first valid instant after it; a wildcard, range, or step job follows
+Vixie-cron (both occurrences, nonexistent skipped). `nextFireAt` is stored as absolute epoch
+milliseconds, so a clock that moves backwards cannot re-fire an instant (`lastFire.fireAt` guards
+it) and a clock that moves forward is an ordinary catch-up.
+
+Retention is a separate step: after a fire whose run started, and outside its commit, runs in
+`runIds` (newest first, capped at 1,000) beyond the newest `keep` (1..1,000 or `all`) are removed
+with the same `removeRun` that `argos rm` uses. Retention cannot fail a fire: a live run, a run
+with a running after-task, and a run whose worktree directory still exists are skipped and retried
+after the next fire, and retention never removes a worktree or a branch.
+
+Observability: `lastFire`, the 50-entry fire log, `consecutiveFailures`, `nextFireAt`, `liveRunId`
+and `runIds` in the document; `trigger` on the run record and `RunSummary`; `argos schedule
+ls`/`show`, `argos ls --schedule <id>`, the `argos doctor` `schedules` check, and one stderr line
+per fire (`[argos] schedule <id> <iso> <status> run <runId>`). The listener is registered before
+the first tick, so a catch-up fire during startup is announced too.
 
 ## Gates and decisions
 
@@ -217,11 +297,18 @@ not prevent (see `docs/compat.md`).
 
 ## Control surfaces
 
-`argos validate|run|ls|status|gates|decide|cancel|retry|serve|doctor` are HTTP clients of
-`argos serve` (except `validate`, which only reads files, and `doctor`, which also inspects the
-local home when the server is down). `POST` writes accept `clientRequestId`; the lookup and create
-share one commit, so a retried request returns the same run. `GET /events` is commit-driven SSE
-with a snapshot frame and reconnecting clients; the plugin re-fetches on reconnect.
+`argos validate|run|ls|status|gates|decide|cancel|retry|rm|worktree|schedule|serve|doctor` are
+HTTP clients of `argos serve` (except `validate`, which only reads files, and `doctor`, which also
+inspects the local home when the server is down). `POST` writes accept `clientRequestId`; the
+lookup and create share one commit, so a retried request returns the same run. `GET /events` is
+commit-driven SSE with a snapshot frame and reconnecting clients; the plugin re-fetches on
+reconnect.
+
+The scheduler's operator surface is `argos schedule add|ls|show|edit|pause|resume|run|rm` and
+`argos ls --schedule <id>`. A schedule's `cwd` (resolved `--cwd`, else the CLI's cwd) and `tz`
+(`--tz`, else the CLI process zone) come from that invocation, never from the server, so an
+unattended run means the same thing after a restart or from another machine; the RPC layer
+requires `cwd` in the body for the same reason.
 
 `RunSummary`/`RunDetail` never contain prompts, agent messages, transcripts, or credential-like
 inputs. The plugin holds no durable state: teardown closes only its HTTP client and streams, and a
@@ -325,6 +412,28 @@ subdirectory whose own contents are symlinks. A refusal is local: the tool retur
 `{error:{code:"invalid_request"}}` and makes no HTTP call. A server-side `invalid_request` stays
 `invalid_request` (it is not collapsed into `playbook_invalid`).
 
+### Unattended schedules
+
+A schedule is executable intent stored on disk: it makes `argos serve` start a playbook with no
+operator present. It is therefore created and changed only through the token-authenticated RPC
+surface (`argos schedule …`, `POST /schedules…`); the plugin exposes no schedule panel or chat
+tool, so an agent cannot register, edit, or run one.
+
+- `cwd` is validated when the schedule is added or edited **and again at every fire**
+  (`resolveRunRequest`), so a deleted, moved, or replaced directory is a refused fire, not a run
+  somewhere unexpected.
+- The stored `tz` is checked by `Intl` and never reaches a shell; the stored cron is parsed by
+  `croner` in 5-field mode (`@reboot` and seconds are refused).
+- Scripts are resolved, hashed, and pinned at each fire exactly as for a manual run, and re-hashed
+  before every spawn; a changed script is `script_changed`, never a silent run.
+- The document stores inputs (in `0600` SQLite, like run records) but **no environment values**: a
+  scheduled script or agent inherits `argos serve`'s environment through the same env filter, and
+  summaries go through `publicInputs`, so credential-looking names never reach a caller.
+- A refusal stores the `ArgosError.code` plus a message cut to 500 characters; a non-`ArgosError`
+  contributes only its name, so no YAML, input, or environment value is persisted.
+- Deterministic run ids stay inside the ULID alphabet, so the record-only worktree guard
+  (`<home>/worktrees/<runId>`, branch `argos/<runId>`) still holds.
+
 ## Invariants
 
 - **No LLM in control flow.** Transitions, readiness, loop limits, gates, retries, and timeouts
@@ -338,6 +447,9 @@ subdirectory whose own contents are symlinks. A refusal is local: the tool retur
 - **Same-commit mirrors.** Run/history documents are committed with the checkpoint; the UI cannot
   observe a state older than the engine.
 - **Definition freeze.** A run's IR and hash are immutable once started.
+- **Durable schedules.** A schedule is a document, not a task; one in-process timer only wakes a
+  tick, and the fire's single commit (guards plus a deterministic run id) is what makes a fire
+  happen exactly once.
 
 ## Where to read more
 

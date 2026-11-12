@@ -1,0 +1,27 @@
+{
+  "id": "nightly",
+  "playbookId": "gated",
+  "cwd": "/repo",
+  "inputs": {
+    "issue": "42"
+  },
+  "isolation": "worktree",
+  "cron": "0 7 * * *",
+  "tz": "Europe/Berlin",
+  "overlap": "skip",
+  "catchUp": "all",
+  "keep": 30,
+  "enabled": false,
+  "generation": 1,
+  "createdAt": 1793491200000,
+  "updatedAt": 1794466800000,
+  "nextFireAt": null,
+  "lastFire": {
+    "fireAt": 1794466800000,
+    "at": 1794466800000,
+    "reason": "cron",
+    "status": "started",
+    "runId": "run-1"
+  },
+  "consecutiveFailures": 0
+}

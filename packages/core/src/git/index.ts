@@ -31,6 +31,7 @@ export {
 } from "./snapshot.js";
 
 export {
+  assertRunBaseClean,
   createRunWorktree,
   listRunWorktrees,
   parseWorktreeList,

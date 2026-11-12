@@ -34,6 +34,33 @@ import {
   type CliIo,
 } from "../output.js";
 
+/**
+ * FR10.4: one fire outcome, as `ArgosHost.observeScheduleFires` announces it. Derived from the host
+ * method so the CLI never imports `argos-core/durable` (the import-graph guard forbids it).
+ */
+type ScheduleFireListener = Parameters<ArgosHost["observeScheduleFires"]>[0];
+export type ScheduleFireEvent = Parameters<ScheduleFireListener>[0];
+
+/**
+ * The single stderr line `argos serve` prints per fire (FR10.4), including its newline.
+ *
+ * It carries the schedule id, the ISO fire time, the status, and then either the run the fire
+ * started or the error code that refused it. It never contains an input value — and the event it
+ * reads has no inputs at all.
+ */
+export function formatScheduleFireLine(event: ScheduleFireEvent): string {
+  const head = `[argos] schedule ${event.scheduleId} ${new Date(event.fireAt).toISOString()} ${event.status}`;
+  const tail =
+    event.runId !== undefined
+      ? ` run ${event.runId}`
+      : event.errorCode !== undefined && event.errorCode !== null
+        ? ` ${event.errorCode}`
+        : event.count !== undefined
+          ? ` ${event.count}`
+          : "";
+  return `${head}${tail}\n`;
+}
+
 function configuredPort(value: string | undefined): number {
   const raw = value ?? process.env["ARGOS_PORT"];
   if (raw === undefined) return 7676;
@@ -97,6 +124,8 @@ async function buildDependencies(home: string, io: CliIo): Promise<Dependencies>
         statePath: fakeDir === undefined ? home : resolve(fakeDir),
       }),
       modelCatalog: catalog,
+      // FR10.4: registered before the first tick, so a catch-up fire during `open()` still prints.
+      onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
     });
     return {
       host,
@@ -122,6 +151,7 @@ async function buildDependencies(home: string, io: CliIo): Promise<Dependencies>
     home,
     executor,
     ...(catalog === undefined ? {} : { modelCatalog: catalog }),
+    onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
   });
   return {
     host,
@@ -173,6 +203,10 @@ export async function serveCommand(args: ParsedArgs, io: CliIo): Promise<number>
     } else {
       io.stdout(`[argos] listening on ${server.url} (home ${home}, pid ${process.pid})\n`);
     }
+
+    // FR10.4: the fire line is already wired through `ArgosHost.open` (`onScheduleFire`), so a
+    // catch-up fire that runs while the host opens is announced too. A JSON `serve` still keeps
+    // stdout to one line.
 
     return await new Promise<number>((resolve) => {
       let stopping = false;

@@ -68,6 +68,25 @@ export function ulid(now: number = Date.now()): string {
   return `${timePart}${randomPart}`;
 }
 
+/**
+ * FR4.3: the deterministic id of a schedule fire.
+ *
+ * The time part is the fire time, so ids sort by fire time and a re-fired schedule keeps its id;
+ * the random part comes from `seed` (the caller's hash of `uid:fireAt`), so two schedules firing at
+ * the same instant never collide, and the same schedule re-firing one instant yields the same id
+ * after a crash.
+ *
+ * It deliberately reads and writes **none** of the module state: the monotonic `lastTime` /
+ * `lastRandom` pair belongs to `ulid()`, and a deterministic id that advanced it would make a
+ * later manual run id sort before a fire that already happened.
+ */
+export function ulidFrom(timeMs: number, seed: Uint8Array): string {
+  const time = Math.floor(timeMs);
+  const timePart = encode(BigInt(time), TIME_LENGTH);
+  const randomPart = encode(randomValue(seed.slice(0, 10)), RANDOM_LENGTH);
+  return `${timePart}${randomPart}`;
+}
+
 /** Reset the monotonic state. Test-only; production never needs it. */
 export function resetUlidState(): void {
   lastTime = -1;

@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 
 import { ArgosHost } from "../../src/durable/host.js";
+import { HISTORY_LIMIT, pushHistoryEvent, type HistoryEvent } from "../../src/durable/mirror.js";
 import {
   hydrateRunCheckpoint,
   InvalidRunCheckpointError,
 } from "../../src/durable/tasks/run.js";
-import { HISTORY_LIMIT, pushHistoryEvent, type HistoryEvent } from "../../src/durable/mirror.js";
+import { createRunRecord, hydrateRunRecord, InvalidRunRecordError } from "../../src/engine/index.js";
 import { FakeClock } from "../fakes/clock.js";
 import { FakeExecutor } from "../fakes/executor.js";
 import { diamondPlaybook, drive, singleStepPlaybook } from "./support.js";
@@ -35,6 +36,9 @@ describe("argos.run checkpoint (D4/D16)", () => {
         throw new Error("expected a live run checkpoint");
       }
       const json = JSON.stringify(record.state.checkpoint);
+      // FR8.1: a manual run has no `trigger` key at all, so an old record is unchanged.
+      const checkpointRecord = (JSON.parse(json) as { record: Record<string, unknown> })["record"];
+      expect(checkpointRecord["trigger"]).toBeUndefined();
       const hydrated = hydrateRunCheckpoint(json);
       expect(JSON.stringify(hydrated)).toBe(json);
       expect(hydrated.record.id).toBe(runId);
@@ -49,6 +53,89 @@ describe("argos.run checkpoint (D4/D16)", () => {
     } finally {
       await host.close();
     }
+  });
+
+  it("round-trips a schedule trigger and refuses a malformed one (FR8.1)", () => {
+    const ir = singleStepPlaybook();
+    const now = 1_767_225_600_000;
+    const trigger = {
+      kind: "schedule",
+      scheduleId: "nightly",
+      fireAt: now,
+      reason: "cron",
+    } as const;
+
+    // A manual record writes today's exact key set and order: the `trigger` key is absent, so an
+    // old record and a new one serialize identically.
+    const manual = createRunRecord({
+      id: "run-manual",
+      ir,
+      inputs: {},
+      cwd: "/tmp/argos-manual",
+      now,
+    });
+    expect(Object.keys(manual)).toEqual([
+      "id",
+      "playbookId",
+      "playbookHash",
+      "ir",
+      "inputs",
+      "status",
+      "cwd",
+      "steps",
+      "loops",
+      "loopAllowance",
+      "gates",
+      "after",
+      "exhausted",
+      "createdAt",
+      "updatedAt",
+      "seq",
+    ]);
+    const manualJson = JSON.stringify(manual);
+    expect(manualJson).not.toContain('"trigger"');
+    expect(JSON.stringify(hydrateRunRecord(manualJson))).toBe(manualJson);
+
+    // A triggered record hydrates byte-for-byte, key order included.
+    const triggered = createRunRecord({
+      id: "run-triggered",
+      ir,
+      inputs: {},
+      cwd: "/tmp/argos-scheduled",
+      now,
+      trigger,
+    });
+    expect(Object.keys(triggered)).toEqual([
+      "id",
+      "playbookId",
+      "playbookHash",
+      "ir",
+      "inputs",
+      "status",
+      "cwd",
+      "trigger",
+      "steps",
+      "loops",
+      "loopAllowance",
+      "gates",
+      "after",
+      "exhausted",
+      "createdAt",
+      "updatedAt",
+      "seq",
+    ]);
+    expect(triggered.trigger).toEqual(trigger);
+    const triggeredJson = JSON.stringify(triggered);
+    expect(JSON.stringify(hydrateRunRecord(triggeredJson))).toBe(triggeredJson);
+
+    // Strict, nested: an extra key inside `trigger` and an unknown reason are both refused.
+    const withUnknownKey = JSON.parse(triggeredJson) as { trigger: Record<string, unknown> };
+    withUnknownKey.trigger["surprise"] = true;
+    expect(() => hydrateRunRecord(JSON.stringify(withUnknownKey))).toThrow(InvalidRunRecordError);
+
+    const withBadReason = JSON.parse(triggeredJson) as { trigger: Record<string, unknown> };
+    withBadReason.trigger["reason"] = "x";
+    expect(() => hydrateRunRecord(JSON.stringify(withBadReason))).toThrow(InvalidRunRecordError);
   });
 
   it("keeps the newest 500 history events", () => {

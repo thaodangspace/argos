@@ -25,6 +25,13 @@ import {
   type RemoveWorktreeResponse,
   type RunDetail,
   type RunListResponse,
+  type ScheduleCreateRequest,
+  type ScheduleDetail,
+  type ScheduleEditRequest,
+  type ScheduleListResponse,
+  type ScheduleRemoveResponse,
+  type ScheduleRunRequest,
+  type ScheduleSummary,
   type ServerInfo,
   type StartRunRequest,
   type StartRunResponse,
@@ -205,6 +212,58 @@ export class RpcClient {
     return {
       gates: runs.flatMap((run) => run.gates.filter((gate) => gate.status === "pending")),
     };
+  }
+
+  // ---------------------------------------------------------------- schedules (FR10.1)
+
+  /** `GET /schedules`, sorted by id. */
+  async listSchedules(): Promise<ScheduleListResponse> {
+    return this.request<ScheduleListResponse>("GET", "/schedules");
+  }
+
+  /** `POST /schedules` (`argos schedule add`). `cwd` is required (FR2.5). */
+  async createSchedule(body: ScheduleCreateRequest): Promise<ScheduleDetail> {
+    return this.request<ScheduleDetail>("POST", "/schedules", body);
+  }
+
+  /** `GET /schedules/:id` (`argos schedule show`). */
+  async getSchedule(id: string): Promise<ScheduleDetail> {
+    return this.request<ScheduleDetail>("GET", `/schedules/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /schedules/:id` (`argos schedule edit`); an empty body is a 400. */
+  async editSchedule(id: string, body: ScheduleEditRequest): Promise<ScheduleDetail> {
+    return this.request<ScheduleDetail>("POST", `/schedules/${encodeURIComponent(id)}`, body);
+  }
+
+  /** `POST /schedules/:id/pause`. */
+  async pauseSchedule(id: string): Promise<ScheduleSummary> {
+    return this.request<ScheduleSummary>("POST", `/schedules/${encodeURIComponent(id)}/pause`, {});
+  }
+
+  /** `POST /schedules/:id/resume`. */
+  async resumeSchedule(id: string): Promise<ScheduleSummary> {
+    return this.request<ScheduleSummary>("POST", `/schedules/${encodeURIComponent(id)}/resume`, {});
+  }
+
+  /**
+   * `POST /schedules/:id/run` (FR7.6). The body is optional: an empty request is a plain run now,
+   * and `clientRequestId` makes a retried request return the first receipt.
+   */
+  async runSchedule(id: string, body: ScheduleRunRequest = {}): Promise<StartRunResponse> {
+    return this.request<StartRunResponse>(
+      "POST",
+      `/schedules/${encodeURIComponent(id)}/run`,
+      body,
+    );
+  }
+
+  /** `DELETE /schedules/:id` (`argos schedule rm`). */
+  async removeSchedule(id: string): Promise<ScheduleRemoveResponse> {
+    return this.request<ScheduleRemoveResponse>(
+      "DELETE",
+      `/schedules/${encodeURIComponent(id)}`,
+    );
   }
 
   /** A `DoctorReport` is composed by the CLI from {@link info} plus local path checks. */

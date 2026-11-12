@@ -33,6 +33,10 @@ export const ARGOS_ERROR_CODES = [
   "invalid_request",
   "run_unknown",
   "step_unknown",
+  // FR1.7: an unknown schedule id (HTTP 404).
+  "schedule_unknown",
+  // FR1.6: a new schedule id that already exists (HTTP 409).
+  "schedule_exists",
 ] as const;
 
 export type ArgosErrorCode = (typeof ARGOS_ERROR_CODES)[number];

@@ -7,13 +7,16 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import type { DecideGateRequest } from "argos-core/rpc";
+import type { DecideGateRequest, RunSummary, ScheduleCreateRequest, ScheduleSummary } from "argos-core/rpc";
 
 import {
   DECIDED_AT,
+  NEXT_FIRE_AT,
   RUN_DETAIL,
   RUN_ID,
   RUN_SUMMARY,
+  SCHEDULE_DETAIL,
+  SCHEDULE_SUMMARY,
   TASK_ID,
   serverInfo,
 } from "./fixtures.js";
@@ -33,6 +36,19 @@ export interface StubServer {
   close(): Promise<void>;
 }
 
+/**
+ * Per-test overrides. The defaults are the committed fixtures, so `ls.json` (and every other
+ * pre-existing golden) cannot move just because a new route exists.
+ */
+export interface StubOptions {
+  /** `GET /runs`; the default is exactly `[RUN_SUMMARY]`. */
+  readonly runs?: readonly RunSummary[];
+  /** `GET /schedules`; the default is exactly `[SCHEDULE_SUMMARY]`. */
+  readonly schedules?: readonly ScheduleSummary[];
+  /** Answer every `/schedules` request with a 500, so `argos doctor` reports the failure. */
+  readonly failSchedules?: boolean;
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -41,9 +57,93 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return text === "" ? undefined : (JSON.parse(text) as unknown);
 }
 
-export async function startStubServer(token = "stub-token"): Promise<StubServer> {
+export async function startStubServer(
+  token = "stub-token",
+  options: StubOptions = {},
+): Promise<StubServer> {
   const requests: StubRequest[] = [];
+  const runs = options.runs ?? [RUN_SUMMARY];
+  const schedules = options.schedules ?? [SCHEDULE_SUMMARY];
   let port = 0;
+
+  /**
+   * `FR10.1` routes. Unknown id ⇒ 404 `schedule_unknown`, a duplicate create ⇒ 409
+   * `schedule_exists`, and run-now ⇒ 201 unless the schedule already has a live run.
+   */
+  const handleSchedules = (
+    segments: readonly string[],
+    method: string | undefined,
+    body: unknown,
+    send: (status: number, value: unknown) => void,
+    error: (status: number, code: string, message: string) => void,
+  ): void => {
+    if (segments.length === 1) {
+      if (method === "GET") {
+        send(200, { schedules });
+        return;
+      }
+      if (method === "POST") {
+        const request = (body ?? {}) as Partial<ScheduleCreateRequest>;
+        if (
+          request.id !== undefined &&
+          schedules.some((candidate) => candidate.id === request.id)
+        ) {
+          error(409, "schedule_exists", `schedule "${request.id}" already exists`);
+          return;
+        }
+        // Echo the requested id and `enabled` (and nothing else from the body: `cwd` and `tz` are
+        // the caller's and would make the golden machine-dependent).
+        const enabled = request.enabled ?? SCHEDULE_DETAIL.enabled;
+        send(201, {
+          ...SCHEDULE_DETAIL,
+          ...(request.id === undefined ? {} : { id: request.id }),
+          enabled,
+          ...(enabled ? {} : { nextFireAt: null }),
+        });
+        return;
+      }
+      error(405, "method_not_allowed", "GET or POST");
+      return;
+    }
+
+    const id = decodeURIComponent(segments[1] ?? "");
+    const schedule = schedules.find((candidate) => candidate.id === id);
+    if (schedule === undefined) {
+      error(404, "schedule_unknown", `unknown schedule "${id}"`);
+      return;
+    }
+    if (segments.length === 2) {
+      if (method === "GET" || method === "POST") {
+        send(200, SCHEDULE_DETAIL);
+        return;
+      }
+      if (method === "DELETE") {
+        send(200, { id, removed: true });
+        return;
+      }
+      error(405, "method_not_allowed", "GET, POST, or DELETE");
+      return;
+    }
+    if (segments.length === 3 && method === "POST") {
+      if (segments[2] === "pause") {
+        send(200, { ...schedule, enabled: false, nextFireAt: null });
+        return;
+      }
+      if (segments[2] === "resume") {
+        send(200, { ...schedule, enabled: true, nextFireAt: NEXT_FIRE_AT });
+        return;
+      }
+      if (segments[2] === "run") {
+        if (schedule.liveRunId !== undefined) {
+          error(409, "run_active", `schedule "${id}" already has a live run ${schedule.liveRunId}`);
+          return;
+        }
+        send(201, { runId: RUN_ID, taskId: TASK_ID });
+        return;
+      }
+    }
+    error(404, "not_found", "unknown route");
+  };
 
   const server: Server = createServer((req, res) => {
     void (async () => {
@@ -90,6 +190,14 @@ export async function startStubServer(token = "stub-token"): Promise<StubServer>
         });
         return;
       }
+      if (segments[0] === "schedules") {
+        if (options.failSchedules === true) {
+          error(500, "internal_error", "the schedule store is unavailable");
+          return;
+        }
+        handleSchedules(segments, req.method, body, send, error);
+        return;
+      }
       if (segments[0] !== "runs") {
         error(404, "not_found", "unknown route");
         return;
@@ -104,7 +212,7 @@ export async function startStubServer(token = "stub-token"): Promise<StubServer>
         return;
       }
       if (segments.length === 1 && req.method === "GET") {
-        send(200, { runs: [RUN_SUMMARY] });
+        send(200, { runs });
         return;
       }
       if (segments[1] !== RUN_ID) {

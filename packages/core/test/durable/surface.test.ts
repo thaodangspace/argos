@@ -67,6 +67,7 @@ const DURABLE_SURFACE = [
   "toGateDoc",
   "toRunDoc",
   "ulid",
+  "ulidFrom",
   "writeAfterStatus",
   "writeGateDecision",
   "writeRunMirror",

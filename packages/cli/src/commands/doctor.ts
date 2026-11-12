@@ -18,6 +18,7 @@ import {
   RpcClientError,
   type DoctorCheck,
   type DoctorReport,
+  type ScheduleSummary,
   type ServerInfo,
 } from "argos-core/rpc";
 
@@ -66,7 +67,7 @@ function humanReport(report: DoctorReport): string {
   const homeMode = report.storage.homeMode === undefined ? "" : ` (${octal(report.storage.homeMode)})`;
   const dbMode =
     report.storage.dbMode === undefined ? " (not created yet)" : ` (${octal(report.storage.dbMode)})`;
-  return [
+  const lines = [
     `argos doctor`,
     `  node       v${report.node.version} (requires ${report.node.required})`,
     `  home       ${report.home}${homeMode}`,
@@ -78,11 +79,43 @@ function humanReport(report: DoctorReport): string {
     `  providers  ${report.providers.map((provider) => provider.provider).join(", ") || "none"}`,
     `  gates      ${report.pendingGates.length} pending`,
     `  runs       ${report.runs.total} total (${report.runs.active} active)`,
-  ].join("\n");
+  ];
+  // FR10.3: the schedules line only exists when the server answered.
+  const schedules = report.checks.find((check) => check.name === "schedules");
+  if (schedules !== undefined) lines.push(`  schedules  ${schedules.detail}`);
+  return lines.join("\n");
 }
 
 function octal(value: number): string {
   return `0${value.toString(8)}`;
+}
+
+/**
+ * FR10.3: the scheduler's health, as `checks[]` sees it. The report schema does not change — this
+ * is one more entry. A refused last fire of an enabled schedule is the one thing that turns the
+ * entry red, and the detail always carries the counts plus the earliest upcoming fire.
+ */
+function schedulesCheck(
+  schedules: readonly ScheduleSummary[] | undefined,
+  error: string | undefined,
+): DoctorCheck {
+  if (schedules === undefined) {
+    return { name: "schedules", ok: false, detail: error ?? "cannot list schedules" };
+  }
+  const enabled = schedules.filter((schedule) => schedule.enabled);
+  const paused = schedules.length - enabled.length;
+  const refused = enabled.filter((schedule) => schedule.lastFire?.status === "refused").length;
+  const upcoming = enabled.flatMap((schedule) =>
+    schedule.nextFireAt === null ? [] : [schedule.nextFireAt],
+  );
+  const earliest = upcoming.length === 0 ? undefined : Math.min(...upcoming);
+  return {
+    name: "schedules",
+    ok: refused === 0,
+    detail:
+      `${enabled.length} enabled, ${paused} paused, ${refused} refused;` +
+      ` next ${earliest === undefined ? "-" : new Date(earliest).toISOString()}`,
+  };
 }
 
 export async function doctorCommand(args: ParsedArgs, io: CliIo): Promise<number> {
@@ -119,6 +152,19 @@ export async function doctorCommand(args: ParsedArgs, io: CliIo): Promise<number
         : String(error);
   }
 
+  // FR10.3: only meaningful while the server answers; a failed call (an older server, a blip)
+  // is reported in the check and never breaks the rest of the report.
+  let schedules: readonly ScheduleSummary[] | undefined;
+  let schedulesError: string | undefined;
+  if (info !== undefined) {
+    try {
+      schedules = (await client.listSchedules()).schedules;
+    } catch (error) {
+      schedulesError =
+        error instanceof RpcClientError ? `${error.code}: ${error.message}` : String(error);
+    }
+  }
+
   const checks: DoctorCheck[] = [
     { name: "node", ok: true, detail: `v${version} (requires ${REQUIRED_NODE_VERSION})` },
     {
@@ -142,6 +188,7 @@ export async function doctorCommand(args: ParsedArgs, io: CliIo): Promise<number
       detail: `${info?.pendingGates.length ?? 0} pending`,
     },
   ];
+  if (info !== undefined) checks.push(schedulesCheck(schedules, schedulesError));
 
   const report: DoctorReport = {
     node: { version, required: REQUIRED_NODE_VERSION, ok: true },

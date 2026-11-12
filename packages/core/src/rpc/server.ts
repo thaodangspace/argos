@@ -17,24 +17,23 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   createServer,
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
-import { isAbsolute } from "node:path";
 
 import { z } from "zod";
 
 import { ArgosError, isArgosError } from "../errors.js";
-import { loadPlaybook } from "../playbook/index.js";
-import type { InputDefIR, IsolationIR, PlaybookIR, Scalar } from "../playbook/ir.js";
+import type { IsolationIR } from "../playbook/ir.js";
 import { argosHome, ensureHome, tokenPath, ARGOS_TOKEN_MODE } from "../paths.js";
 import { ModelCatalog } from "../paseo/model-catalog.js";
 import type { ProviderCatalog } from "../paseo/port.js";
 import { ArgosHost, type ArgosHostOptions } from "../durable/host.js";
+import { resolveRunRequest } from "../durable/run-request.js";
 import {
   ARGOS_RPC_VERSION,
   ARGOS_SCHEMA_VERSION,
@@ -50,6 +49,13 @@ import {
   RetryRequestSchema,
   RunDetailSchema,
   RunListResponseSchema,
+  ScheduleCreateRequestSchema,
+  ScheduleDetailSchema,
+  ScheduleEditRequestSchema,
+  ScheduleListResponseSchema,
+  ScheduleRemoveResponseSchema,
+  ScheduleRunRequestSchema,
+  ScheduleSummarySchema,
   SSE_RUN_EVENT,
   SSE_SNAPSHOT_EVENT,
   StartRunRequestSchema,
@@ -60,9 +66,18 @@ import {
   type ProviderInfo,
   type RunDetail,
   type RunSummary,
+  type ScheduleDetail,
+  type ScheduleSummary,
   type ServerInfo,
 } from "./contracts.js";
-import { isActiveRun, toRunDetail, toRunSummary, type GateDocumentView } from "./summary.js";
+import {
+  isActiveRun,
+  toRunDetail,
+  toRunSummary,
+  toScheduleDetail,
+  toScheduleSummary,
+  type GateDocumentView,
+} from "./summary.js";
 
 // `argos-core/rpc/server` re-exports the one storage owner so the CLI's `serve` command can open it
 // without importing `argos-core/durable` anywhere in the CLI source (Phase 8 import-graph rule).
@@ -255,96 +270,6 @@ async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown
     return JSON.parse(text) as unknown;
   } catch {
     throw new ArgosError("invalid_request", "request body is not valid JSON");
-  }
-}
-
-/** Coerce one provided value to the playbook input's declared type. */
-function coerceInput(ir: PlaybookIR, name: string, def: InputDefIR, value: Scalar): Scalar {
-  switch (def.type) {
-    case "number": {
-      if (typeof value === "number" && Number.isFinite(value)) return value;
-      if (typeof value === "string" && value.trim() !== "") {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed)) return parsed;
-      }
-      throw new ArgosError(
-        "invalid_request",
-        `playbook ${ir.id}: input "${name}" must be a number`,
-      );
-    }
-    case "boolean": {
-      if (typeof value === "boolean") return value;
-      if (value === "true" || value === "1") return true;
-      if (value === "false" || value === "0") return false;
-      throw new ArgosError(
-        "invalid_request",
-        `playbook ${ir.id}: input "${name}" must be true or false`,
-      );
-    }
-    case "enum": {
-      const text = String(value);
-      if (def.values !== undefined && !def.values.includes(text)) {
-        throw new ArgosError(
-          "invalid_request",
-          `playbook ${ir.id}: input "${name}" must be one of ${def.values.join(", ")}`,
-        );
-      }
-      return text;
-    }
-    case "string": {
-      if (typeof value === "number" || typeof value === "boolean") return String(value);
-      return value;
-    }
-  }
-}
-
-/** Declared defaults, required-input checks, and CLI string coercion (FR7). */
-function prepareInputs(
-  ir: PlaybookIR,
-  provided: Readonly<Record<string, Scalar>>,
-): Record<string, Scalar> {
-  const result: Record<string, Scalar> = {};
-  for (const [name, def] of Object.entries(ir.inputs)) {
-    const value = provided[name];
-    if (value === undefined) {
-      if (def.default !== undefined) result[name] = def.default;
-      else if (def.required === true) {
-        throw new ArgosError(
-          "invalid_request",
-          `playbook ${ir.id}: missing required input "${name}"`,
-        );
-      }
-      continue;
-    }
-    result[name] = coerceInput(ir, name, def, value);
-  }
-  // Undeclared scalars stay available to templates, exactly like the engine's input map.
-  for (const [name, value] of Object.entries(provided)) {
-    if (!(name in result)) result[name] = value;
-  }
-  return result;
-}
-
-/**
- * A run's `cwd` must be absolute, NUL-free, and an existing directory (FR6.1). A git repository
- * is deliberately not required: scripts and agents can work in any directory the operator names.
- * The check runs before `loadPlaybook`, so a refused cwd never creates a run or a worktree.
- */
-function validateRunCwd(cwd: string): void {
-  if (cwd.includes("\0")) {
-    throw new ArgosError("invalid_request", "cwd must not contain a NUL byte");
-  }
-  if (!isAbsolute(cwd)) {
-    throw new ArgosError("invalid_request", `cwd ${JSON.stringify(cwd)} is not an absolute path`);
-  }
-  let stats: ReturnType<typeof statSync>;
-  try {
-    stats = statSync(cwd);
-  } catch {
-    throw new ArgosError("invalid_request", `cwd ${JSON.stringify(cwd)} does not exist`);
-  }
-  if (!stats.isDirectory()) {
-    throw new ArgosError("invalid_request", `cwd ${JSON.stringify(cwd)} is not a directory`);
   }
 }
 
@@ -580,6 +505,139 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
     void flush();
   };
 
+  /**
+   * The schedule routes (FR10.1). Called from `handle` **before** the `/runs` guard, which is the
+   * one place the router answers 404 for an unknown prefix: `/schedules/...` therefore never falls
+   * through to the run routes, and `/runs` behavior is untouched.
+   *
+   * Status codes follow the plan: a create and a run-now are 201 (they created something); every
+   * other success is 200. Bodies are strict zod schemas, so an unknown key is a 400, and a refusal
+   * is always a stable code the caller matches on (`schedule_unknown`, `schedule_exists`,
+   * `run_active`, …) — never prose.
+   */
+  const handleSchedules = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    segments: readonly string[],
+    extra: Record<string, string>,
+  ): Promise<void> => {
+    const method = req.method;
+
+    // GET /schedules | POST /schedules
+    if (segments.length === 1) {
+      if (method === "GET") {
+        // The host sorts by id (FR10.1); the route only projects.
+        const docs = await options.host.listSchedules();
+        sendJson(
+          res,
+          200,
+          ScheduleListResponseSchema.parse({ schedules: docs.map(toScheduleSummary) }),
+          extra,
+        );
+        return;
+      }
+      if (method !== "POST") {
+        sendJson(res, 405, { error: { code: "method_not_allowed", message: "GET or POST" } }, extra);
+        return;
+      }
+      const body = ScheduleCreateRequestSchema.parse(await readJson(req, maxBodyBytes));
+      const doc = await options.host.addSchedule({
+        ...(body.id === undefined ? {} : { id: body.id }),
+        // FR10.1: the wire names the playbook `playbook`; the host's field is `playbookId`.
+        playbookId: body.playbook,
+        cwd: body.cwd,
+        ...(body.inputs === undefined ? {} : { inputs: body.inputs }),
+        ...(body.isolation === undefined ? {} : { isolation: body.isolation }),
+        cron: body.cron,
+        ...(body.tz === undefined ? {} : { tz: body.tz }),
+        ...(body.overlap === undefined ? {} : { overlap: body.overlap }),
+        ...(body.catchUp === undefined ? {} : { catchUp: body.catchUp }),
+        ...(body.keep === undefined ? {} : { keep: body.keep }),
+        ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+      });
+      const detail: ScheduleDetail = toScheduleDetail(doc);
+      sendJson(res, 201, ScheduleDetailSchema.parse(detail), extra);
+      return;
+    }
+
+    const id = decodeURIComponent(segments[1] ?? "");
+    if (id === "") {
+      sendJson(res, 404, { error: { code: "not_found", message: "missing schedule id" } }, extra);
+      return;
+    }
+
+    // GET /schedules/:id | POST /schedules/:id (edit) | DELETE /schedules/:id
+    if (segments.length === 2) {
+      if (method === "GET") {
+        const doc = await options.host.getSchedule(id);
+        if (doc === undefined) {
+          throw new ArgosError("schedule_unknown", `unknown schedule "${id}"`);
+        }
+        const detail: ScheduleDetail = toScheduleDetail(doc);
+        sendJson(res, 200, ScheduleDetailSchema.parse(detail), extra);
+        return;
+      }
+      if (method === "DELETE") {
+        await options.host.removeSchedule(id);
+        sendJson(res, 200, ScheduleRemoveResponseSchema.parse({ id, removed: true }), extra);
+        return;
+      }
+      if (method !== "POST") {
+        sendJson(
+          res,
+          405,
+          { error: { code: "method_not_allowed", message: "GET, POST, or DELETE" } },
+          extra,
+        );
+        return;
+      }
+      const body = ScheduleEditRequestSchema.parse(await readJson(req, maxBodyBytes));
+      const doc = await options.host.editSchedule(id, {
+        ...(body.cwd === undefined ? {} : { cwd: body.cwd }),
+        ...(body.inputs === undefined ? {} : { inputs: body.inputs }),
+        ...(body.isolation === undefined ? {} : { isolation: body.isolation }),
+        ...(body.cron === undefined ? {} : { cron: body.cron }),
+        ...(body.tz === undefined ? {} : { tz: body.tz }),
+        ...(body.overlap === undefined ? {} : { overlap: body.overlap }),
+        ...(body.catchUp === undefined ? {} : { catchUp: body.catchUp }),
+        ...(body.keep === undefined ? {} : { keep: body.keep }),
+      });
+      const detail: ScheduleDetail = toScheduleDetail(doc);
+      sendJson(res, 200, ScheduleDetailSchema.parse(detail), extra);
+      return;
+    }
+
+    // POST /schedules/:id/pause | /resume | /run
+    const action = segments[2] ?? "";
+    if (segments.length === 3 && (action === "pause" || action === "resume" || action === "run")) {
+      if (method !== "POST") {
+        sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+        return;
+      }
+      if (action === "run") {
+        // FR7.6: the body may be absent (an empty POST is a plain run now), so an empty object is
+        // the parse input rather than a 400.
+        const body = ScheduleRunRequestSchema.parse((await readJson(req, maxBodyBytes)) ?? {});
+        const started = await options.host.runSchedule(
+          id,
+          body.clientRequestId === undefined ? {} : { clientRequestId: body.clientRequestId },
+        );
+        sendJson(res, 201, StartRunResponseSchema.parse(started), extra);
+        return;
+      }
+      const doc =
+        action === "pause"
+          ? await options.host.pauseSchedule(id)
+          : await options.host.resumeSchedule(id);
+      const summary: ScheduleSummary = toScheduleSummary(doc);
+      sendJson(res, 200, ScheduleSummarySchema.parse(summary), extra);
+      return;
+    }
+
+    // Any other `/schedules/...` path (an unknown action, or a fourth segment).
+    sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
+  };
+
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;
     const extra = corsHeaders(origin);
@@ -654,6 +712,13 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         return;
       }
 
+      // Schedules (FR10.1). Before the `/runs` guard, like `/worktrees/gc`: an unknown prefix is a
+      // 404 answered by that guard, so `/schedules/...` must be claimed here.
+      if (segments[0] === "schedules") {
+        await handleSchedules(req, res, segments, extra);
+        return;
+      }
+
       if (segments[0] !== "runs") {
         sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
         return;
@@ -680,16 +745,19 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         const body = StartRunRequestSchema.parse(await readJson(req, maxBodyBytes));
         const cwd = body.cwd ?? options.cwd ?? process.cwd();
         // FR6.1: a bad cwd is refused before the loader runs, so no task, worktree, or run exists.
-        validateRunCwd(cwd);
-        // The loader is read-only and runs before `startRun`, so an invalid playbook never
-        // creates a task (FR12). The host's home is where `argos serve` was opened, so global
-        // playbooks under `<home>/playbooks` resolve even when `--home` differs from `ARGOS_HOME`.
-        const ir = loadPlaybook(cwd, body.playbookId, { home });
-        const inputs = prepareInputs(ir, body.inputs ?? {});
-        const started = await options.host.startRun({
-          ir,
-          inputs,
+        // FR4.1: the resolve half is shared with a schedule fire, so the two paths cannot drift.
+        // The host's home is where `argos serve` was opened, so global playbooks under
+        // `<home>/playbooks` resolve even when `--home` differs from `ARGOS_HOME`.
+        const resolved = resolveRunRequest({
+          playbookId: body.playbookId,
           cwd,
+          ...(body.inputs === undefined ? {} : { inputs: body.inputs }),
+          ...(home === undefined ? {} : { home }),
+        });
+        const started = await options.host.startRun({
+          ir: resolved.ir,
+          inputs: resolved.inputs,
+          cwd: resolved.cwd,
           ...(body.isolation === undefined
             ? {}
             : { isolation: body.isolation as IsolationIR }),

@@ -4,10 +4,10 @@ Durable YAML playbook engine for [Paseo](https://github.com/getpaseo) agents.
 
 A repository declares its workflow as YAML (`.argos/playbooks/*.yaml`); a deterministic engine
 executes it against agents launched through Paseo, with parallel steps, human gates, loops,
-script steps, and crash-safe resumption. **No LLM decides control flow** — models only do the
-work inside a step.
+script steps, crash-safe resumption, and cron schedules that fire playbooks unattended. **No LLM
+decides control flow** — models only do the work inside a step.
 
-- [docs/architecture.md](docs/architecture.md) — processes, layers, durability model.
+- [docs/architecture.md](docs/architecture.md) — processes, layers, durability model, scheduler.
 - [docs/compat.md](docs/compat.md) — compatibility with paseo-playbooks and its limits.
 
 ## Requirements
@@ -100,6 +100,40 @@ argos rm <runId>                      # delete a finished run (its worktree is k
 Every command supports `--json` with a stable shape. Exit codes: `0` success, `1` usage/runtime,
 `2` playbook validation failure, `3` unauthorized/unreachable server.
 
+## Schedules
+
+`argos serve` can fire a playbook on a cron expression, so recurring work is one normal run per
+fire instead of an endless loop run:
+
+```sh
+argos schedule add nightly --cron "0 7 * * *" --cwd ~/code/repo
+argos schedule ls                     # state, cron, tz, next fire, last fire
+argos schedule show nightly           # policy, fire log, recent runs
+argos schedule run nightly            # fire now, without touching nextFireAt
+argos schedule pause nightly          # and `resume <id>` to re-arm
+argos schedule rm nightly
+argos ls --schedule nightly           # only the runs that schedule started
+argos doctor                          # storage, providers, gates, schedules
+```
+
+The playbook id is the default schedule id (`--id` overrides it), and `--tz` defaults to the CLI's
+zone. The cron expression (5 fields, or `@hourly`/`@daily`/`@weekly`/`@monthly`/`@yearly`) and the
+IANA zone are validated when the schedule is added, together with the same dry start check
+`argos run` performs — a broken playbook, a missing script, or a bad `cwd` is refused immediately.
+Each fire creates a separate, normal run whose record carries
+`trigger: {kind: "schedule", scheduleId, fireAt, reason}`, so it shows up in `argos ls` /
+`argos status` like any other run.
+
+`--catch-up` decides what happens after a gap (a closed laptop, a stopped server): `all` (default)
+fires once for the latest missed fire time, `0` only within two minutes, and a duration such as
+`90m` inside that window — earlier missed times are recorded in the fire log as `missed` and are
+never replayed one by one. `--overlap skip` (default) skips a fire while the previous run of that
+schedule is still running (the fire log says `skipped_overlap`) and `allow` starts anyway.
+`--keep` (default `30`, or `all`) removes that schedule's finished runs beyond the newest N after
+a fire, with the same removal `argos rm` performs; a run whose worktree directory still exists is
+kept until you clean the worktree up yourself (`argos worktree rm` / `gc`), and retention never
+deletes a worktree or a branch.
+
 ## Paseo plugin
 
 `packages/paseo-plugin` is a thin HTTP client of `argos serve` (manifest `id: argos`, requires
@@ -152,9 +186,9 @@ the step runs (see [docs/compat.md](docs/compat.md)).
 ## Development
 
 ```sh
-npm test            # build + 300+ loader/engine/host/RPC/plugin tests, no external processes
+npm test            # build + 600+ loader/engine/host/RPC/plugin tests, no external processes
 npm run typecheck   # tsc for every workspace and test graph
-npm run test:e2e    # build + real `argos serve`, SIGKILL, restart (two scenarios)
+npm run test:e2e    # build + real `argos serve`, SIGKILL, restart (step, gate, schedule)
 ```
 
 `npm test` intentionally excludes `test/e2e`: that suite spawns real processes and runs in its own

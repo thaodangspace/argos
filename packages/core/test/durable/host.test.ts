@@ -1,9 +1,16 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { CommitPublication, TaskRecord } from "@earendil-works/pi-durable";
+import {
+  MemoryStorage,
+  type CommitPublication,
+  type TaskId,
+  type TaskRecord,
+} from "@earendil-works/pi-durable";
 
 import { ArgosHost } from "../../src/durable/host.js";
+import { writeRunMirror } from "../../src/durable/mirror.js";
+import type { RunRecord } from "../../src/engine/index.js";
 import { isArgosError } from "../../src/errors.js";
 import { FakeClock } from "../fakes/clock.js";
 import { FakeExecutor } from "../fakes/executor.js";
@@ -226,6 +233,66 @@ describe("ArgosHost (FR2/FR4/FR29)", () => {
     } finally {
       await second.close();
       cleanup();
+    }
+  });
+
+  it("keeps a scheduled run's trigger across a retry clone (FR8.3)", async () => {
+    const clock = new FakeClock();
+    const executor = new FakeExecutor();
+    const host = await ArgosHost.open({ storage: new MemoryStorage(), clock, executor });
+    try {
+      const { runId, taskId } = await host.startRun({
+        ir: diamondPlaybook(),
+        inputs: {},
+        cwd: "/tmp/argos-retry-trigger",
+        id: "run-retry-trigger",
+      });
+      await drive(
+        clock,
+        async () => {
+          executor.completeAll();
+          const doc = await host.getRun(runId);
+          return doc?.record.status === "completed" || doc?.record.status === "failed";
+        },
+        { stepMs: 3_000, maxRounds: 30 },
+      );
+
+      // FR8.1: only the scheduler sets `trigger`, and it does so on the mirrored record (the public
+      // `startRun` input has none until the scheduler's start path lands).
+      const doc = await host.getRun(runId);
+      if (doc === undefined) throw new Error("run is missing");
+      const trigger = {
+        kind: "schedule",
+        scheduleId: "nightly",
+        fireAt: clock.now(),
+        reason: "cron",
+      } as const;
+      const scheduled: RunRecord = {
+        ...(JSON.parse(JSON.stringify(doc.record)) as RunRecord),
+        trigger,
+      };
+      await host.harness.commit(async (tx) => {
+        await writeRunMirror(tx, Number(taskId) as TaskId, scheduled);
+      }, host.context);
+      expect((await host.getRun(runId))?.record.trigger).toEqual(trigger);
+
+      // A retry clones the mirrored record under the same run id, so the original fire survives.
+      await host.retryStep(runId, "d");
+      await drive(
+        clock,
+        async () => {
+          executor.completeAll();
+          return (await host.getRun(runId))?.record.status === "completed";
+        },
+        { stepMs: 3_000, maxRounds: 30 },
+      );
+
+      const retried = await host.getRun(runId);
+      expect(retried?.record.id).toBe(runId);
+      expect(retried?.record.status).toBe("completed");
+      expect(retried?.record.trigger).toEqual(trigger);
+    } finally {
+      await host.close();
     }
   });
 });

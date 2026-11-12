@@ -169,6 +169,27 @@ export interface ExhaustedRecord {
   readonly at: number;
 }
 
+// ------------------------------------------------------------------ provenance
+
+/**
+ * FR8.1: why a scheduled run exists. `cron` fired on time, `catch_up` fired a fire time that
+ * `argos serve` missed (sleep, restart), and `run_now` came from `argos schedule run`.
+ */
+export const RUN_TRIGGER_REASONS = ["cron", "catch_up", "run_now"] as const;
+export type RunTriggerReason = (typeof RUN_TRIGGER_REASONS)[number];
+
+/**
+ * FR8.1: the schedule fire a run belongs to. A record without a `trigger` was started by a caller
+ * (`POST /runs`, the CLI, a plugin tool) — a manual run. `fireAt` is the fire time the run was
+ * created for; a `run_now` fire uses the request time.
+ */
+export interface RunTrigger {
+  readonly kind: "schedule";
+  readonly scheduleId: string;
+  readonly fireAt: number;
+  readonly reason: RunTriggerReason;
+}
+
 export interface RunRecord {
   readonly id: string;
   readonly playbookId: string;
@@ -179,6 +200,11 @@ export interface RunRecord {
   readonly status: RunStatus;
   readonly cwd: string;
   readonly worktree?: WorktreeRecord;
+  /**
+   * FR8.1: the schedule fire that created this run. Absent on a manual run, and absent on a
+   * record written before provenance existed — hydration of old records is unchanged.
+   */
+  readonly trigger?: RunTrigger;
   /**
    * FR3: one pin per script name (`<name> → {path, sha256}`), covering the main steps and every
    * after-step. Absent when the run has no script step, and absent on a record written before
@@ -265,6 +291,14 @@ const WorktreeSchema = z.strictObject({
   baseSha: z.string().min(1),
 });
 
+/** FR8.1: the schedule provenance of a run. Strict: a hand-edited record cannot add a key. */
+export const RunTriggerSchema = z.strictObject({
+  kind: z.literal("schedule"),
+  scheduleId: z.string().min(1),
+  fireAt: z.number().int(),
+  reason: z.enum(RUN_TRIGGER_REASONS),
+});
+
 /** FR3: a pinned script. The digest is lowercase hex, so a hand-edited record cannot lie. */
 const ScriptPinSchema = z.strictObject({
   path: z.string().min(1),
@@ -296,6 +330,7 @@ export const RunRecordSchema = z.strictObject({
   status: z.enum(RUN_STATUSES),
   cwd: z.string().min(1),
   worktree: WorktreeSchema.optional(),
+  trigger: RunTriggerSchema.optional(),
   scripts: z.record(z.string().min(1), ScriptPinSchema).optional(),
   deadline: z.number().optional(),
   outcome: z.string().min(1).optional(),
@@ -336,6 +371,8 @@ export interface CreateRunRecordInput {
   /** Event time of creation; also the initial `updatedAt`. */
   readonly now: number;
   readonly worktree?: WorktreeRecord;
+  /** FR8.1: the schedule fire this run belongs to. Only the scheduler sets it. */
+  readonly trigger?: RunTrigger;
   /** FR3: script pins resolved by the host before the run task exists. */
   readonly scripts?: Readonly<Record<string, ScriptPinRecord>>;
   readonly deadline?: number;
@@ -365,6 +402,16 @@ export function createRunRecord(input: CreateRunRecordInput): RunRecord {
     cwd: input.cwd,
   };
   if (input.worktree !== undefined) record["worktree"] = input.worktree;
+  // FR8.1: copied field by field so the record holds no alias into the caller's object. A manual
+  // run (no trigger) omits the key entirely, so its JSON stays byte-identical to before.
+  if (input.trigger !== undefined) {
+    record["trigger"] = {
+      kind: input.trigger.kind,
+      scheduleId: input.trigger.scheduleId,
+      fireAt: input.trigger.fireAt,
+      reason: input.trigger.reason,
+    };
+  }
   // FR3: copying the entries keeps the record free of aliases into the caller's object.
   if (input.scripts !== undefined) {
     const scripts: Record<string, ScriptPinRecord> = {};

@@ -1,12 +1,17 @@
 /**
  * Phase 10 durability E2E (plan D17): a real, built `argos serve` child is `SIGKILL`ed while a
- * step is running (Scenario A) or a gate is pending (Scenario B), restarted against the same
- * `$ARGOS_HOME`, and the same run finishes.
+ * step is running (Scenario A), a gate is pending (Scenario B), or a schedule's fire time passes
+ * while nothing is running (Scenario C), restarted against the same `$ARGOS_HOME`, and the same
+ * work finishes (or fires) exactly once.
  *
  * The fake Paseo executor is file-backed under `$ARGOS_HOME` (`fake-paseo.json` +
  * `fake-paseo-launches.jsonl`), so the restarted process adopts the agents its predecessor
  * created. The launch ledger is the evidence: exactly one creation per step across both
  * lifetimes, and step 3 is only created by the second process.
+ *
+ * Scenario C is the scheduler's durability claim (G3/G4): the schedule is a durable document and
+ * the run id is derived from the fire time, so a process that dies before the fire time cannot
+ * lose it, and a process that starts after it cannot start that fire twice.
  *
  * These tests spawn real processes and are deliberately **not** part of `npm test`; run them
  * with `npm run test:e2e` (which builds first).
@@ -20,7 +25,13 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { GateListResponse, GateSummary, RunDetail } from "argos-core/rpc";
+import type {
+  GateListResponse,
+  GateSummary,
+  RunDetail,
+  RunSummary,
+  ScheduleDetail,
+} from "argos-core/rpc";
 
 const cliRoot = fileURLToPath(new URL("../../../cli", import.meta.url));
 const distIndex = join(cliRoot, "dist", "index.js");
@@ -46,6 +57,8 @@ interface ChildResult {
 interface ServeChild {
   readonly child: ChildProcess;
   readonly port: number;
+  /** Everything the child wrote to stderr so far (the schedule fire lines included). */
+  readonly stderr: () => string;
 }
 
 const children = new Set<ChildProcess>();
@@ -112,16 +125,31 @@ async function cliJson<T>(args: readonly string[], env: NodeJS.ProcessEnv): Prom
   return JSON.parse(result.stdout) as T;
 }
 
-function startServe(home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<ServeChild> {
-  const child = spawnChild(["serve", "--port", "0", "--json"], {
+/**
+ * Start one `argos serve` for `home` and resolve as soon as it printed its port.
+ *
+ * `port` defaults to `0` (a fresh ephemeral port, the pattern Scenarios A and B use); Scenario C
+ * passes the port of the lifetime it replaces, so a restart comes back on the same address.
+ */
+function startServe(
+  home: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+  port = 0,
+): Promise<ServeChild> {
+  const child = spawnChild(["serve", "--port", String(port), "--json"], {
     ...process.env,
     ARGOS_HOME: home,
     ARGOS_FAKE_PASEO: "1",
     ...extraEnv,
   });
+  // Captured here (not inside the promise) so the returned accessor keeps reading the same
+  // buffer for the whole lifetime, after the port resolved.
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
   return new Promise((resolve, reject) => {
     let buffer = "";
-    let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`argos serve did not print its port within 30 s; stderr: ${stderr}`));
@@ -136,15 +164,12 @@ function startServe(home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<Ser
           const parsed = JSON.parse(line) as { port?: unknown };
           if (typeof parsed.port === "number") {
             clearTimeout(timer);
-            resolve({ child, port: parsed.port });
+            resolve({ child, port: parsed.port, stderr: () => stderr });
           }
         } catch {
           // Not the JSON line yet.
         }
       }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
@@ -258,6 +283,72 @@ const GATED = [
   "        reject: { label: Reject, color: danger }",
   "",
 ].join("\n");
+
+const SCHEDULED = [
+  "title: Scheduled restart",
+  "steps:",
+  "  - id: only",
+  '    prompt: "Run the scheduled work"',
+  "    poll_ms: 50",
+  "",
+].join("\n");
+
+/** The Crockford base32 alphabet a ULID is written in. */
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/**
+ * Decode the 10-character time prefix of a ULID (48-bit epoch milliseconds).
+ *
+ * A schedule fire's run id is deterministic (FR4.3): the time part is the fire time, so this is
+ * how the scenario proves the persisted run belongs to the fire time it claims — without
+ * hard-coding the random part, which is `sha256(uid:fireAt)`.
+ */
+function decodeUlidTime(id: string): number {
+  let value = 0n;
+  for (const char of id.slice(0, 10).toUpperCase()) {
+    const digit = CROCKFORD.indexOf(char);
+    expect(digit, `ULID ${id} has a character outside the Crockford alphabet`).toBeGreaterThanOrEqual(0);
+    value = value * 32n + BigInt(digit);
+  }
+  return Number(value);
+}
+
+/**
+ * Wait until `argos ls --schedule <id>` lists a run for `fireAt`, and return it.
+ *
+ * The helper asserts there is exactly **one** such run at the moment it matches: two runs for one
+ * fire time is the failure this whole scenario exists to rule out (G3).
+ */
+async function waitForScheduledRun(
+  home: string,
+  port: number,
+  scheduleId: string,
+  fireAt: number,
+): Promise<RunSummary> {
+  let matched: RunSummary[] = [];
+  await waitFor(
+    async () => {
+      try {
+        const listed = await cliJson<{ runs: RunSummary[] }>(
+          ["ls", "--schedule", scheduleId],
+          clientEnv(home, port),
+        );
+        matched = listed.runs.filter((run) => run.trigger?.fireAt === fireAt);
+        return matched.length >= 1;
+      } catch {
+        // The server may still be coming up; the poll retries.
+        return false;
+      }
+    },
+    60_000,
+    `one run of schedule ${scheduleId} for ${new Date(fireAt).toISOString()}`,
+  );
+  expect(
+    matched.map((run) => run.id),
+    "one fire time must start exactly one run",
+  ).toHaveLength(1);
+  return matched[0] as RunSummary;
+}
 
 async function statusOf(
   home: string,
@@ -513,5 +604,133 @@ describe("durability across a real SIGKILL (D17)", () => {
       expect(`${duplicate.stdout}${duplicate.stderr}`).toContain("run_terminal");
     },
     120_000,
+  );
+
+  it(
+    "fires a due schedule exactly once when the kill covers the fire time",
+    async () => {
+      expect(existsSync(distIndex), "run `npm run build` before the E2E suite").toBe(true);
+
+      const home = tempDir("argos-e2e-schedule-home-");
+      const repo = tempDir("argos-e2e-schedule-repo-");
+      writePlaybook(repo, "scheduled", SCHEDULED);
+
+      const first = await startServe(home);
+      const added = await cliJson<ScheduleDetail>(
+        ["schedule", "add", "scheduled", "--cron", "* * * * *", "--tz", "UTC", "--cwd", repo],
+        clientEnv(home, first.port),
+      );
+      expect(added.id).toBe("scheduled");
+      expect(added.nextFireAt).not.toBeNull();
+
+      // Read the fire time back from the stored document (not from the add receipt): this is the
+      // instant the restarted process has to honour.
+      const shown = await cliJson<ScheduleDetail>(
+        ["schedule", "show", added.id],
+        clientEnv(home, first.port),
+      );
+      const nextFireAt = shown.nextFireAt;
+      if (nextFireAt === null) throw new Error("an enabled schedule must have a next fire time");
+      // `* * * * *` in UTC fires on a whole minute, which is what makes the ULID prefix check exact.
+      expect(nextFireAt % 60_000).toBe(0);
+      expect(nextFireAt).toBeGreaterThan(Date.now());
+      console.info(
+        `[e2e] C schedule ${added.id} stored; next fire ${new Date(nextFireAt).toISOString()}`,
+      );
+
+      // Die before the fire time: a durable document (plus the fire commit) must be enough, so no
+      // timer, task, or in-memory state of this process can be load-bearing.
+      await killServe(first);
+      console.info(`[e2e] C killed before the fire time; waiting for ${new Date(nextFireAt).toISOString()}`);
+
+      // Let the wall clock pass the fire time by one second, so the restart must treat it as due.
+      await waitFor(
+        () => Date.now() > nextFireAt + 1_000,
+        90_000,
+        "the wall clock to pass the schedule's fire time",
+      );
+
+      const second = await startServe(home, {}, first.port);
+      const fired = await waitForScheduledRun(home, second.port, added.id, nextFireAt);
+      expect(fired.trigger).toMatchObject({
+        kind: "schedule",
+        scheduleId: added.id,
+        fireAt: nextFireAt,
+      });
+      // Deterministic run id: the ULID time prefix is the fire time, so this run can only belong
+      // to this fire (and a crash before its commit could only ever re-create the same id).
+      expect(decodeUlidTime(fired.id)).toBe(nextFireAt);
+      const runId = fired.id;
+      console.info(
+        `[e2e] C fired after restart: run=${runId} fireAt=${new Date(nextFireAt).toISOString()} (ULID prefix decoded)`,
+      );
+
+      const done = await waitForStatus(
+        home,
+        second.port,
+        runId,
+        (detail) => detail.status === "completed" || detail.status === "failed",
+        "the scheduled run to finish",
+      );
+      expect(done.status, JSON.stringify(done.steps)).toBe("completed");
+      expect(done.steps.map((step) => `${step.id}:${step.status}:${step.attemptCount}`)).toEqual([
+        "only:completed:1",
+      ]);
+
+      // FR10.4: the operator sees the fire, and only that fire, on the server's stderr.
+      const fireLine = `[argos] schedule ${added.id} ${new Date(nextFireAt).toISOString()} started run ${runId}`;
+      await waitFor(
+        () => second.stderr().includes(fireLine),
+        30_000,
+        `the fire line on argos serve stderr ("${fireLine}")`,
+      );
+      expect(second.stderr().split(fireLine)).toHaveLength(2);
+
+      // One creation per step of that run: the step ran once, in the second lifetime.
+      const firedLedger = readLedger(home).filter((line) => line.requestId.startsWith(`argos:${runId}:`));
+      expect(firedLedger.map((line) => `${line.stepId}:${line.attempt}`)).toEqual(["only:1"]);
+
+      // Kill and restart again, now *after* the fire: the persisted `lastFire` plus the run index
+      // must make that fire time unfireable a second time.
+      await killServe(second);
+      const third = await startServe(home, {}, first.port);
+      // The open tick runs on the first microtask after `open()`; give it a moment to settle
+      // before the "no second run" claim (a tick that has nothing due writes nothing).
+      const settleUntil = Date.now() + 1_500;
+      await waitFor(
+        () => Date.now() > settleUntil,
+        10_000,
+        "the restarted scheduler to settle after its first tick",
+      );
+
+      const listed = await cliJson<{ runs: RunSummary[] }>(
+        ["ls", "--schedule", added.id],
+        clientEnv(home, third.port),
+      );
+      const sameFire = listed.runs.filter((run) => run.trigger?.fireAt === nextFireAt);
+      expect(sameFire.map((run) => run.id)).toEqual([runId]);
+
+      const ledger = readLedger(home).filter((line) => line.requestId.startsWith(`argos:${runId}:`));
+      expect(ledger.map((line) => `${line.stepId}:${line.attempt}`)).toEqual(["only:1"]);
+
+      const after = await cliJson<ScheduleDetail>(
+        ["schedule", "show", added.id],
+        clientEnv(home, third.port),
+      );
+      expect(after.lastFire).toMatchObject({
+        fireAt: nextFireAt,
+        status: "started",
+        runId,
+      });
+      expect(after.nextFireAt).not.toBeNull();
+      expect(after.nextFireAt as number).toBeGreaterThan(nextFireAt);
+      expect(after.consecutiveFailures).toBe(0);
+      expect(third.child.exitCode).toBeNull();
+      console.info(
+        `[e2e] C after the second restart: one run for the fire time, ledger=${ledger.length},` +
+          ` lastFire=${String(after.lastFire?.status)} next=${new Date(after.nextFireAt ?? 0).toISOString()}`,
+      );
+    },
+    180_000,
   );
 });

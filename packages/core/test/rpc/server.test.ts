@@ -14,12 +14,15 @@ import { createRpcServer, type RpcServer } from "../../src/rpc/server.js";
 import {
   GcWorktreesResponseSchema,
   RPC_ERROR_STATUS,
+  RunSummarySchema,
   statusForCode,
   type RunDetail,
   type RunSummary,
   type ServerInfo,
 } from "../../src/rpc/contracts.js";
+import { toRunSummary } from "../../src/rpc/summary.js";
 import { ARGOS_ERROR_CODES } from "../../src/errors.js";
+import { createRunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeExecutor } from "../fakes/executor.js";
@@ -384,6 +387,57 @@ describe("GET /runs (FR26)", () => {
   });
 });
 
+describe("run provenance (FR8.2)", () => {
+  it("copies a schedule trigger into the summary and omits the key for a manual run", () => {
+    const ir = singleStepPlaybook();
+    const trigger = {
+      kind: "schedule",
+      scheduleId: "nightly",
+      fireAt: 1_767_225_600_000,
+      reason: "catch_up",
+    } as const;
+
+    const manual = toRunSummary({
+      taskId: "1",
+      record: createRunRecord({ id: "run-manual", ir, inputs: {}, cwd: "/tmp/x", now: 1_000 }),
+    });
+    expect("trigger" in manual).toBe(false);
+    expect(RunSummarySchema.parse(manual)).not.toHaveProperty("trigger");
+
+    const scheduled = toRunSummary({
+      taskId: "2",
+      record: createRunRecord({
+        id: "run-scheduled",
+        ir,
+        inputs: {},
+        cwd: "/tmp/x",
+        now: 1_000,
+        trigger,
+      }),
+    });
+    expect("trigger" in scheduled).toBe(true);
+    expect(scheduled.trigger).toEqual(trigger);
+    // The strict summary schema accepts exactly that shape.
+    expect(RunSummarySchema.parse(scheduled).trigger).toEqual(trigger);
+  });
+
+  it("never emits a trigger key for a manual run over HTTP", async () => {
+    const executor = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(executor);
+    const repo = await makeRepoWith(singleStepPlaybook());
+
+    const started = (await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo, inputs: {} },
+    })).body as { runId: string };
+    await waitForStatus(harness, started.runId, "completed");
+
+    const list = await call(harness.base, "GET", "/runs");
+    expect(list.status).toBe(200);
+    // FR8.2: a manual run's summary carries no `trigger` key at all, so `argos ls` goldens hold.
+    expect(list.text).not.toContain('"trigger"');
+  });
+});
+
 describe("GET /events (FR26)", () => {
   it("streams a snapshot and then changed runs", async () => {
     const executor = new FakeExecutor({ completeAfterPolls: 1 });
@@ -740,6 +794,15 @@ describe("error code → status map (FR3.3)", () => {
     expect(ARGOS_ERROR_CODES).toContain("run_active");
     expect(RPC_ERROR_STATUS["run_active"]).toBe(409);
     expect(statusForCode("run_active")).toBe(409);
+  });
+
+  it("maps the schedule registry codes (FR1.6, FR1.7)", () => {
+    expect(ARGOS_ERROR_CODES).toContain("schedule_unknown");
+    expect(ARGOS_ERROR_CODES).toContain("schedule_exists");
+    expect(RPC_ERROR_STATUS["schedule_unknown"]).toBe(404);
+    expect(RPC_ERROR_STATUS["schedule_exists"]).toBe(409);
+    expect(statusForCode("schedule_unknown")).toBe(404);
+    expect(statusForCode("schedule_exists")).toBe(409);
   });
 });
 

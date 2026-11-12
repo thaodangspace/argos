@@ -106,7 +106,7 @@ export const USAGE = `argos — durable YAML playbooks for Paseo agents
 Usage:
   argos validate [path] [--home dir] [--json]
   argos run <playbook> [--input k=v ...] [--cwd dir] [--isolation none|worktree] [--json]
-  argos ls [--json]
+  argos ls [--schedule <id>] [--json]
   argos status <runId> [--json]
   argos gates [--json]
   argos decide <runId> <gateId> <decision> [--comment text] [--json]
@@ -115,6 +115,13 @@ Usage:
   argos rm <runId> [--json]
   argos worktree rm <runId> [--force] [--delete-branch] [--json]
   argos worktree gc --older-than <n>(s|m|h|d) [--dry-run] [--force] [--delete-branch] [--json]
+  argos schedule add <playbook> --cron <expr> [--id <id>] [--tz <zone>] [--cwd dir]
+                     [--input k=v ...] [--isolation none|worktree] [--overlap skip|allow]
+                     [--catch-up all|0|<n>(s|m|h|d)] [--keep <n>|all] [--paused] [--json]
+  argos schedule edit <id> [--cron <expr>] [--tz <zone>] [--cwd dir] [--input k=v ...]
+                     [--isolation none|worktree] [--overlap skip|allow]
+                     [--catch-up all|0|<n>(s|m|h|d)] [--keep <n>|all] [--json]
+  argos schedule ls|show <id>|pause <id>|resume <id>|run <id>|rm <id> [--json]
   argos serve [--port N] [--home dir] [--json]
   argos doctor [--home dir] [--port N] [--json]
 

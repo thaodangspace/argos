@@ -2,9 +2,9 @@
 
 Argos is a durable YAML playbook engine for Paseo agents. A repository declares its workflow in
 `.argos/playbooks/*.yaml`; a deterministic engine executes it, launching Paseo agents for the work
-inside each step, with parallel steps, human gates, loops, script steps, worktree isolation, and
-crash-safe resumption. v1 (Phases 1–10) is complete; `npm test`, `npm run typecheck`, and
-`npm run test:e2e` are green.
+inside each step, with parallel steps, human gates, loops, script steps, worktree isolation,
+crash-safe resumption, and cron schedules that fire playbooks unattended. v1 (Phases 1–10) is
+complete; `npm test`, `npm run typecheck`, and `npm run test:e2e` are green.
 
 Approved spec and plan:
 `/Users/dt/code/brain/spec/2026/Nov/11/03_spec_argos_yaml_playbook_engine.md` and
@@ -23,6 +23,11 @@ No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResol
 `NodeNext` (relative imports need `.js` extensions), Node `>=22.5`.
 `packages/core/src/git/` is the only directory (with `durable/tasks/script.ts`) allowed to import
 `node:child_process`, and it is exported on the `argos-core/git` subpath, never the root.
+`packages/core/src/schedule/` holds the two scheduler primitives: `next.ts` is the **only**
+`croner` user (built paused, with no callback, so it is a calculator and never arms a timer) and
+`model.ts` is the zod-only schedule model (ids, bounds, fire entries, `catchUp`/`keep`
+normalization) that `rpc/contracts.ts` imports, so the CLI and the plugin bundle neither `croner`
+nor a timer.
 
 ## Invariants
 
@@ -35,6 +40,9 @@ No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResol
 - **Stable codes.** Callers match on `ArgosError.code`, never on message text.
 - **Same-commit mirrors.** Run/history documents are committed with the task checkpoint.
 - **Definition freeze.** A run stores the fully resolved IR + hash; it never reloads the playbook.
+- **Durable schedules.** A schedule is a document, not a task: one in-process timer only wakes a
+  tick, and the fire's single commit (guards + deterministic run id) is what makes a fire happen
+  exactly once.
 
 ## Commands (run from the repo root)
 
@@ -102,10 +110,19 @@ definition is static and `migrate()` is the tool for a future shape change.
 | `argos.gate` | `${runId}.${gateId}` | `{ status: pending\|decided, decision, comment, decidedBy, decidedVia, decidedAt, … }` |
 | `argos.idempotency` | `clientRequestId` | replay cache for `POST /runs` and gate decisions, 24 h TTL |
 | `argos.runs` | singleton | run-id index; listing never scans task records |
+| `argos.schedule` | `<id>` | one schedule: playbook + `cwd` + `cron`/`tz`, `overlap`/`catchUp`/`keep`, `enabled`/`generation`, `nextFireAt`, `lastFire`, `liveRunId`, `runIds`, bounded `fires` |
+| `argos.schedules` | singleton | schedule-id index — the roster every read and every fire commit consults |
 
 Run and history are written in the same `runtime.commit()` as the task checkpoint. A commit that
 only advances a phase may write an identical document (Chord stores no new revision); that is
 expected. Gate ids are `<stepId>:<n>`, so `${runId}.${gateId}` cannot collide.
+
+A schedule document is a complete value (`checkpointWhen: () => true`, like `argos.run`), read
+through `hydrateScheduleDoc` so a hand-edited row is refused instead of fired. `argos.schedules`
+is consulted **before** any schedule read: a document is only ever seeded for an id the index
+lists, so a deleted schedule cannot be resurrected by a stale read. A fire's run task, mirror,
+history, run-index entry **and** the schedule document (`lastFire`, `nextFireAt`, `liveRunId`,
+`runIds`, `fires`) land in one commit.
 
 The history event vocabulary lives in `src/history.ts` (`HISTORY_EVENT_TYPES`, shared with the
 read model's schema): `run_started`, `select`, `dispatch`, `settle`, `gate`, `gate_decided`,
@@ -148,6 +165,8 @@ Every deliberate failure is an `ArgosError` with one of these codes. The HTTP co
 | `invalid_request` | malformed/strict-body request, bad input coercion, body > 1 MiB, or a `cwd` that is not an absolute existing directory | 400 |
 | `run_unknown` | `GET /runs/:id` for an unknown run | 404 |
 | `step_unknown` | `POST /runs/:id/retry` for an unknown step | 404 |
+| `schedule_unknown` | unknown schedule id (index read, show/edit/pause/resume/run/rm) | 404 |
+| `schedule_exists` | `POST /schedules` / `argos schedule add` for an id already in the index | 409 |
 
 Protocol-only responses (`not_found`, `method_not_allowed`, `internal_error`) are not
 `ArgosErrorCode`s; unknown codes map to HTTP 500.
@@ -227,7 +246,9 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
 
 - `RunRecord` is the whole checkpoint: frozen IR + inputs + step/gate/loop state, plus the optional
   additive `scripts` map (`Record<name, { path, sha256 }>`, FR3 pinning; absent when the playbook
-  has no script step and on a record written before pinning — hydration of old JSON is unchanged).
+  has no script step and on a record written before pinning — hydration of old JSON is unchanged),
+  and the optional additive `trigger` (`{kind: "schedule", scheduleId, fireAt, reason}`, FR8.1;
+  absent on a manual run, so old records and JSON stay byte-identical).
   `createRunRecord` starts every step `pending`; `hydrateRunRecord` validates strictly and returns
   the input untouched, so `JSON.stringify(hydrate(json)) === json`.
 - Run statuses: `pending | running | waiting | completed | failed | cancelled` (`waiting` = a gate
@@ -271,6 +292,9 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
   failed). `auto` after-tasks start once and never change `run.status`; `manual` stay pending.
 - Attempt history is not capped in the checkpoint (the bounded history document is capped at 500).
   Outputs are append/overwrite only.
+- The calendar lives outside the engine: `schedule/next.ts` (`parseScheduleSpec`, `nextFireAfter`,
+  `dueFireTimes`) needs `Date`, which `purity.test.ts` bans. It is otherwise pure — no timer, no
+  clock read — and its fixed-epoch tests (DST included) are the whole contract.
 
 ## Durable host
 
@@ -279,19 +303,35 @@ public surface is the `argos-core/durable` subpath; it is deliberately **not** r
 the package root so the CLI and plugin cannot open SQLite by accident.
 
 `ArgosHost` (`host.ts`) owns one SQLite file. `startRun({ ir, inputs, cwd, worktree?, deadline?,
-id? })` returns `{ runId, taskId }`: `runId` is a dependency-free ULID, `taskId` is pi-durable's
-numeric task id stringified at the boundary. The run task is conversation-owned by the root
-conversation (D5) and the initial mirror is written in the same commit. `resume()`/`close()`/
-`getRun`/`getHistory`/`getTaskRecord`/`inspect` are the read/lifecycle surface; `open` and
-`startRun` both resume so scheduling never depends on the caller.
+id? })` returns `{ runId, taskId }` and is the public front of two halves: `#prepareRun` (the
+model check, the idempotency fast path, the run id, script pins, the worktree, the record — it
+never writes) and `#commitRun` (task + mirror + history + run index + idempotency receipt, inside
+the caller's commit). `runId` is a dependency-free ULID, unless a caller supplies one — a schedule
+fire does (its deterministic id); `taskId` is pi-durable's numeric task id stringified at the
+boundary. The half pair is exposed to the scheduler only, as `RunStartPort`
+(`prepare`/`commitInTx`/`dryCheck`/`resume`/`root`), so a fire can write the run **and** its
+schedule marker in one commit. `checkRunStart` is the `dryCheck` front used by
+`argos schedule add|edit`: every prepare step (model check, script pins, worktree dirtiness, the
+record shape) and no task, index entry, worktree, or run. The run task is conversation-owned by
+the root conversation (D5) and the initial mirror is written in the same commit.
+`resume()`/`close()`/`getRun`/`getHistory`/`getTaskRecord`/`inspect` are the read/lifecycle
+surface; `open` and `startRun` both resume so scheduling never depends on the caller. `open` also
+registers an optional `onScheduleFire` listener **before** the first scheduler tick (so a catch-up
+fire during startup is still announced), loads the schedule cache, queues tick one, arms the one
+timer, and `close()` disarms it and waits for an in-flight fire.
 
 `models` (D6) is a Proxy stub: `Harness.open` reads `getAuth` once, so the property returns a
 function that throws when **called**; `has` reports `false`. The engine never asks for a model,
 and no `pi.generation` task may ever appear in `inspect()`.
 
-The modules follow the responsibilities: `host.ts` (run lifecycle), `host-models.ts` (the D6
-stub), `pid.ts` (single-writer pid file and database modes), `host-types.ts` (public option/result
-types). The `argos.run` task keeps its definition in `tasks/run.ts` and spreads the rest over
+The modules follow the responsibilities: `host.ts` (run lifecycle and the schedule methods),
+`host-models.ts` (the D6 stub), `pid.ts` (single-writer pid file and database modes),
+`host-types.ts` (public option/result types, `RunStartPort`, `ScheduleRunPort`, the fire-event
+shape), `run-request.ts` (`resolveRunRequest` — the shared `cwd` validate → `loadPlaybook` →
+`prepareInputs` front half of `POST /runs` and every fire), `schedule-docs.ts` (both document
+families, hydration, `scheduleRunId`, the bounded `fires`/`runIds` pushes), and `schedules.ts`
+(`ScheduleRunner`: registry CRUD, the one timer, tick/fire/run-now, retention). The `argos.run`
+task keeps its definition in `tasks/run.ts` and spreads the rest over
 `run-checkpoint.ts` (checkpoint shape, schema, `hydrateRunCheckpoint`), `run-events.ts`
 (child-outcome → engine events, history), `run-plan.ts` (effects → next state, child inputs), and
 `run-recovery.ts` (`guarded`); `tasks/after.ts` also owns `plannedAfterTasks` and
@@ -383,6 +423,69 @@ scoped IR (`<playbookId>/<afterId>`, fresh content hash) and only then commits t
 terminal outcome. `manual` entries stay pending until `ArgosHost.startAfterTask(runId, afterId)`
 (no HTTP route in v1; see limitations). An after-task never changes the parent's `run.status`:
 the parent mirror's `after[id]` is host-owned bookkeeping.
+
+### Schedules
+
+`ScheduleRunner` (`durable/schedules.ts`) is the registry and the one timer. A schedule is a
+document (never a task), so editing, pausing, and running it now are ordinary commits rather than
+abort/re-create of a sleeping task; `croner` only answers "when is the next fire time"
+(`schedule/next.ts`), and `model.ts` holds the zod-only values (`catchUp` `"all"`/ms/`<n><unit>`,
+`keep` 1..1,000/"all", the 50-entry fire log, 100 schedules).
+
+- `add` settles the id (default: the playbook id, which must match
+  `^[a-z0-9][a-z0-9-]{0,63}$`; a 101st schedule is `invalid_request`, a duplicate id
+  `schedule_exists`), validates `cron` (five fields or `@hourly|@daily|@weekly|@monthly|@yearly`;
+  `@reboot` and a seconds field are `invalid_request`) and `tz` (whatever `Intl` accepts; default
+  the server zone), computes the first `nextFireAt`, runs the same dry check as a start, and writes
+  the document plus the index entry in one commit. `edit` merges the given fields, validates again,
+  bumps `generation`, and recomputes `nextFireAt` from `now`; `pause` sets `enabled: false` /
+  `nextFireAt: null`; `resume` computes `nextFireAt` from `now` (a pause is never caught up);
+  `remove` retires the document and drops the id in one commit while live runs continue with their
+  `trigger`.
+- **One timer.** `#arm()` waits `min(earliest enabled nextFireAt, now + 60 s)` — never longer than
+  a minute, so a laptop that slept notices a missed fire; no enabled schedule means no timer. Ticks,
+  timer fires, and run-now all run on one serialized promise chain, so two fires never overlap and
+  `close()` can await the fire already inside `prepare`.
+- **A tick** reads only its in-memory `{enabled, nextFireAt}` cache and writes nothing when nothing
+  is due. For a due schedule it takes the **latest** due fire time, counts the earlier ones
+  (`dueFireTimes`, capped at `"10000+"`), and fires with reason `cron` when it is at most 120 s
+  late, else `catch_up`. `catchUp: "all"` (default) always fires that latest time; `<ms>` fires it
+  only inside the window; `0` only inside the 120 s tolerance. Skipped earlier times become one
+  `missed` fire-log entry (`count`, `from`, `to`) and never start a run.
+- **One fire commit.** The runner loads the playbook at fire time (`resolveRunRequest`), prepares
+  outside any commit (model check, script pins, worktree), then in a single commit re-reads the
+  document and re-checks the index, `uid`, `generation`, `enabled`, `lastFire.fireAt < fireAt`, the
+  run index and the overlap rule; it then creates the run task, writes the run mirror/history/index
+  entry (`run_started` detail `<playbookId> (schedule <id>)`) and the new schedule state
+  (`lastFire`, `nextFireAt`, `liveRunId`, `runIds`, `fires`, `consecutiveFailures = 0`). The run id
+  is deterministic — `scheduleRunId(uid, fireAt)` is a ULID whose time part is the fire time and
+  whose random part is `sha256(uid:fireAt)` — so a crash before the commit re-fires the same instant
+  with the same id (and reuses `<home>/worktrees/<runId>`), and a commit that already landed is
+  adopted as this fire's outcome instead of starting a second run. Only after the commit does the
+  host `resume()`.
+- **A refusal** (the playbook load, input coercion, a script pin, the worktree, the model check) is
+  a document-only commit: `lastFire`/fire-log `status: "refused"`, the `ArgosError.code`, its
+  message cut to 500 characters (a non-`ArgosError` contributes only `error.name`),
+  `consecutiveFailures + 1`, and the next `nextFireAt`. Nothing is retried before the next fire
+  time and a schedule is never paused or deleted by itself. A failure *after* the run exists is a
+  run failure, visible through `liveRunId`/the run status.
+- **Overlap.** `skip` (default) checks `liveRunId` against one run document: a removed run, a
+  terminal run, and a terminal parent with a running after-task are all "not live". A skipped fire
+  writes `skipped_overlap` and advances `nextFireAt`; `allow` starts anyway and `liveRunId` names
+  the newest run. Run now (`runSchedule`) uses a fresh ULID, `fireAt = now`, reason `run_now`,
+  works on a paused schedule, never touches `nextFireAt`, waits behind an active fire, and refuses
+  with `run_active` (naming the live run) when `skip` holds a live run and the request is refused
+  before any write.
+- **Retention.** After a fire that started a run, outside the fire's commit and unable to fail it,
+  `#prune` removes runs beyond the newest `keep` through `ArgosHost.removeRun`. A run that is still
+  live (or has a running after-task) and a run whose worktree directory still exists are skipped and
+  retried after the next fire; retention never removes a worktree or a branch.
+
+**Run provenance (FR8.3).** A scheduled run's record (and `RunSummary`) carries
+`trigger: { kind: "schedule", scheduleId, fireAt, reason: "cron"|"catch_up"|"run_now" }`; a manual
+run omits the key entirely, so old records and goldens are unchanged. An after-task child does
+**not** copy its parent's `trigger`; a retry clone keeps it (same `runId`). `argos ls --schedule
+<id>` filters on `trigger.scheduleId`, and the human `argos ls` line appends `[schedule <id>]`.
 
 ## Paseo adapter
 
@@ -551,10 +654,13 @@ to the public read model. The CLI source never imports `argos-core/durable`, `ar
 `argos-core/rpc/server` (`packages/cli/test/import-graph.test.ts`).
 
 Contract highlights: `StartRunRequest`, `DecideGateRequest`, `RunSummary`, `RunDetail`,
-`ServerInfo`, `DoctorReport`. `RunSummary`/`RunDetail` never contain `ir`, prompts, agent
-messages, transcripts, or credential-like inputs; `RunDetail.gates` comes from the gate documents
-(fresher than the mirror after a decision). All bodies are strict zod schemas; `RPC_ERROR_STATUS`
-is the single code → HTTP map; bodies are capped at 1 MiB.
+`ServerInfo`, `DoctorReport`, and the schedule shapes (`ScheduleCreateRequest`,
+`ScheduleEditRequest`, `ScheduleSummary`, `ScheduleDetail`, `ScheduleFire`). `RunSummary`/
+`RunDetail` never contain `ir`, prompts, agent messages, transcripts, or credential-like inputs;
+`RunDetail.gates` comes from the gate documents (fresher than the mirror after a decision). All
+bodies are strict zod schemas; `RPC_ERROR_STATUS` is the single code → HTTP map; bodies are capped
+at 1 MiB. `ScheduleSummary` is the document without `uid`, `runIds`, and `fires` (inputs filtered
+by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunIds`.
 
 | Route | Behavior |
 |---|---|
@@ -567,17 +673,29 @@ is the single code → HTTP map; bodies are capped at 1 MiB.
 | `POST /runs/:id/cancel` | engine `cancel`; `run_terminal` if finished |
 | `POST /runs/:id/retry` | clone a terminal run into a fresh task (same `runId`), reset the step + downstream; refuses non-terminal (`run_terminal`), unknown run/step |
 | `POST /runs/:id/gates/:gateId` | first writer wins; `gate_unknown`/`gate_already_decided`/`run_terminal` |
+| `GET /schedules` | `{schedules: ScheduleSummary[]}` sorted by id, from the `argos.schedules` index (never a run scan) |
+| `POST /schedules` | 201 `ScheduleDetail`: `host.addSchedule` (id defaults to the playbook id, `tz` to the server's zone) runs the same dry start check as `POST /runs`; `schedule_exists`, `invalid_request` at 100 schedules |
+| `GET /schedules/:id` | `ScheduleDetail` = summary + `fires` + the 10 newest `recentRunIds`; `schedule_unknown` |
+| `POST /schedules/:id` | edit (`ScheduleDetail`): merge the given fields, revalidate, `generation + 1`, `nextFireAt` from now; an empty body is `invalid_request` |
+| `POST /schedules/:id/pause`, `/resume` | `ScheduleSummary`; pause nulls `nextFireAt`, resume computes it from now (a pause is never caught up) |
+| `POST /schedules/:id/run` | 201 `{runId, taskId}`: run now — fresh ULID, `reason: "run_now"`, serialized behind any fire, never changes `nextFireAt`, works on a paused schedule, `run_active` under `overlap: skip` while the live run is running |
+| `DELETE /schedules/:id` | `{id, removed: true}`; the runs it started continue and keep their `trigger` |
 | `GET /events` | SSE: one `snapshot` then `run` per changed mirror; `: ping` heartbeat; commit-driven |
 | `GET /info`, `GET /health` | doctor data / liveness |
 
-`POST /runs` defaults `cwd` to the server's cwd; the CLI always sends the caller's cwd. Declared
-inputs are coerced (`number`/`boolean`/`enum`), defaults fill missing values, a missing required
-input is `invalid_request`. `validateRunCwd` runs before `loadPlaybook`: the effective `cwd` must be
+`POST /runs` and every schedule fire share `resolveRunRequest` (`durable/run-request.ts`): `cwd`
+validation, then `loadPlaybook`, then input coercion/defaults. `POST /runs` defaults `cwd` to the
+server's cwd; the CLI always sends the caller's cwd. Declared inputs are coerced
+(`number`/`boolean`/`enum`), defaults fill missing values, a missing required input is
+`invalid_request`. `validateRunCwd` runs before `loadPlaybook`: the effective `cwd` must be
 absolute, NUL-free, exist, and be a directory (a git repository is not required); otherwise the
-route answers 400 `invalid_request` and creates no run, task, or worktree. The plugin's start tool
-confines an agent-supplied `cwd` to the calling agent's working directory (see the plugin section).
-The security model — what the token grants, the env rules, script pinning, record-only worktree
-paths, and plugin confinement — is documented in
+route answers 400 `invalid_request` and creates no run, task, or worktree. A fire validates the
+stored `cwd` again, every time. `/schedules/...` is claimed by `handleSchedules` before the
+`/runs` 404 guard, so an unknown schedule path is the protocol-only 404 (`not_found`) and never
+falls through to the run routes. The plugin's start tool confines an agent-supplied `cwd` to the
+calling agent's working directory (see the plugin section). The security model — what the token
+grants, the env rules, script pinning, record-only worktree paths, unattended schedules, and
+plugin confinement — is documented in
 [`docs/architecture.md`](docs/architecture.md#security).
 
 **Auth/idempotency.** `ensureToken()` writes 32 random bytes as hex to `$ARGOS_HOME/token`
@@ -598,7 +716,7 @@ commit that creates the run task, including after-task children and retry clones
 |---|---|---|
 | `argos validate [path]` | `{valid, playbooks:[{id,file,hash}], errors:[{file,stepId,code,message}], warnings:[{file,stepId,code,message}]}` (one `errors[]` entry per schema issue; warnings never change `valid`) | 0 valid or warnings only, 2 invalid, 1 usage |
 | `argos run <playbook> --input k=v [--cwd] [--isolation]` | `{runId, taskId}` | 0, 2 when refused |
-| `argos ls` | `{runs: RunSummary[]}` | 0 |
+| `argos ls [--schedule <id>]` | `{runs: RunSummary[]}` (newest first; `--schedule` keeps the runs whose `trigger.scheduleId` matches) | 0 |
 | `argos status <runId>` | `RunDetail` | 0 |
 | `argos gates` | `{gates: GateSummary[]}` (pending only) | 0 |
 | `argos decide <runId> <gateId> <decision> [--comment]` | `GateDecisionResponse` | 0 |
@@ -607,6 +725,13 @@ commit that creates the run task, including after-task children and retry clones
 | `argos rm <runId>` | `{runId, status, worktree?}` | 0 |
 | `argos worktree rm <runId> [--force] [--delete-branch]` | `{runId, path, removed, branchDeleted}` | 0 |
 | `argos worktree gc --older-than <dur> [--dry-run] [--force] [--delete-branch]` | `{removed: [{runId, path, branchDeleted}], skipped: [{runId, reason}], orphans: [path]}` | 0 |
+| `argos schedule add <playbook> --cron <expr> [--id] [--tz] [--cwd] [--input k=v]… [--isolation none\|worktree] [--overlap skip\|allow] [--catch-up all\|0\|<n>(s\|m\|h\|d)] [--keep <n>\|all] [--paused]` | `ScheduleDetail` | 0, 1 usage |
+| `argos schedule ls` | `{schedules: ScheduleSummary[]}` (sorted by id) | 0 |
+| `argos schedule show <id>` | `ScheduleDetail` | 0 (`schedule_unknown` exits 1) |
+| `argos schedule edit <id> [--cron] [--tz] [--cwd] [--input] [--isolation] [--overlap] [--catch-up] [--keep]` | `ScheduleDetail` | 0, 1 usage with no flag |
+| `argos schedule pause <id>` / `resume <id>` | `ScheduleSummary` | 0 |
+| `argos schedule run <id>` | `{runId, taskId}` | 0 (`run_active` while the live run still runs) |
+| `argos schedule rm <id>` | `{id, removed: true}` | 0 |
 | `argos serve [--port] [--home]` | `{port, home, pid}` | 0 |
 | `argos doctor [--home] [--port]` | `DoctorReport` | 0 (report), 1 old Node |
 
@@ -614,10 +739,20 @@ Human output is concise; JSON is pretty-printed (except `serve`, one compact lin
 codes: **0** ok, **1** usage/runtime, **2** validation failure, **3** unauthorized/unreachable.
 `argos run` with no server prints "start it with `argos serve`" and exits 3; it never opens
 SQLite. `argos doctor` works without a server (storage path/modes, schema version, port, Node
-check) and adds `/info` data when reachable. `argos serve` retries `ArgosHost.open` once on a
-transient failure, never on `storage_locked`, and closes server → host → Paseo port on
-SIGINT/SIGTERM. `ARGOS_FAKE_PASEO=1` selects the deterministic executor/fake catalog; it is
-test-only.
+check) and adds `/info` data when reachable, including a `schedules` check (enabled/paused/refused
+counts and the earliest `nextFireAt`, red when an enabled schedule's `lastFire.status` is
+`refused`) — the `DoctorReport` shape itself is unchanged. `argos serve` retries `ArgosHost.open`
+once on a transient failure, never on `storage_locked`, and closes server → host → Paseo port on
+SIGINT/SIGTERM; it prints one stderr line per fire outcome,
+`[argos] schedule <id> <iso> <status> run <runId>` (or the error code / missed count), and never an
+input value. `ARGOS_FAKE_PASEO=1` selects the deterministic executor/fake catalog; it is test-only.
+
+`argos schedule` fills the two values that must not depend on the server: `cwd` is the resolved
+`--cwd` (else the CLI's own cwd) and `tz` is `--tz` (else the CLI process zone), so an unattended
+run means the same thing on any machine. `--input` values are strings; `--isolation`, `--overlap`,
+and `--keep` are refused locally (exit 1, no request sent), while a malformed `--catch-up` is sent
+as typed and refused by the server with `invalid_request`. Every schedule command is an HTTP call:
+the CLI never opens SQLite and never arms a timer.
 
 ## Paseo plugin
 
@@ -706,13 +841,23 @@ checkpoint byte identity, diamond/reopen with one agent per step, crash inside `
 timeout + retry, gate open/sleeping, one-writer decisions, pending gate survival, loop-limit
 approve/reject, gate feedback, after-tasks, scripts (exit 75, timeout, kill, env, resolution),
 script pinning (pins at start, `script_changed` on edit/delete/resume, `script_repinned` on retry,
-after-task copy, pre-pinning records), worktrees, and `readonly_violation`. The Paseo suite covers
+after-task copy, pre-pinning records), worktrees, `readonly_violation`, and the scheduler:
+`schedule-docs` (strict/hydrating documents, bounded `fires`/`runIds`, `scheduleRunId`),
+`schedules` (CRUD, duplicate/limit refusals, the dry check), `schedule-runner` (arm/disarm, tick
+order, cache), `schedule-fire` (one commit, guards, adopt-existing, run-now, refusal,
+announcement), `schedule-retention` (`keep`, live/worktree skips, failures swallowed), and
+`run-request` (the shared resolve plus prepare/commit parity with `POST /runs`). `test/schedule/`
+covers the pure `model` (ids, bounds, `catchUp`/`keep` normalization) and `next`
+(`parseScheduleSpec`, `nextFireAfter`, `dueFireTimes`, DST in America/New_York, Europe/Berlin,
+Asia/Saigon). The Paseo suite covers
 create arguments, adoption with zero extra creates, `launch_uncertain`, handover, quota
 fallback/exhaustion, `invalid_output`, fenced JSON fallback, and `model_unavailable`. The RPC suite
-covers auth, idempotency, SSE, retry, gates, and response projection. The plugin suite covers
+covers auth, idempotency, SSE, retry, gates, response projection, and the `/schedules` routes
+(codes, statuses, projections). The plugin suite covers
 manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload survival, and the
-import graph. The CLI suite covers validate exit codes, golden JSON shapes, the no-storage import
-graph, and a real-serve sentinel.
+import graph. The CLI suite covers validate exit codes, golden JSON shapes (including
+`ls-schedule` and every `schedule-*` command), the no-storage import graph, the fire-line
+formatter, and a real-serve sentinel.
 
 **E2E (`packages/core/test/e2e/kill-restart.test.ts`, `npm run test:e2e`).** Spawns the built CLI
 with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:
@@ -725,9 +870,19 @@ with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:
 2. *Gate restart*: wait for `argos gates --json` to show a pending gate; `SIGKILL`; restart; the
    same gate id is still pending; `argos decide <runId> <gateId> approve --comment …`; assert the
    run completes and the decision/comment survive; a later decide is `run_terminal`.
+3. *Schedule fire across `SIGKILL`*: add a 1-step schedule (`* * * * *`, `--tz UTC`, `--cwd` the
+   temp repo), read `nextFireAt` from `argos schedule show --json`, `SIGKILL` **before** that
+   instant, wait until the wall clock passes it, then restart on the same home and port. Waits for
+   `argos ls --schedule <id> --json` to show exactly one run whose `trigger.fireAt` is that
+   instant and whose ULID time prefix decodes to it (the random part is not hard-coded).
+   `SIGKILL` + restart once more, then asserts: still one run for that fire time, one ledger
+   creation per step of that run (`only:1`), `schedule show` reports `lastFire.status =
+   "started"` for that fire time with a later `nextFireAt`, and the restarted server's stderr
+   carries exactly one `[argos] schedule <id> <iso> started run <runId>` line.
 
-Both scenarios clean up every child (`SIGTERM` then `SIGKILL`) and temp directory in `afterEach`;
-timeouts are 120 s per scenario, 60 s per wait.
+All three scenarios clean up every child (`SIGTERM` then `SIGKILL`) and temp directory in
+`afterEach`; A and B time out at 120 s, C at 180 s (it may wait a whole minute boundary), with 60 s
+per wait.
 
 ## Pinned dependency versions
 
@@ -741,6 +896,7 @@ suite green.
 | `@earendil-works/pi-ai` | `1.5.2` | core | exact version pi-durable depends on |
 | `@getpaseo/client` | `0.15.4` | core, plugin | Paseo adapter / RPC client |
 | `@getpaseo/plugin` | `0.15.4` | plugin | plugin runtime + panel |
+| `croner` | `11.0.0` | core | cron next-fire calculator; it never arms its own timer |
 | `typescript` | `7.0.2` | root dev | compiler |
 | `vitest` | `5.1.0` | root dev | test runner |
 | `@types/node` | `26.6.6` | root dev | Node types |
@@ -780,6 +936,22 @@ suite green.
 - **Worktrees are never cleaned up automatically**; a failed/violating step leaves its worktree
   for inspection, and cleanup is the manual `argos worktree rm` / `argos worktree gc` pair (FR4).
   gc only *reports* a directory under `<home>/worktrees` that no run index entry claims.
+- **Nothing fires while `argos serve` is down.** The timer lives in that process; the next start
+  applies the catch-up rule once per schedule instead of replaying every missed fire time.
+- **A schedule is unattended execution as the operator.** Only token-authenticated RPC (CLI or
+  HTTP) creates, edits, or runs one; the Paseo plugin has no schedule panel or chat tool. `cwd` is
+  validated at add/edit and again at every fire, scripts are pinned and re-hashed as for any run,
+  and the document never stores environment values — but the work itself runs as the local user.
+- **An aborted fire can leave an orphan worktree.** A fire that cuts `<home>/worktrees/<runId>`
+  and then aborts in its commit (a pause, edit, or delete landed meanwhile) leaves that directory
+  with no run to claim it; `argos worktree gc` reports it as an orphan.
+- **A scheduled run uses whatever `origin/<base>` holds** when `isolation: worktree` fires,
+  with no operator present to choose a base; the run record's frozen IR/hash is still what runs.
+- **The model check can be skipped for schedules.** Without a loaded provider catalog (`argos
+  serve` could not reach Paseo at startup) `add`/`edit`/a fire cannot refuse `model_unavailable`,
+  exactly as with `POST /runs`; the run fails inside its first step instead.
+- **Retention never removes a worktree.** A run whose checkout directory still exists is skipped
+  by `keep` and retried after the next fire, so the operator must `argos worktree rm`/`gc` first.
 - **No migration** from spec 02, paseo-playbooks run state, or pre-Phase-8 run indexes
   (pre-release; no migration path).
 - **Paseo SDK limitation.** `waitForFinish()` exposes text but no structured JSON value, so the

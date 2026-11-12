@@ -301,6 +301,31 @@ async function assertWorktreeClean(context: Context, path: string): Promise<void
 // ------------------------------------------------------------------ create
 
 /**
+ * Refuse a run whose source checkout has uncommitted changes (`worktree_base_dirty`, FR23).
+ *
+ * This is the "source checkout dirty" half of {@link createRunWorktree}, split out so the
+ * `argos schedule add/edit` dry check (FR2.4) can report the same code from the same
+ * implementation without creating a checkout.
+ */
+export async function assertRunBaseClean(input: {
+  readonly repo: string;
+  readonly git?: GitRunner;
+}): Promise<void> {
+  const context: Context = { repo: input.repo, git: input.git ?? execFileGit };
+  const sourceStatus = await gitOr(
+    context,
+    ["status", "--porcelain=v1", "-z"],
+    "inspect the base working tree",
+  );
+  if (sourceStatus.trim() !== "") {
+    throw new ArgosError(
+      "worktree_base_dirty",
+      `${input.repo}: the working tree has uncommitted changes, so a worktree of \`origin/\` would not contain them; commit or stash before starting an isolated run`,
+    );
+  }
+}
+
+/**
  * Create (or re-adopt) the worktree of one run. Throws `worktree_base_dirty` when the source
  * checkout has uncommitted changes and `worktree_failed` for every other setup failure. Never
  * deletes anything.
@@ -313,17 +338,10 @@ export async function createRunWorktree(input: CreateRunWorktreeInput): Promise<
 
   // 1. A dirty source checkout would silently not be part of the run: the worktree is cut from a
   //    commit. Refuse before anything is created (FR23, spec edge case "Worktree creation fails").
-  const sourceStatus = await gitOr(
-    context,
-    ["status", "--porcelain=v1", "-z"],
-    "inspect the base working tree",
-  );
-  if (sourceStatus.trim() !== "") {
-    throw new ArgosError(
-      "worktree_base_dirty",
-      `${input.repo}: the working tree has uncommitted changes, so a worktree of \`origin/\` would not contain them; commit or stash before starting an isolated run`,
-    );
-  }
+  await assertRunBaseClean({
+    repo: input.repo,
+    ...(input.git === undefined ? {} : { git: input.git }),
+  });
 
   // 2. Fresh base: fetch first, then resolve. `--prune` drops branches deleted on the remote.
   await gitOr(context, ["fetch", "--prune", "--quiet", "origin"], "fetch origin");

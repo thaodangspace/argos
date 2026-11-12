@@ -89,6 +89,11 @@
       "name": "gates",
       "ok": false,
       "detail": "1 pending"
+    },
+    {
+      "name": "schedules",
+      "ok": true,
+      "detail": "1 enabled, 0 paused, 0 refused; next 2026-11-13T07:00:00.000Z"
     }
   ]
 }

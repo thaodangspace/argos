@@ -5,6 +5,7 @@ import { cancelCommand, decideCommand, retryCommand, rmCommand } from "./command
 import { doctorCommand } from "./commands/doctor.js";
 import { gatesCommand, lsCommand, statusCommand } from "./commands/runs.js";
 import { runCommand } from "./commands/run.js";
+import { scheduleCommand } from "./commands/schedule.js";
 import { validateCommand } from "./commands/validate.js";
 import { worktreeCommand } from "./commands/worktree.js";
 import {
@@ -56,6 +57,8 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
       return rmCommand(args, io);
     case "worktree":
       return worktreeCommand(args, io);
+    case "schedule":
+      return scheduleCommand(args, io);
     case "doctor":
       return doctorCommand(args, io);
     case "serve": {

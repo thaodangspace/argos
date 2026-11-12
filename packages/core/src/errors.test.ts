@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ArgosError, argosError, isArgosError } from "./errors.js";
+import { ARGOS_ERROR_CODES, ArgosError, argosError, isArgosError } from "./errors.js";
 
 describe("ArgosError", () => {
   it("names the file and step in the message and exposes them as fields", () => {
@@ -36,5 +36,11 @@ describe("ArgosError", () => {
     expect(error.code).toBe("playbook_cycle");
     expect(error.stepId).toBe("a");
     expect(error.file).toBeUndefined();
+  });
+
+  it("names the schedule registry codes (FR1.6, FR1.7)", () => {
+    expect(ARGOS_ERROR_CODES).toContain("schedule_unknown");
+    expect(ARGOS_ERROR_CODES).toContain("schedule_exists");
+    expect(isArgosError({ name: "ArgosError", code: "schedule_unknown" })).toBe(true);
   });
 });

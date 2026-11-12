@@ -235,6 +235,20 @@ describe("argos run never opens the database", () => {
       expect(report.paseo.reachable).toBe(true);
       expect(report.providers.length).toBeGreaterThan(0);
       expect(report.pendingGates).toEqual([]);
+      // FR10.3: a fresh home has no schedules, and the check stays green.
+      const schedules = report.checks.find((check) => check.name === "schedules");
+      expect(schedules?.ok).toBe(true);
+      expect(schedules?.detail).toBe("0 enabled, 0 paused, 0 refused; next -");
+
+      // FR10.2: the schedule group works against the real server and creates nothing.
+      const scheduleResult = await run(
+        ["schedule", "ls", "--json"],
+        clientEnv,
+        { require: preload },
+      );
+      expect(scheduleResult.code, scheduleResult.stderr).toBe(0);
+      expect(scheduleResult.stderr).not.toContain("SENTINEL");
+      expect(JSON.parse(scheduleResult.stdout) as unknown).toEqual({ schedules: [] });
 
       // A second serve on the same home is refused before it can write anything.
       const second = await run(["serve", "--json", "--home", home], {

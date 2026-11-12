@@ -16,6 +16,11 @@ import type { DoctorReport, GateListResponse, RunDetail, RunListResponse } from 
 
 import { runCli } from "../src/main.js";
 import { capture, makeTempHome, scrubVolatile, withEnv, type TempHome } from "./support/cli.js";
+import {
+  REFUSED_SCHEDULE_SUMMARY,
+  SCHEDULE_ID,
+  SCHEDULED_RUN_SUMMARY,
+} from "./support/fixtures.js";
 import { startStubServer, type StubServer } from "./support/stub-server.js";
 
 const goldenDir = fileURLToPath(new URL("./golden/", import.meta.url));
@@ -261,6 +266,12 @@ describe("argos doctor --json", () => {
     expect(report.providers.map((provider) => provider.provider)).toEqual(["claude", "codex"]);
     expect(report.pendingGates).toHaveLength(1);
     expect(report.checks.find((check) => check.name === "server")?.ok).toBe(true);
+    // FR10.3: the schedules entry, from the same live server.
+    const schedules = report.checks.find((check) => check.name === "schedules");
+    expect(schedules?.ok).toBe(true);
+    expect(schedules?.detail).toBe(
+      "1 enabled, 0 paused, 0 refused; next 2026-11-13T07:00:00.000Z",
+    );
 
     const scrubbed = scrubVolatile(report, {
       home: current().home.home,
@@ -269,6 +280,68 @@ describe("argos doctor --json", () => {
       node: nodeVersion,
     });
     expectGolden("doctor.json", scrubbed);
+  });
+
+  it("prints the schedules line in the human report", async () => {
+    const captured = capture();
+    const code = await runCli(["doctor"], captured.io);
+    expect(code).toBe(0);
+    expect(captured.stdout()).toContain(
+      "schedules  1 enabled, 0 paused, 0 refused; next 2026-11-13T07:00:00.000Z",
+    );
+  });
+
+  it("fails the schedules check when an enabled schedule last fire was refused", async () => {
+    const alternate = await startStubServer(undefined, {
+      schedules: [REFUSED_SCHEDULE_SUMMARY],
+    });
+    const restore = withEnv({
+      ARGOS_HOME: current().home.home,
+      ARGOS_PORT: String(alternate.port),
+    });
+    try {
+      const result = await invoke(["doctor", "--json"]);
+      expect(result.code).toBe(0);
+      const check = (result.json as DoctorReport).checks.find(
+        (entry) => entry.name === "schedules",
+      );
+      expect(check?.ok).toBe(false);
+      expect(check?.detail).toBe("1 enabled, 0 paused, 1 refused; next 2026-11-13T07:00:00.000Z");
+    } finally {
+      restore();
+      await alternate.close();
+    }
+  });
+
+  it("reports a schedules failure without breaking the rest of the report", async () => {
+    // `/info` answers but `/schedules` fails: the entry carries the error, the report still renders.
+    const alternate = await startStubServer(undefined, { failSchedules: true });
+    const restore = withEnv({
+      ARGOS_HOME: current().home.home,
+      ARGOS_PORT: String(alternate.port),
+    });
+    try {
+      const result = await invoke(["doctor", "--json"]);
+      expect(result.code).toBe(0);
+      const report = result.json as DoctorReport;
+      expect(report.server.reachable).toBe(true);
+      const check = report.checks.find((entry) => entry.name === "schedules");
+      expect(check?.ok).toBe(false);
+      expect(check?.detail).toContain("internal_error");
+    } finally {
+      restore();
+      await alternate.close();
+    }
+  });
+
+  it("omits the schedules check when the server is unreachable", async () => {
+    const { stub } = current();
+    await stub.close();
+    const result = await invoke(["doctor", "--json"]);
+    expect(result.code).toBe(0);
+    expect(
+      (result.json as DoctorReport).checks.find((entry) => entry.name === "schedules"),
+    ).toBeUndefined();
   });
 
   it("still reports storage and Node without a server", async () => {
@@ -284,6 +357,259 @@ describe("argos doctor --json", () => {
     expect(report.providers).toEqual([]);
     expect(report.pendingGates).toEqual([]);
     expect(report.checks.find((check) => check.name === "server")?.ok).toBe(false);
+  });
+});
+
+describe("argos schedule (FR10.2)", () => {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  function lastRequest(method: string, path: string) {
+    return current().stub.requests.find(
+      (candidate) => candidate.method === method && candidate.path === path,
+    );
+  }
+
+  it("argos schedule add --json sends the contract body", async () => {
+    const result = await invoke([
+      "schedule",
+      "add",
+      "gated",
+      "--id",
+      "weekly",
+      "--cron",
+      "0 7 * * *",
+      "--input",
+      "issue=42",
+      "--input",
+      "branch=main",
+      "--catch-up",
+      "90m",
+      "--keep",
+      "all",
+      "--paused",
+      "--json",
+    ]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-add.json", result.json);
+
+    const request = lastRequest("POST", "/schedules");
+    expect(request?.authorization).toBe(`Bearer ${current().stub.token}`);
+    // cwd and tz default to the caller (FR2.5), every --input is sent, and --paused is `enabled: false`.
+    expect(request?.body).toEqual({
+      id: "weekly",
+      playbook: "gated",
+      cwd: process.cwd(),
+      inputs: { issue: "42", branch: "main" },
+      cron: "0 7 * * *",
+      tz: zone,
+      catchUp: "90m",
+      keep: "all",
+      enabled: false,
+    });
+  });
+
+  it("sends --catch-up 0 and --keep 5 as numbers", async () => {
+    const result = await invoke([
+      "schedule",
+      "add",
+      "gated",
+      "--cron",
+      "*/5 * * * *",
+      "--catch-up",
+      "0",
+      "--keep",
+      "5",
+      "--isolation",
+      "worktree",
+      "--overlap",
+      "allow",
+      "--json",
+    ]);
+    expect(result.code).toBe(0);
+    expect(lastRequest("POST", "/schedules")?.body).toEqual({
+      playbook: "gated",
+      cwd: process.cwd(),
+      cron: "*/5 * * * *",
+      tz: zone,
+      isolation: "worktree",
+      overlap: "allow",
+      catchUp: 0,
+      keep: 5,
+    });
+  });
+
+  it("argos schedule ls --json", async () => {
+    const result = await invoke(["schedule", "ls", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-ls.json", result.json);
+  });
+
+  it("argos schedule show --json", async () => {
+    const result = await invoke(["schedule", "show", SCHEDULE_ID, "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-show.json", result.json);
+  });
+
+  it("argos schedule edit --json sends only the changed flags", async () => {
+    const result = await invoke([
+      "schedule",
+      "edit",
+      SCHEDULE_ID,
+      "--cron",
+      "30 6 * * *",
+      "--overlap",
+      "allow",
+      "--json",
+    ]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-edit.json", result.json);
+    expect(lastRequest("POST", `/schedules/${SCHEDULE_ID}`)?.body).toEqual({
+      cron: "30 6 * * *",
+      overlap: "allow",
+    });
+  });
+
+  it("argos schedule pause --json", async () => {
+    const result = await invoke(["schedule", "pause", SCHEDULE_ID, "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-pause.json", result.json);
+  });
+
+  it("argos schedule resume --json", async () => {
+    const result = await invoke(["schedule", "resume", SCHEDULE_ID, "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-resume.json", result.json);
+  });
+
+  it("argos schedule run --json prints the start receipt", async () => {
+    const result = await invoke(["schedule", "run", SCHEDULE_ID, "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-run.json", result.json);
+    expect(result.json).toEqual({ runId: "run-1", taskId: "11" });
+  });
+
+  it("argos schedule rm --json", async () => {
+    const result = await invoke(["schedule", "rm", SCHEDULE_ID, "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("schedule-rm.json", result.json);
+  });
+
+  it("exits 1 with schedule_exists for a duplicate id", async () => {
+    const result = await invoke([
+      "schedule",
+      "add",
+      "gated",
+      "--id",
+      SCHEDULE_ID,
+      "--cron",
+      "* * * * *",
+      "--json",
+    ]);
+    expect(result.code).toBe(1);
+    expect((result.json as { error: { code: string } }).error.code).toBe("schedule_exists");
+  });
+
+  it("exits 1 with schedule_unknown for an unknown schedule", async () => {
+    const result = await invoke(["schedule", "show", "nope", "--json"]);
+    expect(result.code).toBe(1);
+    expect((result.json as { error: { code: string } }).error.code).toBe("schedule_unknown");
+
+    const human = capture();
+    expect(await runCli(["schedule", "pause", "nope"], human.io)).toBe(1);
+    expect(human.stderr()).toContain("schedule_unknown");
+  });
+
+  it("exits 1 on every usage error without sending a request", async () => {
+    const before = current().stub.requests.length;
+
+    const missingCron = await invoke(["schedule", "add", "gated", "--json"]);
+    expect(missingCron.code).toBe(1);
+    expect(missingCron.stderr).toContain("--cron");
+
+    const unknown = await invoke(["schedule", "add", "gated", "--cron", "* * * * *", "--nope", "x"]);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain("unknown option --nope");
+
+    const badOverlap = await invoke([
+      "schedule", "add", "gated", "--cron", "* * * * *", "--overlap", "sometimes",
+    ]);
+    expect(badOverlap.code).toBe(1);
+    expect(badOverlap.stderr).toContain("--overlap must be skip or allow");
+
+    const badKeep = await invoke([
+      "schedule", "add", "gated", "--cron", "* * * * *", "--keep", "1001",
+    ]);
+    expect(badKeep.code).toBe(1);
+    expect(badKeep.stderr).toContain("--keep");
+
+    const emptyEdit = await invoke(["schedule", "edit", SCHEDULE_ID]);
+    expect(emptyEdit.code).toBe(1);
+    expect(emptyEdit.stderr).toContain("schedule edit needs at least one");
+
+    const noSub = await invoke(["schedule", "--json"]);
+    expect(noSub.code).toBe(1);
+    expect(noSub.stderr).toContain("schedule needs a sub-command");
+
+    expect(current().stub.requests.length).toBe(before);
+  });
+
+  it("argos ls --schedule filters on the client and marks the human line", async () => {
+    const alternate = await startStubServer(undefined, { runs: [SCHEDULED_RUN_SUMMARY] });
+    const restore = withEnv({
+      ARGOS_HOME: current().home.home,
+      ARGOS_PORT: String(alternate.port),
+    });
+    try {
+      const result = await invoke(["ls", "--schedule", SCHEDULE_ID, "--json"]);
+      expect(result.code).toBe(0);
+      expectGolden("ls-schedule.json", result.json);
+      expect((result.json as RunListResponse).runs).toHaveLength(1);
+
+      const other = await invoke(["ls", "--schedule", "weekly", "--json"]);
+      expect(other.code).toBe(0);
+      expect((other.json as RunListResponse).runs).toEqual([]);
+
+      const captured = capture();
+      expect(await runCli(["ls", "--schedule", SCHEDULE_ID], captured.io)).toBe(0);
+      expect(captured.stdout()).toContain(`[schedule ${SCHEDULE_ID}]`);
+    } finally {
+      restore();
+      await alternate.close();
+    }
+  });
+
+  it("argos ls (human) leaves a manual run's line alone", async () => {
+    const captured = capture();
+    expect(await runCli(["ls"], captured.io)).toBe(0);
+    expect(captured.stdout()).not.toContain("[schedule");
+    expect(await runCli(["ls", "--schedule", SCHEDULE_ID, "--json"], capture().io)).toBe(0);
+  });
+
+  it("renders concise human lines", async () => {
+    const list = capture();
+    expect(await runCli(["schedule", "ls"], list.io)).toBe(0);
+    expect(list.stdout()).toContain("STATE");
+    expect(list.stdout()).toContain(SCHEDULE_ID);
+    expect(list.stdout()).toContain("0 7 * * *");
+    expect(list.stdout()).toContain("Europe/Berlin");
+    expect(list.stdout()).toContain("started run run-1");
+
+    const add = capture();
+    expect(await runCli(["schedule", "add", "gated", "--cron", "0 7 * * *"], add.io)).toBe(0);
+    expect(add.stdout()).toContain("added schedule nightly");
+
+    const paused = capture();
+    expect(
+      await runCli(["schedule", "add", "gated", "--cron", "0 7 * * *", "--paused"], paused.io),
+    ).toBe(0);
+    expect(paused.stdout()).toContain("(paused)");
+  });
+
+  it("never prints a schedule input value", async () => {
+    const captured = capture();
+    expect(await runCli(["schedule", "show", SCHEDULE_ID], captured.io)).toBe(0);
+    expect(captured.stdout()).toContain("inputs    issue");
+    expect(captured.stdout()).not.toContain("42");
   });
 });
 

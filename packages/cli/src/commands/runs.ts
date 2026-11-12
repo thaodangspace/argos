@@ -1,6 +1,6 @@
-/** `argos ls`, `argos status <runId>`, `argos gates` (FR25). */
+/** `argos ls` (with `--schedule`), `argos status <runId>`, `argos gates` (FR25, FR8.4). */
 
-import { rejectUnknownFlags, type ParsedArgs } from "../args.js";
+import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";
 import { withRpc } from "../rpc-command.js";
 import type { GateSummary, RunDetail, RunSummary } from "argos-core/rpc";
@@ -13,8 +13,10 @@ function lsHuman(runs: readonly RunSummary[]): string {
   if (runs.length === 0) return "no runs";
   const lines = ["ID                               STATUS      PLAYBOOK                 UPDATED"];
   for (const run of runs) {
+    // FR8.4: a scheduled run says so; a manual run's line stays byte-identical.
+    const schedule = run.trigger === undefined ? "" : `  [schedule ${run.trigger.scheduleId}]`;
     lines.push(
-      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}`,
+      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${schedule}`,
     );
   }
   return lines.join("\n");
@@ -72,14 +74,24 @@ function gatesHuman(gates: readonly GateSummary[]): string {
 }
 
 export async function lsCommand(args: ParsedArgs, io: CliIo): Promise<number> {
-  const unknown = rejectUnknownFlags(args, []);
+  const unknown = rejectUnknownFlags(args, ["schedule"]);
   if (unknown !== undefined) {
     io.stderr(`argos: ${unknown}\n`);
     return EXIT_RUNTIME;
   }
+  const scheduleId = flag(args, "schedule");
   return withRpc(io, args.json, async (client) => {
     const response = await client.listRuns();
-    return { jsonValue: response, human: lsHuman(response.runs) };
+    // FR8.4: filter on the client, by the trigger the mirror already carries. A run started by
+    // hand never matches, because it has no trigger at all.
+    const runs =
+      scheduleId === undefined
+        ? response.runs
+        : response.runs.filter((run) => run.trigger?.scheduleId === scheduleId);
+    return {
+      jsonValue: scheduleId === undefined ? response : { runs },
+      human: lsHuman(runs),
+    };
   });
 }
 

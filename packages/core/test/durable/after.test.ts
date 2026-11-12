@@ -7,9 +7,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { MemoryStorage, type TaskRecord } from "@earendil-works/pi-durable";
+import { MemoryStorage, type TaskId, type TaskRecord } from "@earendil-works/pi-durable";
 
 import { ArgosHost } from "../../src/durable/host.js";
+import { writeRunMirror } from "../../src/durable/mirror.js";
+import type { RunRecord } from "../../src/engine/index.js";
 import { isArgosError } from "../../src/errors.js";
 import { FakeClock } from "../fakes/clock.js";
 import { FakeExecutor } from "../fakes/executor.js";
@@ -192,6 +194,54 @@ describe("after-tasks (FR11)", () => {
       const reportRun = await host.getRun(executor.agentForStep("report-step").runId);
       expect(reportRun?.record.status).toBe("failed");
       expect(reportRun?.record.steps["report-step"]?.errorCode).toBe("step_failed");
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("does not copy the parent's trigger into an after-task child run (FR8.3)", async () => {
+    const clock = new FakeClock();
+    const executor = new FakeExecutor();
+    const host = await ArgosHost.open({ storage: new MemoryStorage(), clock, executor });
+    try {
+      const { runId } = await host.startRun({
+        ir: afterPlaybook(),
+        inputs: {},
+        cwd: "/tmp/argos-after-trigger",
+        id: "run-after-trigger",
+      });
+      await drive(clock, () => executor.agents.size >= 1);
+      executor.complete(`argos:${runId}:main:1`);
+      await drive(clock, () => executor.agentsForStep("report-step").length === 1);
+      executor.complete(executor.agentForStep("report-step").requestId);
+      await drive(
+        clock,
+        async () => (await host.getRun(runId))?.record.after["report"]?.status === "completed",
+        { stepMs: 3_000, maxRounds: 20 },
+      );
+
+      // FR8.1: only the scheduler sets `trigger`, and it does so on the mirrored record (the public
+      // `startRun` input has none until the scheduler's start path lands). The `manual` after-task
+      // is then created from that mirror, which is exactly the path FR8.3 must not copy.
+      const parent = await host.getRun(runId);
+      if (parent === undefined) throw new Error("parent run is missing");
+      const scheduled: RunRecord = {
+        ...(JSON.parse(JSON.stringify(parent.record)) as RunRecord),
+        trigger: { kind: "schedule", scheduleId: "nightly", fireAt: clock.now(), reason: "catch_up" },
+      };
+      await host.harness.commit(async (tx) => {
+        await writeRunMirror(tx, Number(parent.taskId) as TaskId, scheduled);
+      }, host.context);
+      expect((await host.getRun(runId))?.record.trigger).toEqual(scheduled.trigger);
+
+      const started = await host.startAfterTask(runId, "cleanup");
+      expect(started.started).toBe(true);
+      await drive(clock, () => executor.agentsForStep("cleanup-step").length === 1);
+      const child = await host.getRun(executor.agentForStep("cleanup-step").runId);
+      expect(child?.record.playbookId).toBe("with-after/cleanup");
+      // FR8.3: the child is a run of its own, not a fire of the parent's schedule.
+      expect(child?.record.trigger).toBeUndefined();
+      expect(child !== undefined && "trigger" in child.record).toBe(false);
     } finally {
       await host.close();
     }

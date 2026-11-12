@@ -9,13 +9,18 @@
 import type { RunRecord } from "../engine/index.js";
 import { isSecretEnvName, isTerminalRunStatus } from "../engine/index.js";
 import type { HistoryDocValue, RunDoc } from "../durable/mirror.js";
-import type {
-  AfterSummary,
-  GateSummary,
-  HistoryEvent,
-  RunDetail,
-  RunSummary,
-  StepSummary,
+import type { FireEntry, ScheduleDoc } from "../durable/schedule-docs.js";
+import {
+  SCHEDULE_RECENT_RUN_LIMIT,
+  type AfterSummary,
+  type GateSummary,
+  type HistoryEvent,
+  type RunDetail,
+  type RunSummary,
+  type ScheduleDetail,
+  type ScheduleFire,
+  type ScheduleSummary,
+  type StepSummary,
 } from "./contracts.js";
 
 /**
@@ -31,8 +36,16 @@ export interface GateDocumentView {
   readonly decidedAt?: number | null | undefined;
 }
 
-/** Run inputs with credential-looking names removed (SECRET_INPUT_NAME_PATTERN). */
-function publicInputs(inputs: RunRecord["inputs"]): RunSummary["inputs"] {
+/**
+ * Run (or schedule) inputs with credential-looking names removed (SECRET_INPUT_NAME_PATTERN).
+ *
+ * Exported because a schedule summary needs exactly the same filter: the schedule document stores
+ * its inputs in SQLite just like a run does, and the Security NFR forbids publishing them
+ * unfiltered. Keeping one function means the two surfaces cannot drift.
+ */
+export function publicInputs(
+  inputs: Readonly<Record<string, RunSummary["inputs"][string]>>,
+): RunSummary["inputs"] {
   const result: Record<string, string | number | boolean> = {};
   for (const [name, value] of Object.entries(inputs)) {
     if (isSecretEnvName(name)) continue;
@@ -132,6 +145,9 @@ export function toRunSummary(
     inputs: publicInputs(record.inputs),
     cwd: record.cwd,
     ...(record.worktree === undefined ? {} : { worktree: record.worktree }),
+    // FR8.2: only a scheduled run carries a trigger; a manual run omits the key entirely (the
+    // summary schema is strict, and the CLI goldens must not change).
+    ...(record.trigger === undefined ? {} : { trigger: record.trigger }),
     steps: stepSummaries(record),
     gates: record.gates.map((gate) => toGateSummary(record.id, gate, gateDocuments?.get(gate.id))),
     after: afterSummaries(record),
@@ -161,4 +177,71 @@ export function toRunDetail(
 /** True for runs that still need a process (used by `argos doctor` counters). */
 export function isActiveRun(record: RunRecord): boolean {
   return !isTerminalRunStatus(record.status);
+}
+
+// ------------------------------------------------------------------ schedules (FR10.1)
+
+/**
+ * One stored fire entry → the wire shape. Built field by field (never spread) so a new internal
+ * field cannot leak onto the wire, and the `null` placeholders a document keeps for absent values
+ * are reproduced as they are: `errorCode: null` means "not an ArgosError" (FR6.2) and must not
+ * become either `""` or a missing key.
+ */
+function fireSummary(entry: FireEntry): ScheduleFire {
+  return {
+    fireAt: entry.fireAt,
+    at: entry.at,
+    reason: entry.reason,
+    status: entry.status,
+    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+    ...(entry.errorCode === undefined ? {} : { errorCode: entry.errorCode }),
+    ...(entry.message === undefined ? {} : { message: entry.message }),
+    ...(entry.count === undefined ? {} : { count: entry.count }),
+    ...(entry.from === undefined ? {} : { from: entry.from }),
+    ...(entry.to === undefined ? {} : { to: entry.to }),
+  };
+}
+
+/**
+ * Project one schedule document to its public summary (FR10.1).
+ *
+ * `uid`, `runIds`, and `fires` are dropped: `uid` is an internal identity, and the two logs are
+ * what {@link toScheduleDetail} publishes in bounded form. `inputs` go through {@link publicInputs}
+ * for the same reason a run's do (Security NFR).
+ */
+export function toScheduleSummary(doc: ScheduleDoc): ScheduleSummary {
+  return {
+    id: doc.id,
+    playbookId: doc.playbookId,
+    cwd: doc.cwd,
+    inputs: publicInputs(doc.inputs),
+    ...(doc.isolation === undefined ? {} : { isolation: doc.isolation }),
+    cron: doc.cron,
+    tz: doc.tz,
+    overlap: doc.overlap,
+    catchUp: doc.catchUp,
+    keep: doc.keep,
+    enabled: doc.enabled,
+    generation: doc.generation,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+    nextFireAt: doc.nextFireAt,
+    ...(doc.lastFire === undefined ? {} : { lastFire: fireSummary(doc.lastFire) }),
+    ...(doc.liveRunId === undefined ? {} : { liveRunId: doc.liveRunId }),
+    consecutiveFailures: doc.consecutiveFailures,
+  };
+}
+
+/**
+ * A summary plus the fire log and the newest run ids (FR10.1).
+ *
+ * `recentRunIds` is capped at {@link SCHEDULE_RECENT_RUN_LIMIT} so one detail response stays small
+ * however long a schedule has been firing; the document keeps the full list, newest first (FR9.2).
+ */
+export function toScheduleDetail(doc: ScheduleDoc): ScheduleDetail {
+  return {
+    ...toScheduleSummary(doc),
+    fires: doc.fires.map(fireSummary),
+    recentRunIds: doc.runIds.slice(0, SCHEDULE_RECENT_RUN_LIMIT),
+  };
 }

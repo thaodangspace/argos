@@ -31,12 +31,13 @@ import {
   type Storage,
   type TaskId,
   type TaskRecord,
+  type Tx,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 import { ArgosError } from "../errors.js";
 import type { GitRunner } from "../git/exec.js";
-import { createRunWorktree, reattachRunWorktree } from "../git/worktree.js";
+import { createRunWorktree, assertRunBaseClean, reattachRunWorktree } from "../git/worktree.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
 import type { IsolationIR, PlaybookIR } from "../playbook/ir.js";
 import { argosHome, dbPath } from "../paths.js";
@@ -53,12 +54,25 @@ import type { Clock, StepExecutor } from "./context.js";
 import { systemClock } from "./context.js";
 import { createStubModels } from "./host-models.js";
 import type {
+  AddScheduleInput,
   ArgosHostOptions,
   CancelRunResult,
+  CommitRunOptions,
   DecideGateOptions,
+  EditScheduleInput,
   GateDecisionReceipt,
+  PreparedRun,
+  PrepareRunOutcome,
   RemoveRunResult,
   RunChangeListener,
+  RunOwnerConversation,
+  RunScheduleOptions,
+  RunStartPort,
+  ScheduleFireEvent,
+  ScheduleFireListener,
+  ScheduleFireStatus,
+  ScheduleRunStartInput,
+  ScheduleView,
   StartedAfterTask,
   StartedRun,
   StartRunInput,
@@ -86,6 +100,7 @@ import {
   type RunDocValue,
 } from "./mirror.js";
 import { acquirePidFile, enforceStorageModes, releasePidFile } from "./pid.js";
+import { ScheduleRunner } from "./schedules.js";
 import {
   gcRunWorktrees,
   recordRunWorktree,
@@ -122,6 +137,10 @@ export class ArgosHost {
   readonly #git: GitRunner | undefined;
   readonly #home: string | undefined;
   readonly #ownsPid: boolean;
+  /** FR4.1: the prepare/commit halves exposed to `durable/schedules.ts` (internal, never exported). */
+  readonly #startPort: RunStartPort;
+  /** FR1/FR7: the schedule registry, owned by this host and never exported from the subpath. */
+  readonly #schedules: ScheduleRunner;
   #closed = false;
 
   private constructor(init: {
@@ -152,6 +171,33 @@ export class ArgosHost {
     this.#git = init.git;
     this.#home = init.home;
     this.#ownsPid = init.ownsPid;
+    // FR4.1/FR2.4: `durable/schedules.ts` reaches the private prepare/commit halves **only** through
+    // this port, so the fire and `POST /runs` cannot drift apart. Built here, not in `open`, so the
+    // binding exists before any caller (and before `close()` flips `#closed`).
+    this.#startPort = {
+      prepare: (input) => this.#prepareRun(input, { dryRun: false }),
+      commitInTx: (tx, prepared, root, options) =>
+        this.#commitRun(tx, prepared, root, options),
+      dryCheck: (input) => this.checkRunStart(input),
+      resume: () => this.#harness.resume(),
+      root: () => this.#harness.root(this.#context),
+    };
+    // FR1/FR7: the registry shares the host's harness, clock, home, and start port, so a schedule
+    // add/edit validates exactly what a start would and Phase 5's fire commits in the same writer.
+    this.#schedules = new ScheduleRunner({
+      harness: this.#harness,
+      context: this.#context,
+      clock: this.#clock,
+      ...(this.#home === undefined ? {} : { home: this.#home }),
+      port: this.#startPort,
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+      // FR9.3: retention reads and removes runs through the host's own methods, so `schedules.ts`
+      // never imports `host.ts` and `removeRun` stays the only path that retires a run.
+      runs: {
+        get: (runId) => this.getRun(runId),
+        remove: (runId) => this.removeRun(runId),
+      },
+    });
   }
 
   /**
@@ -247,6 +293,15 @@ export class ArgosHost {
     });
     // FR29: a host always resumes what the last process left; `startRun` resumes again for new work.
     harness.resume();
+    // FR10.4: subscribe **before** the first tick is queued, so a catch-up fire that `start()` runs
+    // on the next microtask is announced like any other (a listener attached after `open()` would
+    // miss it). The runner contains a throwing listener, so this cannot break opening.
+    if (options.onScheduleFire !== undefined) {
+      host.#schedules.observeScheduleFires(options.onScheduleFire);
+    }
+    // FR3.1/FR3.2: load the schedule cache and queue the first tick. `start()` awaits the cache read
+    // but never the tick, so a catch-up fire runs on the next microtask and `open()` stays fast.
+    await host.#schedules.start();
     return host;
   }
 
@@ -286,10 +341,141 @@ export class ArgosHost {
   }
 
   /**
+   * The start path's two halves, for the scheduler only (`durable/schedules.ts`).
+   *
+   * Internal: `schedules.ts` prepares outside its commit, then calls `commitInTx` inside the commit
+   * that also writes the schedule document. Nothing here is exported from `argos-core/durable`.
+   */
+  get startPort(): RunStartPort {
+    return this.#startPort;
+  }
+
+  /**
    * Create the run task and its mirror in one commit, then enable scheduling. Returns
    * immediately: the run progresses inside the harness, never on the caller's stack.
+   *
+   * This is the public front of `#prepareRun` + `#commitRun` (FR4.1): same order, same codes, and
+   * the same single commit as before the split.
    */
   async startRun(input: StartRunInput): Promise<StartedRun> {
+    const outcome = await this.#prepareRun(input, { dryRun: false });
+    // D15: a retried write that already landed never creates a second task (or worktree).
+    if (outcome.kind === "started") return outcome.started;
+    const root = await this.#harness.root(this.#context);
+    const started = await this.#harness.commit(
+      (tx) => this.#commitRun(tx, outcome.prepared, root, { historyDetail: input.ir.id }),
+      this.#context,
+    );
+    this.#harness.resume();
+    return started;
+  }
+
+  /**
+   * FR2.4: the dry start check `argos schedule add/edit` runs. It performs every prepare step —
+   * model check, script resolution and hashing, the worktree dirtiness check, and the run-record
+   * shape — and creates **no** task, run index entry, worktree, or run.
+   *
+   * It is `#prepareRun` with `dryRun`, so the codes are the same ones `POST /runs` would answer for
+   * the same values. The idempotency fast path is part of prepare (and can only short-circuit a
+   * real start); the dry check never carries a `clientRequestId`, so it always runs every check.
+   */
+  async checkRunStart(input: ScheduleRunStartInput): Promise<void> {
+    await this.#prepareRun(input, { dryRun: true });
+  }
+
+  // ------------------------------------------------------------------ schedules (FR1, FR2, FR7)
+
+  /**
+   * FR1/FR2/FR7.1: register one schedule. The id defaults to the playbook id, the zone to the
+   * server's, and `enabled: false` is `--paused`. Every value is validated as `POST /runs` would
+   * (FR2.4) and, like every host method, a closed host is `storage_locked`.
+   */
+  async addSchedule(input: AddScheduleInput): Promise<ScheduleView> {
+    this.#assertOpen();
+    return this.#schedules.add(input);
+  }
+
+  /**
+   * FR7.2: change the stored values of one schedule. `inputs` replaces the whole map, all merged
+   * values are validated again, and `generation` advances so a fire in progress aborts in its
+   * commit. An unknown id is `schedule_unknown` (FR1.7).
+   */
+  async editSchedule(id: string, input: EditScheduleInput): Promise<ScheduleView> {
+    this.#assertOpen();
+    return this.#schedules.edit(id, input);
+  }
+
+  /** FR7.3: pause — `enabled: false`, `nextFireAt: null`, `generation + 1`. */
+  async pauseSchedule(id: string): Promise<ScheduleView> {
+    this.#assertOpen();
+    return this.#schedules.pause(id);
+  }
+
+  /** FR7.4: resume — `nextFireAt` computed from now, so a pause is never caught up. */
+  async resumeSchedule(id: string): Promise<ScheduleView> {
+    this.#assertOpen();
+    return this.#schedules.resume(id);
+  }
+
+  /** FR7.5: retire the document and drop the id from the index in one commit. */
+  async removeSchedule(id: string): Promise<void> {
+    this.#assertOpen();
+    await this.#schedules.remove(id);
+  }
+
+  /** One schedule, or `undefined` when the id is not in the index (the route answers 404). */
+  async getSchedule(id: string): Promise<ScheduleView | undefined> {
+    this.#assertOpen();
+    return this.#schedules.get(id);
+  }
+
+  /** Every schedule, sorted by id (FR10.1). */
+  async listSchedules(): Promise<ScheduleView[]> {
+    this.#assertOpen();
+    return this.#schedules.list();
+  }
+
+  /**
+   * FR7.6: `argos schedule run` / `POST /schedules/:id/run`. It serializes behind any tick or fire
+   * that is already in flight (FR3.9), never changes `nextFireAt`, and applies the same overlap rule
+   * as a timer fire — `run_active` naming the live run when `overlap: skip` holds. A refusal for any
+   * other reason is recorded in the fire log (FR6.1) and rethrown to the caller.
+   */
+  async runSchedule(id: string, options: RunScheduleOptions = {}): Promise<StartedRun> {
+    this.#assertOpen();
+    return this.#schedules.runNow(id, options);
+  }
+
+  /**
+   * FR10.4: subscribe to fire outcomes. One event per fire-log entry written, after its commit
+   * landed. The returned function detaches the listener; a listener that throws is contained by the
+   * runner, so `argos serve`'s stderr line can never stop a schedule.
+   */
+  observeScheduleFires(listener: ScheduleFireListener): () => void {
+    return this.#schedules.observeScheduleFires(listener);
+  }
+
+  /** Every host entry point refuses once `close()` ran, with the existing `storage_locked` code. */
+  #assertOpen(): void {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+  }
+
+  /**
+   * The read-only front half of a start (FR4.1), in this exact order:
+   *
+   * 1. the model-catalog check (FR24), before any task exists;
+   * 2. the D15 idempotency fast path, which may return the original receipt instead;
+   * 3. the run id (`input.id`, else a fresh ULID);
+   * 4. the FR3 script pins, before the worktree exists;
+   * 5. the worktree (FR23/D9), or — for `dryRun` — the same dirtiness refusal without creating it;
+   * 6. the run record, with the optional schedule `trigger` (FR8.1).
+   *
+   * It never writes. A refusal therefore leaves no task, no index entry, and no checkout behind.
+   */
+  async #prepareRun(
+    input: ScheduleRunStartInput,
+    options: { readonly dryRun: boolean },
+  ): Promise<PrepareRunOutcome> {
     if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
     // FR24: refuse an off-catalog run before any task exists, naming every unknown target.
     if (this.#modelCatalog !== undefined) {
@@ -306,7 +492,7 @@ export class ArgosHost {
     // D15 fast path: a retried write that already landed never creates a second task (or worktree).
     if (clientRequestId !== undefined) {
       const existing = await this.#idempotentRun(clientRequestId, now);
-      if (existing !== undefined) return existing;
+      if (existing !== undefined) return { kind: "started", started: existing };
     }
     const runId = input.id ?? ulid(this.#clock.now());
     // FR3.1/FR3.2: every script the frozen IR can dispatch is pinned **before** the worktree
@@ -316,10 +502,13 @@ export class ArgosHost {
     const scripts = pinRunScripts(input.ir, input.cwd, this.#home);
     // FR23/D9: an isolated run works in its own worktree from a freshly fetched base. The worktree
     // is created **before** the run task exists, so a dirty base or a missing ref refuses the run
-    // with `worktree_base_dirty` / `worktree_failed` and no agent is ever launched.
+    // with `worktree_base_dirty` / `worktree_failed` and no agent is ever launched. The dry check
+    // gets the same refusals from the same implementation, without creating anything (FR2.4).
     const worktree =
       input.worktree ??
-      (await this.#prepareWorktree(input.ir, input.cwd, runId, input.isolation));
+      (options.dryRun
+        ? await this.#checkWorktree(input.ir, input.cwd, input.isolation)
+        : await this.#prepareWorktree(input.ir, input.cwd, runId, input.isolation));
     const record = createRunRecord({
       id: runId,
       ir: input.ir,
@@ -329,40 +518,61 @@ export class ArgosHost {
       ...(worktree === undefined ? {} : { worktree }),
       ...(scripts === undefined ? {} : { scripts }),
       ...(input.deadline === undefined ? {} : { deadline: input.deadline }),
+      ...(input.trigger === undefined ? {} : { trigger: input.trigger }),
     });
+    return {
+      kind: "prepared",
+      prepared: {
+        runId,
+        record,
+        now,
+        ...(clientRequestId === undefined ? {} : { clientRequestId }),
+      },
+    };
+  }
 
-    const root = await this.#harness.root(this.#context);
-    const started = await this.#harness.commit(async (tx) => {
-      // Re-check inside the commit: two concurrent requests with one clientRequestId serialize here.
-      if (clientRequestId !== undefined) {
-        const doc = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
-        if (doc.runId !== "" && now - doc.createdAt < IDEMPOTENCY_TTL_MS) {
-          return { runId: doc.runId, taskId: doc.taskId };
-        }
+  /**
+   * The write half of a start (FR4.1): the D15 re-check, the run task (D4/D5), the mirror plus its
+   * `run_started` history event, the run index entry, and the idempotency receipt — all inside the
+   * caller's single commit. A schedule fire calls this from the commit that also writes the
+   * schedule document, so the run and its fire marker can never disagree.
+   */
+  async #commitRun(
+    tx: Tx,
+    prepared: PreparedRun,
+    root: RunOwnerConversation,
+    options: CommitRunOptions,
+  ): Promise<StartedRun> {
+    const { runId, record, now, clientRequestId } = prepared;
+    // Re-check inside the commit: two concurrent requests with one clientRequestId serialize here.
+    if (clientRequestId !== undefined) {
+      const doc = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
+      if (doc.runId !== "" && now - doc.createdAt < IDEMPOTENCY_TTL_MS) {
+        return { runId: doc.runId, taskId: doc.taskId };
       }
-      // D4/D5: the run task is conversation-owned by the host's root conversation.
-      const id = await tx.createTask(
-        this.#runTask,
-        {
-          runId,
-          record,
-          ...(clientRequestId === undefined ? {} : { clientRequestId }),
-        },
-        { ownership: { kind: "conversation" }, conversationId: root.id },
-      );
-      await writeRunState(tx, id, record, { type: "run_started", detail: input.ir.id });
-      await registerRun(tx, runId);
-      if (clientRequestId !== undefined) {
-        const doc = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
-        doc.runId = runId;
-        doc.taskId = String(id);
-        doc.createdAt = now;
-      }
-      return { runId, taskId: String(id) };
-    }, this.#context);
-
-    this.#harness.resume();
-    return started;
+    }
+    // D4/D5: the run task is conversation-owned by the host's root conversation.
+    const id = await tx.createTask(
+      this.#runTask,
+      {
+        runId,
+        record,
+        ...(clientRequestId === undefined ? {} : { clientRequestId }),
+      },
+      { ownership: { kind: "conversation" }, conversationId: root.id },
+    );
+    await writeRunState(tx, id, record, {
+      type: "run_started",
+      detail: options.historyDetail,
+    });
+    await registerRun(tx, runId);
+    if (clientRequestId !== undefined) {
+      const doc = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
+      doc.runId = runId;
+      doc.taskId = String(id);
+      doc.createdAt = now;
+    }
+    return { runId, taskId: String(id) };
   }
 
   /** D15: the receipt of a fresh `clientRequestId`, or `undefined` when absent/expired. */
@@ -383,6 +593,39 @@ export class ArgosHost {
   }
 
   /**
+   * The dry counterpart of {@link #prepareWorktree} (FR2.4): report the same
+   * `worktree_failed`/`worktree_base_dirty` refusals without creating the checkout. `undefined` in
+   * the return type keeps the caller's expression identical to the real prepare (`??`).
+   */
+  async #checkWorktree(
+    ir: PlaybookIR,
+    cwd: string,
+    override: IsolationIR | undefined,
+  ): Promise<undefined> {
+    const isolation = override ?? ir.isolation;
+    if (isolation === undefined || isolation.mode !== "worktree") return undefined;
+    this.#assertWorktreeHome(ir);
+    // One implementation with `createRunWorktree`: the dry check only inspects the base working
+    // tree, so no branch, directory, or fetch result is produced.
+    await assertRunBaseClean({
+      repo: cwd,
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+    });
+    return undefined;
+  }
+
+  /** The shared "isolation needs a home" refusal, so the dry and the real prepare agree. */
+  #assertWorktreeHome(ir: PlaybookIR): string {
+    if (this.#home === undefined) {
+      throw new ArgosError(
+        "worktree_failed",
+        `playbook ${ir.id}: isolation.mode "worktree" needs an ARGOS_HOME for <home>/worktrees/<runId>; open the host with one`,
+      );
+    }
+    return this.#home;
+  }
+
+  /**
    * Create the run's worktree when isolation asks for one. `undefined` means "work in `cwd`"
    * (`isolation.mode: none`, the default). Errors are the D9 codes and are thrown before the run
    * task exists: the caller (CLI/RPC) gets `worktree_base_dirty` or `worktree_failed` and no agent
@@ -396,15 +639,10 @@ export class ArgosHost {
   ): Promise<WorktreeRecord | undefined> {
     const isolation = override ?? ir.isolation;
     if (isolation === undefined || isolation.mode !== "worktree") return undefined;
-    if (this.#home === undefined) {
-      throw new ArgosError(
-        "worktree_failed",
-        `playbook ${ir.id}: isolation.mode "worktree" needs an ARGOS_HOME for <home>/worktrees/<runId>; open the host with one`,
-      );
-    }
+    const home = this.#assertWorktreeHome(ir);
     return createRunWorktree({
       repo: cwd,
-      home: this.#home,
+      home,
       runId,
       ...(isolation.base === undefined ? {} : { base: isolation.base }),
       ...(this.#git === undefined ? {} : { git: this.#git }),
@@ -435,15 +673,27 @@ export class ArgosHost {
     });
   }
 
-  /** Close the harness (and with it SQLite), then release the pid file. Idempotent. */
+  /**
+   * Close the schedule runner, then the harness (and with it SQLite), then release the pid file.
+   * Idempotent. A fire already inside `prepare` settles before the harness closes (FR3.2).
+   */
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
     try {
+      await this.#schedules.close();
       await this.#harness.close(this.#context);
     } finally {
       if (this.#home !== undefined && this.#ownsPid) releasePidFile(this.#home);
     }
+  }
+
+  /**
+   * FR3.2: wait until the schedule runner has no queued or running tick/fire. This is the
+   * deterministic seam the scheduler tests use instead of sleeping; nothing in production needs it.
+   */
+  async scheduleIdle(): Promise<void> {
+    await this.#schedules.idle();
   }
 
   /** The mirrored run document, or `undefined` for an unknown run. */
@@ -982,12 +1232,19 @@ export class ArgosHost {
 // module, by name, so `argos-core/durable` keeps exactly the same surface.
 export { createStubModels };
 export type {
+  AddScheduleInput,
   ArgosHostOptions,
   CancelRunResult,
   DecideGateOptions,
+  EditScheduleInput,
   GateDecisionReceipt,
   RemoveRunResult,
   RunChangeListener,
+  RunScheduleOptions,
+  ScheduleFireEvent,
+  ScheduleFireListener,
+  ScheduleFireStatus,
+  ScheduleView,
   StartedAfterTask,
   StartedRun,
   StartRunInput,

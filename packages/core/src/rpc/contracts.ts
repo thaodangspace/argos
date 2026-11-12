@@ -19,8 +19,23 @@
 import { z } from "zod";
 
 import { ARGOS_ERROR_CODES } from "../errors.js";
-import { RUN_STATUSES, STEP_STATUSES } from "../engine/record.js";
+import { RUN_STATUSES, RunTriggerSchema, STEP_STATUSES } from "../engine/record.js";
 import { HISTORY_EVENT_TYPES } from "../history.js";
+/**
+ * The schedule vocabulary, shared with the scheduler itself (FR1.4, FR3.5, FR5.1, FR9.1).
+ * `schedule/model.ts` imports only zod and the error type, so the contract stays free of `croner`
+ * and of every durable module: the CLI and the Paseo plugin bundle these schemas and must never
+ * arm a timer or open SQLite.
+ */
+import {
+  CatchUpInputSchema,
+  CatchUpSchema,
+  FireReasonSchema,
+  FireStatusSchema,
+  KeepSchema,
+  MISSED_COUNT_OVERFLOW,
+  OverlapSchema,
+} from "../schedule/model.js";
 
 /** Version of the RPC contract; bumped only for a breaking change. */
 export const ARGOS_RPC_VERSION = 1;
@@ -115,6 +130,9 @@ export const RPC_ERROR_STATUS: Readonly<Record<string, number>> = {
   loop_limit: 409,
   // FR4: a worktree operation named a run that has not finished yet.
   run_active: 409,
+  // FR1.6/FR1.7: the schedule registry.
+  schedule_unknown: 404,
+  schedule_exists: 409,
   // runtime failures
   paseo_unreachable: 503,
   provider_exhausted: 503,
@@ -306,6 +324,8 @@ export const RunSummarySchema = z.strictObject({
   inputs: z.record(z.string(), ScalarSchema),
   cwd: z.string().min(1),
   worktree: WorktreeSchema.optional(),
+  /** FR8.2: the schedule fire that started the run. Absent on a manual run, so goldens hold. */
+  trigger: RunTriggerSchema.optional(),
   steps: z.array(StepSummarySchema),
   /** Every gate of the run, pending and decided; the CLI/panel filters pending ones. */
   gates: z.array(GateSummarySchema),
@@ -345,6 +365,138 @@ export const GateListResponseSchema = z.strictObject({
   gates: z.array(GateSummarySchema),
 });
 export type GateListResponse = z.infer<typeof GateListResponseSchema>;
+
+// ------------------------------------------------------------------ schedules (FR10.1)
+
+/**
+ * The isolation a schedule stores: the mode only, never a base ref (FR23/D9). A fire resolves the
+ * base the way `--isolation` does, so an edit cannot pin a schedule to a stale commit.
+ */
+export const ScheduleIsolationModeSchema = z.enum(["none", "worktree"]);
+export type ScheduleIsolationMode = z.infer<typeof ScheduleIsolationModeSchema>;
+
+/**
+ * `recentRunIds` is bounded on purpose (FR10.1): a detail response must not grow with the 1,000-id
+ * `runIds` cap. The first ten are the newest ten, because the document stores them newest first.
+ */
+export const SCHEDULE_RECENT_RUN_LIMIT = 10;
+
+/**
+ * One fire outcome as the wire publishes it (FR1.4). Declared here rather than reused from the
+ * document schema so the public shape is pinned: a field the scheduler later adds internally must
+ * be a deliberate contract change.
+ */
+export const ScheduleFireSchema = z.strictObject({
+  fireAt: z.number(),
+  at: z.number(),
+  reason: FireReasonSchema,
+  status: FireStatusSchema,
+  runId: z.string().min(1).optional(),
+  errorCode: z.string().nullable().optional(),
+  message: z.string().optional(),
+  count: z.union([z.number().int(), z.literal(MISSED_COUNT_OVERFLOW)]).optional(),
+  from: z.number().optional(),
+  to: z.number().optional(),
+});
+export type ScheduleFire = z.infer<typeof ScheduleFireSchema>;
+
+/**
+ * One schedule as `argos schedule ls` and `GET /schedules` see it: the stored document **without**
+ * `uid`, `runIds`, and `fires` (FR10.1). `inputs` go through the same secret-name filter as a run
+ * summary, so a credential-shaped input never reaches a UI (Security NFR).
+ */
+export const ScheduleSummarySchema = z.strictObject({
+  id: z.string().min(1),
+  playbookId: z.string().min(1),
+  cwd: z.string().min(1),
+  /** Schedule inputs with secret-looking names removed (SECRET_INPUT_NAME_PATTERN). */
+  inputs: z.record(z.string(), ScalarSchema),
+  isolation: ScheduleIsolationModeSchema.optional(),
+  cron: z.string().min(1),
+  tz: z.string().min(1),
+  overlap: OverlapSchema,
+  catchUp: CatchUpSchema,
+  keep: KeepSchema,
+  enabled: z.boolean(),
+  generation: z.number().int().min(0),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** `null` only while the schedule is paused (FR7.3). */
+  nextFireAt: z.number().nullable(),
+  lastFire: ScheduleFireSchema.optional(),
+  liveRunId: z.string().min(1).optional(),
+  consecutiveFailures: z.number().int().min(0),
+});
+export type ScheduleSummary = z.infer<typeof ScheduleSummarySchema>;
+
+/** `GET /schedules/:id` / a create / an edit: the summary plus the fire log and recent run ids. */
+export const ScheduleDetailSchema = ScheduleSummarySchema.extend({
+  fires: z.array(ScheduleFireSchema),
+  /** The newest {@link SCHEDULE_RECENT_RUN_LIMIT} entries of the document's `runIds`. */
+  recentRunIds: z.array(z.string().min(1)),
+});
+export type ScheduleDetail = z.infer<typeof ScheduleDetailSchema>;
+
+export const ScheduleListResponseSchema = z.strictObject({
+  schedules: z.array(ScheduleSummarySchema),
+});
+export type ScheduleListResponse = z.infer<typeof ScheduleListResponseSchema>;
+
+/**
+ * `POST /schedules` (FR10.1). `playbook` is the playbook id — the host's `AddScheduleInput` calls it
+ * `playbookId`. `cwd` is **required** (FR2.5): a schedule is unattended execution, and defaulting it
+ * to the server's cwd would make the target depend on how `argos serve` was started.
+ */
+export const ScheduleCreateRequestSchema = z.strictObject({
+  id: z.string().min(1).optional(),
+  playbook: z.string().min(1),
+  cwd: z.string().min(1),
+  inputs: z.record(z.string(), ScalarSchema).optional(),
+  isolation: ScheduleIsolationModeSchema.optional(),
+  cron: z.string().min(1),
+  tz: z.string().min(1).optional(),
+  overlap: OverlapSchema.optional(),
+  /** `"all"`, milliseconds, or the CLI shorthand `90m` / `12h` / `2d` (FR3.5). */
+  catchUp: CatchUpInputSchema.optional(),
+  keep: KeepSchema.optional(),
+  /** `false` is `argos schedule add --paused` (FR7.1). */
+  enabled: z.boolean().optional(),
+});
+export type ScheduleCreateRequest = z.infer<typeof ScheduleCreateRequestSchema>;
+
+/**
+ * `POST /schedules/:id` (FR7.2): any stored field except `id`, `uid`, and the playbook. At least one
+ * key must be present — a payload that changes nothing is a 400, not a silent `generation` bump, so
+ * the CLI cannot "succeed" without doing anything.
+ */
+export const ScheduleEditRequestSchema = z
+  .strictObject({
+    cwd: z.string().min(1).optional(),
+    inputs: z.record(z.string(), ScalarSchema).optional(),
+    isolation: ScheduleIsolationModeSchema.optional(),
+    cron: z.string().min(1).optional(),
+    tz: z.string().min(1).optional(),
+    overlap: OverlapSchema.optional(),
+    catchUp: CatchUpInputSchema.optional(),
+    keep: KeepSchema.optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "an edit needs at least one of cwd, inputs, isolation, cron, tz, overlap, catchUp, keep",
+  });
+export type ScheduleEditRequest = z.infer<typeof ScheduleEditRequestSchema>;
+
+/** `POST /schedules/:id/run` (FR7.6). The body may be absent; the key is the D15 idempotency one. */
+export const ScheduleRunRequestSchema = z.strictObject({
+  clientRequestId: z.string().min(1).optional(),
+});
+export type ScheduleRunRequest = z.infer<typeof ScheduleRunRequestSchema>;
+
+/** `DELETE /schedules/:id`. The literal `true` is what makes a refusal impossible to misread. */
+export const ScheduleRemoveResponseSchema = z.strictObject({
+  id: z.string().min(1),
+  removed: z.literal(true),
+});
+export type ScheduleRemoveResponse = z.infer<typeof ScheduleRemoveResponseSchema>;
 
 // ------------------------------------------------------------------ info / doctor
 
