@@ -543,8 +543,9 @@ generates a `clientRequestId` unless supplied.
 `createArgosContribution({createClient?})` is the test seam. One call creates one runtime,
 registers exactly one `agent.open.before` hook that appends the tools, and registers the
 `argos.connection` RPC. Teardown removes that hook and closes the client (aborting streams). No
-settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token` once
-per plugin instance; the **client** panel cannot read files, so it calls `argos.connection` through
+settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token`
+lazily on first tool use (a plugin reload before `argos serve` still loads); the **client** panel
+cannot read files, so it calls `argos.connection` through
 `useRpc()` and receives `{url, token}`. That keeps the server's bearer auth intact (FR27) without a
 Node builtin in the client bundle. The panel publishes an in-flight model before deciding (buttons
 disable), calls `decideGate` exactly once, treats an already-decided gate as refresh-without-retry,

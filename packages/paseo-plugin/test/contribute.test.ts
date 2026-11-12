@@ -86,6 +86,26 @@ describe("contribute (server half)", () => {
     }
   });
 
+  it("loads before argos serve exists and reports the actionable error on first use", async () => {
+    const previousHome = process.env["ARGOS_HOME"];
+    process.env["ARGOS_HOME"] = join(tmpdir(), "argos-missing-home-does-not-exist");
+    try {
+      const server = fakePluginServer();
+      // No `createClient`: the real lazy server client must not read the token at load time.
+      const cleanup = createArgosContribution()(asServer(server));
+      expect(server.hooks.map((hook) => hook.name)).toEqual([AGENT_OPEN_HOOK]);
+
+      await expect(server.runHandler("argos.connection", {})).rejects.toThrow(
+        /start the server with `argos serve`/,
+      );
+
+      await cleanup();
+    } finally {
+      if (previousHome === undefined) delete process.env["ARGOS_HOME"];
+      else process.env["ARGOS_HOME"] = previousHome;
+    }
+  });
+
   it("replaces a stale Argos tool instead of duplicating it", async () => {
     const server = fakePluginServer();
     const stale = { name: "argos_run_status", title: "old", description: "old", input: {} };
