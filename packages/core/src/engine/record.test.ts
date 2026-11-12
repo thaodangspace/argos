@@ -60,6 +60,26 @@ describe("createRunRecord", () => {
     expect(record.deadline).toBe(99);
   });
 
+  it("stores script pins when supplied and omits the key otherwise (FR3)", () => {
+    const sha = "a".repeat(64);
+    const pinned = createRunRecord({
+      id: "run-1",
+      ir,
+      inputs: {},
+      cwd: "/work/tree",
+      now: 10,
+      scripts: { "tool.mjs": { path: "/work/tree/.argos/scripts/tool.mjs", sha256: sha } },
+    });
+    expect(pinned.scripts).toEqual({
+      "tool.mjs": { path: "/work/tree/.argos/scripts/tool.mjs", sha256: sha },
+    });
+    expect(Object.isFrozen(pinned.scripts)).toBe(true);
+    expect(Object.hasOwn(pinned.scripts?.["tool.mjs"] ?? {}, "sha256")).toBe(true);
+
+    // A record created before pinning (or a playbook without script steps) has no key at all.
+    expect(Object.hasOwn(makeRecord(ir), "scripts")).toBe(false);
+  });
+
   it("freezes the record deeply", () => {
     const record = makeRecord(ir);
     expect(Object.isFrozen(record)).toBe(true);
@@ -85,6 +105,38 @@ describe("hydrateRunRecord", () => {
     const hydrated = hydrateRunRecord(json);
     expect(JSON.stringify(hydrated)).toBe(json);
     expect(hydrated).toEqual(record);
+  });
+
+  it("round-trips a pinned record byte-identically, and an unpinned one keeps the key absent", () => {
+    // FR3: the pin is additive — old JSON hydrates unchanged and new JSON keeps its key order.
+    const pinned = createRunRecord({
+      id: "run-1",
+      ir,
+      inputs: {},
+      cwd: "/work/tree",
+      now: 10,
+      scripts: { "tool.mjs": { path: "/work/tree/.argos/scripts/tool.mjs", sha256: "b".repeat(64) } },
+    });
+    const json = JSON.stringify(pinned);
+    expect(json).toContain('"scripts"');
+    expect(JSON.stringify(hydrateRunRecord(json))).toBe(json);
+
+    const plain = JSON.stringify(makeRecord(ir));
+    expect(plain).not.toContain('"scripts"');
+    expect(JSON.stringify(hydrateRunRecord(plain))).toBe(plain);
+  });
+
+  it("rejects a malformed script pin instead of trusting it", () => {
+    for (const scripts of [
+      { "tool.mjs": { path: "", sha256: "c".repeat(64) } },
+      { "tool.mjs": { path: "/work/tool.mjs", sha256: "not-a-sha256" } },
+      { "tool.mjs": { path: "/work/tool.mjs" } },
+      { "tool.mjs": { path: "/work/tool.mjs", sha256: "c".repeat(64), extra: true } },
+    ]) {
+      const record = JSON.parse(JSON.stringify(makeRecord(ir))) as Record<string, unknown>;
+      record["scripts"] = scripts;
+      expect(() => hydrateRunRecord(record), JSON.stringify(scripts)).toThrow(InvalidRunRecordError);
+    }
   });
 
   it("round-trips a record parked on a gate, including loop and ask choice metadata", () => {

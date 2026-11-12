@@ -70,6 +70,10 @@ describe("contribute (server half)", () => {
       ok: true,
       data: { runId: "run-1", status: "cancelled" },
     });
+    await expect(server.runHandler("argos.runs.remove", { runId: "run-1" })).resolves.toEqual({
+      ok: true,
+      data: { runId: "run-1", status: "completed" },
+    });
     await expect(
       server.runHandler("argos.gates.decide", {
         runId: "run-1",
@@ -153,6 +157,8 @@ describe("contribute (server half)", () => {
       "handle:argos.runs.get",
       "handle:argos.runs.start",
       "handle:argos.runs.cancel",
+      "handle:argos.runs.remove",
+      "handle:argos.runs.retry",
       "handle:argos.gates.decide",
     ]);
 
@@ -168,6 +174,8 @@ describe("contribute (server half)", () => {
       "handle:argos.runs.get",
       "handle:argos.runs.start",
       "handle:argos.runs.cancel",
+      "handle:argos.runs.remove",
+      "handle:argos.runs.retry",
       "handle:argos.gates.decide",
     ]);
 

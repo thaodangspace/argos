@@ -10,7 +10,8 @@ export * from "./context.js";
 export * from "./mirror.js";
 export * from "./host.js";
 export * from "./ulid.js";
-export * from "./tasks/after.js";
+// Named exports only: `plannedAfterTasks` is an internal helper of the run task, not surface.
+export { afterPlaybookIR, planAfterRun, type PlannedAfterRun } from "./tasks/after.js";
 export * from "./tasks/gate.js";
 export * from "./tasks/run.js";
 export * from "./tasks/script.js";

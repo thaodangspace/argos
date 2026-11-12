@@ -10,13 +10,15 @@
  *   because the engine never consults a model for control flow;
  * - create the run's private worktree when `isolation.mode: worktree` asks for one (FR23, D9),
  *   refusing a dirty source checkout *before* any task exists;
- * - expose `startRun`, `resume`, `close`, `getRun`, `getHistory`, `getTaskRecord`, `inspect`.
+ * - expose `startRun`, `resume`, `close`, `getRun`, `getHistory`, `getTaskRecord`, `inspect`, and
+ *   the manual worktree cleanup of FR4 (`removeWorktree`, `gcWorktrees`).
  *
  * This module — and the rest of `src/durable/` — is the only place that imports
  * `@earendil-works/*`. Everything above it speaks RPC/CLI types.
  */
 
-import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
@@ -34,10 +36,10 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 
 import { ArgosError } from "../errors.js";
 import type { GitRunner } from "../git/exec.js";
-import { createRunWorktree } from "../git/worktree.js";
+import { createRunWorktree, reattachRunWorktree } from "../git/worktree.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
-import type { IsolationIR, PlaybookIR, Scalar } from "../playbook/ir.js";
-import { argosHome, dbPath, ensureHome, pidPath } from "../paths.js";
+import type { IsolationIR, PlaybookIR } from "../playbook/ir.js";
+import { argosHome, dbPath } from "../paths.js";
 import {
   createRunRecord,
   decideGate,
@@ -49,6 +51,18 @@ import {
 import { cloneRecord, downstreamClosure, hydrateRunRecord } from "../engine/index.js";
 import type { Clock, StepExecutor } from "./context.js";
 import { systemClock } from "./context.js";
+import { createStubModels } from "./host-models.js";
+import type {
+  ArgosHostOptions,
+  CancelRunResult,
+  DecideGateOptions,
+  GateDecisionReceipt,
+  RemoveRunResult,
+  RunChangeListener,
+  StartedAfterTask,
+  StartedRun,
+  StartRunInput,
+} from "./host-types.js";
 import {
   ARGOS_RUN_DOC_KIND,
   EMPTY_IDEMPOTENCY_DOC,
@@ -71,9 +85,20 @@ import {
   type RunDoc,
   type RunDocValue,
 } from "./mirror.js";
+import { acquirePidFile, enforceStorageModes, releasePidFile } from "./pid.js";
+import {
+  gcRunWorktrees,
+  recordRunWorktree,
+  removeWorktreeForRun,
+  type GcWorktreesOptions,
+  type GcWorktreesResult,
+  type RemoveWorktreeOptions,
+  type WorktreeRemovalResult,
+} from "./worktrees.js";
 import { planAfterRun } from "./tasks/after.js";
 import { createGateTaskDefinition } from "./tasks/gate.js";
 import { createAfterRunTask, createRunTaskDefinition, type RunCheckpoint } from "./tasks/run.js";
+import { pinRunScripts, pinScript, type ScriptPins } from "./tasks/script-pin.js";
 import { createScriptTaskDefinition } from "./tasks/script.js";
 import { createStepTaskDefinition } from "./tasks/step.js";
 import { ulid } from "./ulid.js";
@@ -81,175 +106,7 @@ import { ulid } from "./ulid.js";
 /** D4 extension name that groups the Argos tasks. */
 export const ARGOS_EXTENSION_NAME = "argos";
 
-/** Messages used by the D6 guard: the stub must fail loudly, never silently. */
-const STUB_MODELS_MESSAGE =
-  "argos: the durable host has no model access; control flow is decided by the engine (FR21)";
-
-/**
- * D6: a `Models` stand-in that throws on any use. `Harness.open` reads `getAuth` once (to bind
- * it into its identity wrapper), so the property must exist — calling it throws like everything
- * else. No `pi.generation` task can be scheduled because nothing ever obtains a model.
- */
-export function createStubModels(): Models {
-  const touched = (): never => {
-    throw new Error(STUB_MODELS_MESSAGE);
-  };
-  return new Proxy(
-    {},
-    {
-      get(_target, property) {
-        if (typeof property === "symbol" || property === "then" || property === "toJSON") {
-          return undefined;
-        }
-        // `Harness.open` binds `getAuth` once into its identity wrapper; that binding is the only
-        // eager read. Calling it (or reading any other member) fails loudly.
-        if (property === "getAuth") return touched;
-        throw new Error(STUB_MODELS_MESSAGE);
-      },
-      // `withClientIdentity` checks `"setProvider" in models`; a false answer keeps the wrapper
-      // read-only, which is all the stub needs to be.
-      has: () => false,
-    },
-  ) as unknown as Models;
-}
-
-// ------------------------------------------------------------------ pid file
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // ESRCH: no such process. EPERM: alive but owned by another user; still a live writer.
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-function readPid(home: string): number | undefined {
-  try {
-    const raw = readFileSync(pidPath(home), "utf8").trim();
-    const pid = Number.parseInt(raw, 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-}
-
-/**
- * Take the single-writer pid file. A live owner refuses the open with `storage_locked`; a stale
- * file (dead process, unreadable content) is replaced.
- */
-function acquirePidFile(home: string): void {
-  ensureHome(home);
-  const file = pidPath(home);
-  const owner = readPid(home);
-  if (owner !== undefined && owner !== process.pid && processIsAlive(owner)) {
-    throw new ArgosError(
-      "storage_locked",
-      `${file}: another argos process (pid ${owner}) owns this home; stop it first`,
-    );
-  }
-  if (owner === process.pid) {
-    throw new ArgosError(
-      "storage_locked",
-      `${file}: this process already owns this home (pid ${owner}); close the other ArgosHost`,
-    );
-  }
-  writeFileSync(file, `${process.pid}\n`, { mode: 0o600 });
-}
-
-/** Remove the pid file only when it still names this process. */
-function releasePidFile(home: string): void {
-  if (readPid(home) !== process.pid) return;
-  rmSync(pidPath(home), { force: true });
-}
-
 // ------------------------------------------------------------------ host
-
-export interface ArgosHostOptions {
-  /** `$ARGOS_HOME`; default {@link argosHome}. Ignored when `storage` is supplied. */
-  readonly home?: string;
-  /** Injected storage (MemoryStorage in fast unit tests). Skips the home/pid setup. */
-  readonly storage?: Storage;
-  readonly executor: StepExecutor;
-  /** Injected clock; default wall time. The harness clock and every timeout use it. */
-  readonly clock?: Clock;
-  /** Override the D6 stub (tests only; production leaves it unset). */
-  readonly models?: Models;
-  /**
-   * Provider/model catalog (FR24). When supplied, `startRun` refuses a run whose resolved
-   * `provider/model` is missing with `model_unavailable` **before** creating any task. Phase 4
-   * tests leave it unset, so the durable host stays independent of Paseo.
-   */
-  readonly modelCatalog?: TargetCatalog;
-  /**
-   * Injected git port for worktree creation and read-only snapshots (D9). Production leaves it
-   * unset: `execFile("git", [...])` is the only implementation that ships.
-   */
-  readonly git?: GitRunner;
-}
-
-export interface StartRunInput {
-  readonly ir: PlaybookIR;
-  readonly inputs: Readonly<Record<string, Scalar>>;
-  readonly cwd: string;
-  readonly worktree?: WorktreeRecord;
-  readonly deadline?: number;
-  /** Explicit run id (tests / idempotent callers); default `ulid()`. */
-  readonly id?: string;
-  /**
-   * Isolation override for this run (Phase 8's `argos run --isolation`). Default: the frozen IR's
-   * `isolation` block, which the loader already resolved from playbook/defaults.
-   */
-  readonly isolation?: IsolationIR;
-  /**
-   * D15: idempotency key for `POST /runs`. A repeated request with the same id returns the run the
-   * first request created instead of starting a second one.
-   */
-  readonly clientRequestId?: string;
-}
-
-export interface StartedRun {
-  readonly runId: string;
-  readonly taskId: string;
-}
-
-/** Result of `cancelRun`: the status the mirrored record reached. */
-export interface CancelRunResult {
-  readonly runId: string;
-  readonly status: RunRecord["status"];
-}
-
-/** A run document changed (after-tasks included). Returned by {@link ArgosHost.observeRuns}. */
-export type RunChangeListener = (runId: string) => void;
-
-/** What `decideGate` wrote; idempotent by `gateId` (the first writer wins). */
-export interface GateDecisionReceipt {
-  readonly runId: string;
-  readonly gateId: string;
-  readonly decision: string;
-  readonly comment?: string;
-  readonly decidedBy?: string;
-  readonly decidedVia?: string;
-  readonly decidedAt: number;
-}
-
-export interface DecideGateOptions {
-  readonly comment?: string;
-  readonly decidedBy?: string;
-  readonly decidedVia?: string;
-  /** D15: makes a retried `POST /runs/:id/gates/:gateId` a no-op success. */
-  readonly clientRequestId?: string;
-}
-
-/** Result of `startAfterTask` (FR11). `started: false` means it was already started/settled. */
-export interface StartedAfterTask {
-  readonly runId: string;
-  readonly afterId: string;
-  readonly started: boolean;
-  readonly taskId?: string;
-}
 
 export class ArgosHost {
   readonly #harness: Harness;
@@ -452,6 +309,11 @@ export class ArgosHost {
       if (existing !== undefined) return existing;
     }
     const runId = input.id ?? ulid(this.#clock.now());
+    // FR3.1/FR3.2: every script the frozen IR can dispatch is pinned **before** the worktree
+    // exists. A missing or non-executable script is `playbook_invalid` naming the step, so the
+    // caller gets the error with no task and no checkout (and a script an earlier step would have
+    // created is refused here — the documented compat divergence).
+    const scripts = pinRunScripts(input.ir, input.cwd, this.#home);
     // FR23/D9: an isolated run works in its own worktree from a freshly fetched base. The worktree
     // is created **before** the run task exists, so a dirty base or a missing ref refuses the run
     // with `worktree_base_dirty` / `worktree_failed` and no agent is ever launched.
@@ -465,6 +327,7 @@ export class ArgosHost {
       cwd: input.cwd,
       now,
       ...(worktree === undefined ? {} : { worktree }),
+      ...(scripts === undefined ? {} : { scripts }),
       ...(input.deadline === undefined ? {} : { deadline: input.deadline }),
     });
 
@@ -544,6 +407,30 @@ export class ArgosHost {
       home: this.#home,
       runId,
       ...(isolation.base === undefined ? {} : { base: isolation.base }),
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+    });
+  }
+
+  /**
+   * FR4.7: re-attach the run's branch when its checkout directory is gone — after `argos worktree
+   * rm`, or a directory deleted out of band. The path comes from the record-only guard, so a
+   * tampered record is `worktree_failed` instead of a checkout somewhere unexpected. The branch is
+   * **never** re-created: a deleted one refuses the retry before any task exists.
+   */
+  async #reattachWorktreeIfMissing(record: RunRecord): Promise<void> {
+    const worktree = record.worktree;
+    if (worktree === undefined || existsSync(worktree.path)) return;
+    if (this.#home === undefined) {
+      throw new ArgosError(
+        "worktree_failed",
+        `run ${record.id}: worktree ${worktree.path} is gone and re-attaching it needs an ARGOS_HOME`,
+      );
+    }
+    recordRunWorktree(record.id, record, this.#home);
+    await reattachRunWorktree({
+      repo: record.cwd,
+      home: this.#home,
+      runId: record.id,
       ...(this.#git === undefined ? {} : { git: this.#git }),
     });
   }
@@ -796,6 +683,114 @@ export class ArgosHost {
   }
 
   /**
+   * Remove a finished run (`argos rm`). Retires the run, history, gate, and idempotency documents
+   * and drops the id from the runs index in **one** commit, so a reader sees the whole run or none
+   * of it. A live run (or one with a running after-task) is refused with `run_terminal`: cancel it
+   * first. The terminal task records stay in storage (pi-durable keeps them); nothing reads them
+   * once the mirror is gone. The worktree is **not** removed and is reported back instead.
+   */
+  async removeRun(runId: string): Promise<RemoveRunResult> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const doc = await this.getRun(runId);
+    if (doc === undefined) {
+      throw new ArgosError("run_unknown", `unknown run "${runId}"`);
+    }
+    assertRemovable(runId, doc.record);
+    const clientRequestId = await this.#runClientRequestId(doc.taskId);
+
+    const removed = await this.#harness.commit(async (tx) => {
+      // Re-check inside the single-writer commit: a retry or after-task may have started since.
+      const current = await tx.doc(RunDocFamily, runId, {
+        taskId: doc.taskId,
+        record: doc.record as unknown as RunDocValue["record"],
+      });
+      const record = current.record as unknown as RunRecord;
+      assertRemovable(runId, record);
+      for (const gate of record.gates) {
+        await tx.retireDoc(GateDocFamily, gateKey(runId, gate.id));
+      }
+      await tx.retireDoc(HistoryDocFamily, runId);
+      await tx.retireDoc(RunDocFamily, runId);
+      if (clientRequestId !== undefined) {
+        const receipt = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
+        // Only drop a receipt that still names this run: the key may have been reused after expiry.
+        if (receipt.runId === runId) await tx.retireDoc(IdempotencyDocFamily, clientRequestId);
+      }
+      const index = await tx.doc(RunsIndexDoc);
+      const at = index.ids.indexOf(runId);
+      if (at >= 0) index.ids.splice(at, 1);
+      // Copy plain values out: the draft cannot be read once the commit has settled.
+      const worktree = record.worktree?.path;
+      const result: RemoveRunResult = {
+        runId,
+        status: record.status,
+        ...(worktree === undefined ? {} : { worktree }),
+      };
+      return result;
+    }, this.#context);
+    return removed;
+  }
+
+  /**
+   * Remove one run's worktree (`argos worktree rm`, FR4.1–FR4.4). The path and branch come from the
+   * mirrored record only, never from the caller: an unknown run is `run_unknown`, a run that has not
+   * finished is `run_active`, and a run that never had a worktree is a `removed: false` receipt.
+   * Without `force` a dirty checkout is refused with `worktree_failed`; the branch is kept unless
+   * `deleteBranch` is asked for.
+   */
+  async removeWorktree(
+    runId: string,
+    options: RemoveWorktreeOptions = {},
+  ): Promise<WorktreeRemovalResult> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const doc = await this.getRun(runId);
+    return removeWorktreeForRun({
+      runId,
+      record: doc?.record,
+      home: this.#home,
+      ...(options.force === undefined ? {} : { force: options.force }),
+      ...(options.deleteBranch === undefined ? {} : { deleteBranch: options.deleteBranch }),
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+    });
+  }
+
+  /**
+   * Remove the worktrees of terminal runs older than `olderThanMs` (`argos worktree gc`, FR4.5).
+   * Selection is by the mirrored `updatedAt`; a run that is still live is skipped as `active`
+   * rather than racing it, per-run failures are reported as `skipped` reasons, and directories under
+   * `<home>/worktrees` that no run index entry claims are returned as `orphans` (never deleted).
+   */
+  async gcWorktrees(options: GcWorktreesOptions): Promise<GcWorktreesResult> {
+    if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    if (this.#home === undefined) {
+      throw new ArgosError(
+        "worktree_failed",
+        "worktree gc needs an ARGOS_HOME for <home>/worktrees/<runId>; open the host with one",
+      );
+    }
+    const docs = await this.listRuns();
+    return gcRunWorktrees({
+      home: this.#home,
+      runs: docs.map((doc) => ({ runId: doc.record.id, record: doc.record })),
+      now: this.#clock.now(),
+      olderThanMs: options.olderThanMs,
+      ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+      ...(options.force === undefined ? {} : { force: options.force }),
+      ...(options.deleteBranch === undefined ? {} : { deleteBranch: options.deleteBranch }),
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+    });
+  }
+
+  /** The `clientRequestId` the run's task was created with, if any (D15 receipt to retire). */
+  async #runClientRequestId(taskId: string): Promise<string | undefined> {
+    const task = await this.getTaskRecord(taskId);
+    const input = task?.input;
+    if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
+    const value = (input as Record<string, unknown>)["clientRequestId"];
+    return typeof value === "string" && value !== "" ? value : undefined;
+  }
+
+  /**
    * Retry a terminal run from one step (FR25 `argos retry`).
    *
    * A **new** `argos.run` task is created from the mirrored record with the given step and every
@@ -823,10 +818,22 @@ export class ArgosHost {
         `run ${runId}: step "${stepId}" is not part of playbook ${record.playbookId}`,
       );
     }
+    // FR4.7: `argos worktree rm` keeps the branch, so a retry re-attaches it instead of re-cutting
+    // the checkout from the base. A branch that is gone refuses the retry before any task exists.
+    await this.#reattachWorktreeIfMissing(record);
 
     const now = this.#clock.now();
     const draft = cloneRecord(record);
-    for (const id of downstreamClosure(record.ir, [stepId])) {
+    const closure = downstreamClosure(record.ir, [stepId]);
+    // FR3.4/D2: a retry is the operator's re-pin. Every script step in the reset closure is hashed
+    // again; a script that is gone refuses the retry before any task exists, and each changed
+    // digest is reported as a `script_repinned` history event (old → new) in the retry commit.
+    const repinned =
+      record.scripts === undefined
+        ? { pins: undefined as ScriptPins | undefined, events: [] as readonly RepinnedScript[] }
+        : this.#repinClosure(record, closure);
+    if (repinned.pins !== undefined) draft.scripts = repinned.pins;
+    for (const id of closure) {
       const step = draft.steps[id];
       if (step === undefined) continue;
       step.status = "pending";
@@ -854,12 +861,58 @@ export class ArgosHost {
         stepId,
         detail: `retry from ${stepId}`,
       });
+      for (const event of repinned.events) {
+        await appendRunHistory(tx, runId, retried, {
+          type: "script_repinned",
+          stepId: event.stepId,
+          detail: event.detail,
+        });
+      }
       await registerRun(tx, runId);
       return id;
     }, this.#context);
 
     this.#harness.resume();
     return { runId, taskId: String(taskId) };
+  }
+
+  /**
+   * Re-pin every script step in `closure` (FR3.4). Returns the updated pin map (undefined when the
+   * record has none) plus one history line per script whose digest changed. A script that cannot be
+   * resolved or read is `playbook_invalid` naming the step: the retry is refused before any write.
+   */
+  #repinClosure(
+    record: RunRecord,
+    closure: readonly string[],
+  ): { readonly pins: ScriptPins; readonly events: readonly RepinnedScript[] } {
+    const pins: Record<string, { path: string; sha256: string }> = { ...record.scripts };
+    const events: { stepId: string; detail: string }[] = [];
+    const seen = new Set<string>();
+    for (const id of closure) {
+      const definition = record.ir.steps.find((candidate) => candidate.id === id);
+      const name = definition?.script?.run;
+      if (definition === undefined || name === undefined || seen.has(name)) continue;
+      seen.add(name);
+      let pin;
+      try {
+        pin = pinScript(record.cwd, name, this.#home);
+      } catch (error) {
+        throw new ArgosError(
+          "playbook_invalid",
+          `run ${record.id}: step ${definition.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`,
+          { stepId: definition.id, cause: error },
+        );
+      }
+      const previous = record.scripts?.[name];
+      pins[name] = pin;
+      if (previous === undefined || previous.sha256 !== pin.sha256 || previous.path !== pin.path) {
+        events.push({
+          stepId: definition.id,
+          detail: `${name}: ${previous?.sha256 ?? "unpinned"} -> ${pin.sha256}`,
+        });
+      }
+    }
+    return { pins, events };
   }
 
   /**
@@ -923,14 +976,51 @@ export class ArgosHost {
   }
 }
 
-/** FR4: the database file is private to the user. */
-function enforceStorageModes(home: string): void {
-  const file = dbPath(home);
-  for (const path of [file, `${file}-wal`, `${file}-shm`]) {
-    try {
-      chmodSync(path, 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+// ------------------------------------------------------------------ re-exports
+
+// FR5.2 is a pure move: the D6 stub and the public option/result types still come from this
+// module, by name, so `argos-core/durable` keeps exactly the same surface.
+export { createStubModels };
+export type {
+  ArgosHostOptions,
+  CancelRunResult,
+  DecideGateOptions,
+  GateDecisionReceipt,
+  RemoveRunResult,
+  RunChangeListener,
+  StartedAfterTask,
+  StartedRun,
+  StartRunInput,
+};
+// FR4 cleanup types, by name: the host methods are the only way to reach them.
+export type {
+  GcRemovedWorktree,
+  GcSkippedWorktree,
+  GcWorktreesOptions,
+  GcWorktreesResult,
+  RemoveWorktreeOptions,
+  WorktreeRemovalResult,
+} from "./worktrees.js";
+
+/** One `script_repinned` history line (FR3.4): which step, and `<name>: <from> -> <to>`. */
+interface RepinnedScript {
+  readonly stepId: string;
+  readonly detail: string;
+}
+
+/** `removeRun` refuses a run whose main graph or any after-task is still going. */
+function assertRemovable(runId: string, record: RunRecord): void {
+  if (!isTerminalRunStatus(record.status)) {
+    throw new ArgosError(
+      "run_terminal",
+      `run ${runId} is ${record.status}; cancel it before removing it`,
+    );
+  }
+  const running = Object.entries(record.after).find(([, state]) => state.status === "running");
+  if (running !== undefined) {
+    throw new ArgosError(
+      "run_terminal",
+      `run ${runId}: after-task "${running[0]}" is still running; wait for it before removing the run`,
+    );
   }
 }

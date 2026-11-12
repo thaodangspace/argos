@@ -7,17 +7,18 @@
  *
  * Phases: `prepare → run → collect`.
  *
- * - `prepare` resolves the executable and takes the read-only snapshot (D8) **before** the first
- *   execution, then commits the absolute path and the absolute `deadlineAt`. Nothing is executed
- *   by a phase that has not yet written its intent.
- * - `run` executes the script once with the filtered environment (D10), bounded output tails, and
- *   `cwd` = the run worktree when isolation is on. Exit `75` (`SCRIPT_NOT_YET`) commits
- *   `sleeping(until: now + pollMs)` (D3: 5000 ms) and re-runs on wake; any other non-zero exit is
- *   terminal. The phase is re-entered after the sleep, so every design point is durable.
+ * - `prepare` resolves the executable (or takes the pinned path from its input) and snapshots the
+ *   read-only tree (D8) **before** the first execution, then commits the absolute path and the
+ *   absolute `deadlineAt`. Nothing is executed by a phase that has not yet written its intent.
+ * - `run` checks the pin (FR3) and executes the script once with the filtered environment (D10),
+ *   bounded output tails, and `cwd` = the run worktree when isolation is on. Exit `75`
+ *   (`SCRIPT_NOT_YET`) commits `sleeping(until: now + pollMs)` (D3: 5000 ms) and re-runs on wake;
+ *   any other non-zero exit is terminal. The phase is re-entered after the sleep, so every design
+ *   point is durable.
  * - `collect` compares the read-only snapshot and commits a **terminal completed** task whose
  *   result is a {@link StepTaskResult}. A failing script is still a completed task carrying an
- *   `errorCode` (`step_failed`, `script_timeout`, `readonly_violation`): task failure stays
- *   reserved for broken task code.
+ *   `errorCode` (`step_failed`, `script_timeout`, `script_changed`, `readonly_violation`): task
+ *   failure stays reserved for broken task code.
  *
  * Resolution: `<script>` must be a bare file name (no `/`, no `..`, not absolute). It is looked up
  * in `.argos/scripts/` and then in the paseo-compatible `.paseo/plugins/playbooks/scripts/` of the
@@ -25,6 +26,11 @@
  * It must be an executable regular file. Resolution uses the repository root so an isolated run can
  * still run a local, uncommitted helper; *execution* uses the worktree, so the script sees the
  * run's private checkout (a global script never runs inside `$ARGOS_HOME`).
+ *
+ * Pinning (FR3, `script-pin.ts`): the host resolves and hashes every script when the run starts, so
+ * `prepare` normally just takes `input.pin.path`. Every `run` entry hashes the file again; a
+ * changed, moved, or deleted file settles the step as `script_changed` instead of spawning. Only a
+ * record written before pinning (no `input.pin`) resolves at `prepare` (FR3.6).
  *
  * Outputs a script can expose, and only when the IR declares them: `stdout` and `stderr` (bounded
  * tails of the last run), `exitCode` / `exit_code` (number), and `runs` (number of executions, so
@@ -36,13 +42,12 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
 
 import { defineTask } from "@earendil-works/pi-durable";
 
 import { ArgosError, type ArgosErrorCode } from "../../errors.js";
 import { filterScriptEnv } from "../../engine/env.js";
+import type { ScriptPinRecord } from "../../engine/index.js";
 import {
   describeSnapshotChange,
   snapshotChanged,
@@ -51,9 +56,12 @@ import {
   type SnapshotComparison,
 } from "../../git/snapshot.js";
 import { tail, type GitRunner } from "../../git/exec.js";
-import { HOME_SCRIPT_DIR, SCRIPT_DIRS } from "../../playbook/load.js";
 import type { Scalar } from "../../playbook/ir.js";
 import type { StepTaskResult } from "../context.js";
+import { checkPin, resolveScriptPath } from "./script-pin.js";
+
+// FR3 pinning lives in its own module; the resolution helper keeps its historical export here.
+export { resolveScriptPath } from "./script-pin.js";
 
 // ------------------------------------------------------------------ shape
 
@@ -79,6 +87,11 @@ export interface ScriptTaskInput {
   readonly scriptHome?: string;
   /** Script name from the frozen IR (`script: <name>`). */
   readonly script: string;
+  /**
+   * FR3: the path and sha256 pinned when the run started. Absent on a record created before
+   * pinning (FR3.6), in which case `prepare` resolves as before and no hash is checked.
+   */
+  readonly pin?: ScriptPinRecord;
   /** Env keys the playbook declares in `env: [...]` (D10 allowlist). */
   readonly env: readonly string[];
   /** D3 script poll default 5000 ms (resolved by the run task from the frozen IR). */
@@ -139,45 +152,6 @@ function messageOf(error: unknown): string {
 function appendTail(current: string, chunk: string): string {
   const next = current + chunk;
   return next.length > SCRIPT_OUTPUT_LIMIT ? next.slice(next.length - SCRIPT_OUTPUT_LIMIT) : next;
-}
-
-/**
- * Resolve `<name>` to an executable in the repository's script directories, or throw a
- * `step_failed` {@link ArgosError} explaining what was tried. Rejects any path escape.
- * `scriptHome` adds `<home>/scripts` **after** the repository roots; the script still executes in
- * the run cwd or worktree, never in the home.
- */
-export function resolveScriptPath(scriptRoot: string, name: string, scriptHome?: string): string {
-  const rejected = (reason: string): ArgosError =>
-    new ArgosError("step_failed", `script ${JSON.stringify(name)}: ${reason}`);
-  if (name === "") throw rejected("the script name is empty");
-  if (isAbsolute(name)) throw rejected("an absolute path is not allowed; name a file in .argos/scripts");
-  if (name.includes("/") || name.includes("\\")) {
-    throw rejected("a path is not allowed; name a file in .argos/scripts");
-  }
-  if (name === "." || name === "..") throw rejected("path traversal is not allowed");
-
-  const tried: string[] = [];
-  const directories = SCRIPT_DIRS.map((directory) => join(scriptRoot, directory));
-  if (scriptHome !== undefined) directories.push(join(resolve(scriptHome), HOME_SCRIPT_DIR));
-  for (const directory of directories) {
-    const candidate = join(directory, name);
-    tried.push(candidate);
-    let stats;
-    try {
-      stats = statSync(candidate);
-    } catch {
-      continue;
-    }
-    if (!stats.isFile()) continue;
-    try {
-      accessSync(candidate, constants.X_OK);
-    } catch {
-      throw rejected(`${candidate} is not executable`);
-    }
-    return candidate;
-  }
-  throw rejected(`not found (looked in ${tried.join(", ")})`);
 }
 
 /** The outcome a successful script reports: `success` when declared, else the first outcome. */
@@ -371,18 +345,24 @@ export function createScriptTaskDefinition(options: ScriptTaskOptions = {}) {
         });
 
         let scriptPath: string;
-        try {
-          scriptPath = resolveScriptPath(
-            task.input.scriptRoot,
-            task.input.script,
-            task.input.scriptHome,
-          );
-        } catch (error) {
-          await runtime.commit(
-            () => ({ status: "running", checkpoint: fail(messageOf(error)) }),
-            context,
-          );
-          return;
+        if (task.input.pin !== undefined) {
+          // FR3: the path was resolved before the run started; `run` hashes it before every spawn,
+          // so a file that vanished or changed here is `script_changed`, not a resolution failure.
+          scriptPath = task.input.pin.path;
+        } else {
+          try {
+            scriptPath = resolveScriptPath(
+              task.input.scriptRoot,
+              task.input.script,
+              task.input.scriptHome,
+            );
+          } catch (error) {
+            await runtime.commit(
+              () => ({ status: "running", checkpoint: fail(messageOf(error)) }),
+              context,
+            );
+            return;
+          }
         }
 
         // D8: the snapshot has to be taken before the script's first execution, and it has to be
@@ -451,6 +431,22 @@ export function createScriptTaskDefinition(options: ScriptTaskOptions = {}) {
         }
 
         let run: ChildRun;
+        // FR3: every spawn — first run, an exit-75 re-run, a local retry, or a resumed task — sees
+        // the pinned digest. A changed or deleted script is terminal and never retried by the
+        // engine; an operator re-pins with `argos retry`.
+        if (task.input.pin !== undefined) {
+          const check = checkPin(task.input.pin);
+          if (!check.ok) {
+            await runtime.commit(
+              () => ({
+                status: "running",
+                checkpoint: settle({ errorCode: "script_changed", detail: check.detail }),
+              }),
+              context,
+            );
+            return;
+          }
+        }
         try {
           run = await runChild({
             file: checkpoint.scriptPath,

@@ -18,6 +18,7 @@ import { execFileGit, type GitInvocation, type GitRunner } from "../../src/git/e
 import {
   createRunWorktree,
   listRunWorktrees,
+  reattachRunWorktree,
   removeRunWorktree,
   runWorktreeBranch,
   runWorktreePath,
@@ -190,13 +191,14 @@ describe("createRunWorktree (D9)", () => {
     try {
       const worktree = await createRunWorktree({ repo: repo.repo, home, runId: "01RUNCLEAN" });
       const removed = await removeRunWorktree({ repo: repo.repo, home, runId: "01RUNCLEAN" });
-      expect(removed).toEqual({ removed: true, path: worktree.path });
+      expect(removed).toEqual({ removed: true, path: worktree.path, branchDeleted: false });
       expect(existsSync(worktree.path)).toBe(false);
       expect(repo.git(["rev-parse", "--verify", "refs/heads/argos/01RUNCLEAN"])).toBe(repo.headSha);
       // Idempotent: nothing left to remove.
       expect(await removeRunWorktree({ repo: repo.repo, home, runId: "01RUNCLEAN" })).toEqual({
         removed: false,
         path: worktree.path,
+        branchDeleted: false,
       });
     } finally {
       cleanup();
@@ -281,6 +283,179 @@ describe("createRunWorktree (D9)", () => {
       expect((error as Error).message).toContain("fetch origin");
     } finally {
       rmSync(join(home, "worktrees"), { recursive: true, force: true });
+      cleanup();
+      repo.cleanup();
+    }
+  });
+});
+
+// ------------------------------------------------------------------ FR4 cleanup
+
+/** Commit one file on the worktree's branch, so `git branch -d` has something to refuse. */
+function commitInWorktree(repo: ReturnType<typeof makeTempRepo>, path: string): void {
+  writeFileSync(join(path, "run-work.txt"), "committed by the run\n");
+  repo.git(["add", "run-work.txt"], path);
+  repo.git(["commit", "--quiet", "-m", "run work"], path);
+}
+
+describe("removeRunWorktree (FR4.2, FR4.3)", () => {
+  it("refuses a dirty worktree without force, naming the flag, and keeps it on disk", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    try {
+      const worktree = await createRunWorktree({ repo: repo.repo, home, runId: "01RUNRMODIRTY" });
+      writeFileSync(join(worktree.path, "agent-change.txt"), "not committed\n");
+
+      const error = await errorOf(
+        removeRunWorktree({ repo: repo.repo, home, runId: "01RUNRMODIRTY" }),
+      );
+      expect(codeOf(error)).toBe("worktree_failed");
+      expect((error as Error).message).toContain("--force");
+      expect(existsSync(worktree.path)).toBe(true);
+      expect(repo.git(["rev-parse", "--verify", "refs/heads/argos/01RUNRMODIRTY"])).toBe(
+        repo.headSha,
+      );
+    } finally {
+      cleanup();
+      repo.cleanup();
+    }
+  });
+
+  it("removes a dirty worktree with force and keeps the branch", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    try {
+      const worktree = await createRunWorktree({ repo: repo.repo, home, runId: "01RUNRMOFORCE" });
+      writeFileSync(join(worktree.path, "agent-change.txt"), "not committed\n");
+
+      const removed = await removeRunWorktree({
+        repo: repo.repo,
+        home,
+        runId: "01RUNRMOFORCE",
+        force: true,
+      });
+      expect(removed).toEqual({ removed: true, path: worktree.path, branchDeleted: false });
+      expect(existsSync(worktree.path)).toBe(false);
+      // Force removes the checkout, not the branch: the default still keeps `argos/<runId>`.
+      expect(repo.git(["rev-parse", "--verify", "refs/heads/argos/01RUNRMOFORCE"])).toBe(
+        repo.headSha,
+      );
+    } finally {
+      cleanup();
+      repo.cleanup();
+    }
+  });
+
+  it("deletes the branch with `git branch -d`, reports an unmerged one, and uses -D with force", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    const calls: GitInvocation[] = [];
+    const recording: GitRunner = (invocation) => {
+      calls.push(invocation);
+      return execFileGit(invocation);
+    };
+    try {
+      const runId = "01RUNRMOBRANCH";
+      const worktree = await createRunWorktree({ repo: repo.repo, home, runId });
+      commitInWorktree(repo, worktree.path);
+
+      // `-d` refuses a branch with commits main does not have: reported, not thrown.
+      const kept = await removeRunWorktree({
+        repo: repo.repo,
+        home,
+        runId,
+        deleteBranch: true,
+        git: recording,
+      });
+      expect(kept).toEqual({ removed: true, path: worktree.path, branchDeleted: false });
+      expect(calls.map((call) => call.args)).toContainEqual([
+        "branch",
+        "-d",
+        `argos/${runId}`,
+      ]);
+      expect(repo.git(["rev-parse", "--verify", `refs/heads/argos/${runId}`])).not.toBe("");
+
+      // `--force` switches to `-D`, which deletes an unmerged branch.
+      const deleted = await removeRunWorktree({
+        repo: repo.repo,
+        home,
+        runId,
+        force: true,
+        deleteBranch: true,
+        git: recording,
+      });
+      expect(deleted).toEqual({ removed: false, path: worktree.path, branchDeleted: true });
+      expect(calls.map((call) => call.args)).toContainEqual([
+        "branch",
+        "-D",
+        `argos/${runId}`,
+      ]);
+      expect(() => repo.git(["rev-parse", "--verify", `refs/heads/argos/${runId}`])).toThrow();
+    } finally {
+      cleanup();
+      repo.cleanup();
+    }
+  });
+});
+
+describe("reattachRunWorktree (FR4.7)", () => {
+  it("attaches the existing branch again after the directory is deleted", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    const calls: GitInvocation[] = [];
+    const recording: GitRunner = (invocation) => {
+      calls.push(invocation);
+      return execFileGit(invocation);
+    };
+    try {
+      const runId = "01RUNREATTACH";
+      const worktree = await createRunWorktree({ repo: repo.repo, home, runId });
+      commitInWorktree(repo, worktree.path);
+      // A directory deleted out of band leaves a stale registration behind: prune has to happen.
+      rmSync(worktree.path, { recursive: true, force: true });
+      expect(existsSync(worktree.path)).toBe(false);
+
+      const reattached = await reattachRunWorktree({
+        repo: repo.repo,
+        home,
+        runId,
+        git: recording,
+      });
+      expect(reattached).toEqual({ path: worktree.path, branch: `argos/${runId}` });
+      expect(existsSync(join(worktree.path, "run-work.txt"))).toBe(true);
+      expect(repo.git(["rev-parse", "--abbrev-ref", "HEAD"], worktree.path)).toBe(`argos/${runId}`);
+      expect(calls.map((call) => call.args)).toContainEqual(["worktree", "prune"]);
+      expect(calls.map((call) => call.args)).toContainEqual([
+        "worktree",
+        "add",
+        worktree.path,
+        `argos/${runId}`,
+      ]);
+    } finally {
+      cleanup();
+      repo.cleanup();
+    }
+  });
+
+  it("refuses to re-attach when the branch is gone", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    try {
+      const runId = "01RUNNOBRANCH";
+      const worktree = await createRunWorktree({ repo: repo.repo, home, runId });
+      const removed = await removeRunWorktree({
+        repo: repo.repo,
+        home,
+        runId,
+        deleteBranch: true,
+      });
+      expect(removed.branchDeleted).toBe(true);
+
+      const error = await errorOf(reattachRunWorktree({ repo: repo.repo, home, runId }));
+      expect(codeOf(error)).toBe("worktree_failed");
+      expect((error as Error).message).toContain(`argos/${runId}`);
+      expect(existsSync(worktree.path)).toBe(false);
+    } finally {
       cleanup();
       repo.cleanup();
     }

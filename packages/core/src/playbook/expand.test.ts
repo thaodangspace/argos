@@ -6,11 +6,23 @@ import { describe, expect, it } from "vitest";
 import { isArgosError } from "../errors.js";
 import { loadPlaybook } from "./load.js";
 
-const SUB = join(fileURLToPath(new URL("../../test/fixtures", import.meta.url)), "subplaybook");
+const FIXTURES = fileURLToPath(new URL("../../test/fixtures", import.meta.url));
+const SUB = join(FIXTURES, "subplaybook");
+const FAMILIES = join(FIXTURES, "families");
 
 function capture(id: string): unknown {
   try {
     loadPlaybook(SUB, id);
+  } catch (error) {
+    return error;
+  }
+  throw new Error(`fixture ${id} was expected to fail`);
+}
+
+/** Load a fixture that spans both root families, returning the error instead of throwing. */
+function captureAcrossFamilies(id: string): unknown {
+  try {
+    loadPlaybook(join(FAMILIES, "repo"), id, { home: join(FAMILIES, "home") });
   } catch (error) {
     return error;
   }
@@ -69,5 +81,19 @@ describe("expandPlaybook: sub-playbooks (FR10)", () => {
     expect(error.code).toBe("playbook_cycle");
     expect(error.stepId).toBe("hop");
     expect(error.message).toContain("cycle-a -> cycle-b -> cycle-a");
+  });
+
+  it("rejects a role id that the caller and the sub-playbook resolve differently (FR8.3)", () => {
+    const error = captureAcrossFamilies("conflict");
+    expect(isArgosError(error)).toBe(true);
+    if (!isArgosError(error)) return;
+    expect(error.code).toBe("playbook_invalid");
+    expect(error.stepId).toBe("block");
+    expect(error.file).toContain("conflict.yaml");
+    expect(error.message).toContain('role "reviewer"');
+    expect(error.message).toContain("different content");
+    // Both role files are named, so the author can see which two copies collide.
+    expect(error.message).toContain(join(FAMILIES, "repo/.argos/roles/reviewer/role.yaml"));
+    expect(error.message).toContain(join(FAMILIES, "home/roles/reviewer/role.yaml"));
   });
 });

@@ -88,6 +88,8 @@ export function createServerArgosClient(): ArgosRpc {
     decideGate: (runId, gateId, body) => get().decideGate(runId, gateId, body),
     startRun: (body) => get().startRun(body),
     cancelRun: (runId) => get().cancelRun(runId),
+    removeRun: (runId) => get().removeRun(runId),
+    retryStep: (runId, stepId) => get().retryStep(runId, stepId),
     openEvents: (handlers) => get().openEvents(handlers),
     close: () => {
       closed = true;

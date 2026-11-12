@@ -4,18 +4,27 @@
  */
 
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ArgosHost } from "../../src/durable/host.js";
 import type { Clock } from "../../src/durable/context.js";
 import { createRpcServer, type RpcServer } from "../../src/rpc/server.js";
-import type { RunDetail, RunSummary, ServerInfo } from "../../src/rpc/contracts.js";
+import {
+  GcWorktreesResponseSchema,
+  RPC_ERROR_STATUS,
+  statusForCode,
+  type RunDetail,
+  type RunSummary,
+  type ServerInfo,
+} from "../../src/rpc/contracts.js";
+import { ARGOS_ERROR_CODES } from "../../src/errors.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeExecutor } from "../fakes/executor.js";
 import { gatedPlaybook, makeTempHome, waitForReal } from "../durable/support.js";
+import { makeTempRepo, type TempRepo } from "../support/git.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -302,6 +311,50 @@ describe("POST /runs (FR26, D15)", () => {
   });
 });
 
+describe("POST /runs cwd trust (FR6.1)", () => {
+  it("refuses a relative, NUL-bearing, missing, or file cwd with 400 and creates no run", async () => {
+    const executor = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(executor);
+    const repo = await makeRepoWith(singleStepPlaybook());
+    const file = join(repo, "notes.txt");
+    writeFileSync(file, "not a directory\n", "utf8");
+
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["relative/repo", "relative path"],
+      [`${repo}\u0000suffix`, "NUL byte"],
+      [join(repo, "missing"), "missing path"],
+      [file, "file"],
+    ];
+    for (const [cwd, label] of cases) {
+      const response = await call(harness.base, "POST", "/runs", {
+        body: { playbookId: "single", cwd },
+      });
+      expect(response.status, `${label}: ${response.text}`).toBe(400);
+      expect(errorCode(response.body), label).toBe("invalid_request");
+    }
+
+    // Nothing ran: no agent was launched and the run index is still empty.
+    expect(executor.creations).toEqual([]);
+    const list = await call(harness.base, "GET", "/runs");
+    expect((list.body as { runs: RunSummary[] }).runs).toHaveLength(0);
+  });
+
+  it("accepts an absolute directory that is not a git repository", async () => {
+    const harness = await startHarness(new FakeExecutor({ completeAfterPolls: 1 }));
+    const repo = await makeRepoWith(singleStepPlaybook());
+    // A plain temp directory: the cwd only has to exist and be a directory.
+    expect(existsSync(join(repo, ".git"))).toBe(false);
+
+    const response = await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo },
+    });
+    expect(response.status, response.text).toBe(201);
+    const { runId } = response.body as { runId: string };
+    const detail = await waitForStatus(harness, runId, "completed");
+    expect(detail.cwd).toBe(repo);
+  });
+});
+
 describe("GET /runs (FR26)", () => {
   it("returns a summary without prompts or transcripts", async () => {
     const secretPrompt = "TOP-SECRET-PROMPT-6a1f0c";
@@ -497,11 +550,196 @@ describe("cancel / retry / gates (FR26)", () => {
     expect(completed.gates[0]?.decision).toBe("approve");
   });
 
+  it("removes a finished run and refuses a live one", async () => {
+    const executor = new FakeExecutor();
+    const harness = await startHarness(executor);
+    const repo = await makeRepoWith(singleStepPlaybook());
+    const started = (await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo },
+    })).body as { runId: string };
+    await waitForReal(async () => {
+      const response = await call(harness.base, "GET", `/runs/${started.runId}`);
+      return (response.body as RunDetail).steps[0]?.status === "running";
+    });
+
+    const live = await call(harness.base, "DELETE", `/runs/${started.runId}`);
+    expect(live.status).toBe(409);
+    expect(errorCode(live.body)).toBe("run_terminal");
+
+    await call(harness.base, "POST", `/runs/${started.runId}/cancel`, { body: {} });
+    const removed = await call(harness.base, "DELETE", `/runs/${started.runId}`);
+    expect(removed.status).toBe(200);
+    expect(removed.body).toEqual({ runId: started.runId, status: "cancelled" });
+
+    expect((await call(harness.base, "GET", `/runs/${started.runId}`)).status).toBe(404);
+    const list = (await call(harness.base, "GET", "/runs")).body as { runs: RunSummary[] };
+    expect(list.runs.map((run) => run.id)).not.toContain(started.runId);
+    expect(await harness.host.getHistory(started.runId)).toBeUndefined();
+
+    const again = await call(harness.base, "DELETE", `/runs/${started.runId}`);
+    expect(again.status).toBe(404);
+    expect(errorCode(again.body)).toBe("run_unknown");
+  });
+
+  it("removes gate documents and the idempotency receipt with the run", async () => {
+    const executor = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(executor, { enablePaseo: true });
+    const repo = await makeRepoWith(gatedPlaybook());
+    const body = { playbookId: "gated", cwd: repo, clientRequestId: "rm-req-1" };
+    const started = (await call(harness.base, "POST", "/runs", { body })).body as {
+      runId: string;
+    };
+    await waitForReal(async () => {
+      const response = await call(harness.base, "GET", `/runs/${started.runId}`);
+      return (response.body as RunDetail).gates.some((gate) => gate.status === "pending");
+    });
+    await call(harness.base, "POST", `/runs/${started.runId}/gates/review:1`, {
+      body: { decision: "approve" },
+    });
+    await waitForStatus(harness, started.runId, "completed");
+    expect(await harness.host.getGate(started.runId, "review:1")).toBeDefined();
+
+    const removed = await call(harness.base, "DELETE", `/runs/${started.runId}`);
+    expect(removed.status).toBe(200);
+    expect(await harness.host.getGate(started.runId, "review:1")).toBeUndefined();
+
+    // The receipt is gone, so the same clientRequestId starts a fresh run instead of a dead one.
+    const restarted = (await call(harness.base, "POST", "/runs", { body })).body as {
+      runId: string;
+    };
+    expect(restarted.runId).not.toBe(started.runId);
+  });
+
   it("answers 404 for an unknown run", async () => {
     const harness = await startHarness(new FakeExecutor());
     const response = await call(harness.base, "GET", "/runs/nope");
     expect(response.status).toBe(404);
     expect(errorCode(response.body)).toBe("run_unknown");
+  });
+});
+
+describe("worktree cleanup (FR4)", () => {
+  it("removes a finished run's worktree through the route and reports the contract shape", async () => {
+    const harness = await startHarness(new FakeExecutor({ completeAfterPolls: 1 }));
+    const repo = makeGitRepoWith(singleStepPlaybook());
+    const started = (await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo.repo, isolation: { mode: "worktree" } },
+    })).body as { runId: string };
+    await waitForStatus(harness, started.runId, "completed");
+
+    const path = join(harness.home.home, "worktrees", started.runId);
+    expect(existsSync(path)).toBe(true);
+
+    const removed = await call(
+      harness.base,
+      "POST",
+      `/runs/${started.runId}/worktree/remove`,
+      { body: {} },
+    );
+    expect(removed.status).toBe(200);
+    expect(removed.body).toEqual({
+      runId: started.runId,
+      path,
+      removed: true,
+      branchDeleted: false,
+    });
+    expect(existsSync(path)).toBe(false);
+    // The default keeps the branch, so the run can still be retried (FR4.7).
+    expect(repo.git(["rev-parse", "--verify", `refs/heads/argos/${started.runId}`])).not.toBe("");
+
+    const again = await call(harness.base, "POST", `/runs/${started.runId}/worktree/remove`, {
+      body: { deleteBranch: true },
+    });
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual({
+      runId: started.runId,
+      path,
+      removed: false,
+      branchDeleted: true,
+    });
+  });
+
+  it("answers 400 for an unknown body key on both routes", async () => {
+    const harness = await startHarness(new FakeExecutor({ completeAfterPolls: 1 }));
+    const remove = await call(harness.base, "POST", "/runs/run-1/worktree/remove", {
+      body: { force: true, deleteBranches: true },
+    });
+    expect(remove.status).toBe(400);
+    expect(errorCode(remove.body)).toBe("invalid_request");
+
+    const gc = await call(harness.base, "POST", "/worktrees/gc", {
+      body: { olderThan: "1h", dryrun: true },
+    });
+    expect(gc.status).toBe(400);
+    expect(errorCode(gc.body)).toBe("invalid_request");
+
+    const duration = await call(harness.base, "POST", "/worktrees/gc", {
+      body: { olderThan: "soon" },
+    });
+    expect(duration.status).toBe(400);
+    expect(errorCode(duration.body)).toBe("invalid_request");
+  });
+
+  it("refuses a live run with 409 run_active", async () => {
+    const harness = await startHarness(new FakeExecutor());
+    const repo = makeGitRepoWith(singleStepPlaybook());
+    const started = (await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo.repo, isolation: { mode: "worktree" } },
+    })).body as { runId: string };
+    await waitForReal(async () => {
+      const response = await call(harness.base, "GET", `/runs/${started.runId}`);
+      return (response.body as RunDetail).steps[0]?.status === "running";
+    });
+
+    const refused = await call(harness.base, "POST", `/runs/${started.runId}/worktree/remove`, {
+      body: { force: true },
+    });
+    expect(refused.status).toBe(409);
+    expect(errorCode(refused.body)).toBe("run_active");
+  });
+
+  it("sweeps with POST /worktrees/gc and matches the gc schema", async () => {
+    const harness = await startHarness(new FakeExecutor({ completeAfterPolls: 1 }));
+    const repo = makeGitRepoWith(singleStepPlaybook());
+    const started = (await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo.repo, isolation: { mode: "worktree" } },
+    })).body as { runId: string };
+    await waitForStatus(harness, started.runId, "completed");
+    // `updatedAt` must be strictly older than the cutoff; give the clock one tick.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    const path = join(harness.home.home, "worktrees", started.runId);
+    const dry = await call(harness.base, "POST", "/worktrees/gc", {
+      body: { olderThan: "0s", dryRun: true },
+    });
+    expect(dry.status).toBe(200);
+    const dryBody = GcWorktreesResponseSchema.parse(dry.body);
+    expect(dryBody.removed).toEqual([{ runId: started.runId, path, branchDeleted: false }]);
+    expect(dryBody.skipped).toEqual([]);
+    expect(dryBody.orphans).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+
+    const swept = await call(harness.base, "POST", "/worktrees/gc", {
+      body: { olderThan: "0s", deleteBranch: true },
+    });
+    expect(swept.status).toBe(200);
+    const sweptBody = GcWorktreesResponseSchema.parse(swept.body);
+    expect(sweptBody.removed).toEqual([{ runId: started.runId, path, branchDeleted: true }]);
+    expect(existsSync(path)).toBe(false);
+  });
+});
+
+describe("error code → status map (FR3.3)", () => {
+  it("maps script_changed to 409 and keeps it a stable Argos code", () => {
+    expect(ARGOS_ERROR_CODES).toContain("script_changed");
+    expect(RPC_ERROR_STATUS["script_changed"]).toBe(409);
+    expect(statusForCode("script_changed")).toBe(409);
+  });
+
+  it("maps run_active to 409 and keeps it a stable Argos code", () => {
+    expect(ARGOS_ERROR_CODES).toContain("run_active");
+    expect(RPC_ERROR_STATUS["run_active"]).toBe(409);
+    expect(statusForCode("run_active")).toBe(409);
   });
 });
 
@@ -530,8 +768,27 @@ function registerRepo(repo: ReturnType<typeof makeTempHome>): string {
   return repo.home;
 }
 
+/** Temp *git* repositories (a bare origin included) with the playbook committed into them. */
+const gitRepos: TempRepo[] = [];
+
+/**
+ * A clean git checkout that carries `.argos/playbooks/<id>.yaml` as a commit, so
+ * `isolation.mode: worktree` can cut a worktree from `origin/main` without `worktree_base_dirty`.
+ */
+function makeGitRepoWith(ir: PlaybookIR): TempRepo {
+  const repo = makeTempRepo();
+  const playbookDir = join(repo.repo, ".argos", "playbooks");
+  mkdirSync(playbookDir, { recursive: true });
+  writeFileSync(join(playbookDir, `${ir.id}.yaml`), renderPlaybook(ir), "utf8");
+  repo.git(["add", "-A"]);
+  repo.git(["commit", "--quiet", "-m", `playbook ${ir.id}`]);
+  gitRepos.push(repo);
+  return repo;
+}
+
 afterEach(() => {
   while (repos.length > 0) repos.pop()?.cleanup();
+  while (gitRepos.length > 0) gitRepos.pop()?.cleanup();
 });
 
 /** Minimal YAML rendering of the IR subset the tests create (no sub-playbooks/roles). */

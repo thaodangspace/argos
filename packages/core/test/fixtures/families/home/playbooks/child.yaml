@@ -1,0 +1,5 @@
+title: Shared Child
+steps:
+  - id: check
+    prompt: Check the change
+    role: reviewer

@@ -1,0 +1,7 @@
+title: Mixed Families
+steps:
+  - id: block
+    use: child
+  - id: finish
+    prompt: Finish the work
+    needs: [block]

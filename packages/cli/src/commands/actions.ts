@@ -1,4 +1,4 @@
-/** `argos decide`, `argos cancel`, `argos retry` (FR25). */
+/** `argos decide`, `argos cancel`, `argos retry` (FR25), `argos rm`. */
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";
@@ -47,6 +47,28 @@ export async function cancelCommand(args: ParsedArgs, io: CliIo): Promise<number
   return withRpc(io, args.json, async (client) => {
     const result = await client.cancelRun(runId);
     return { jsonValue: result, human: `run ${result.runId} ${result.status}` };
+  });
+}
+
+export async function rmCommand(args: ParsedArgs, io: CliIo): Promise<number> {
+  const unknown = rejectUnknownFlags(args, []);
+  if (unknown !== undefined) {
+    io.stderr(`argos: ${unknown}\n`);
+    return EXIT_RUNTIME;
+  }
+  const runId = args.positionals[0];
+  if (runId === undefined) {
+    io.stderr("argos: rm needs a run id\n");
+    return EXIT_RUNTIME;
+  }
+  if (args.positionals.length > 1) {
+    io.stderr("argos: rm takes exactly one run id\n");
+    return EXIT_RUNTIME;
+  }
+  return withRpc(io, args.json, async (client) => {
+    const result = await client.removeRun(runId);
+    const kept = result.worktree === undefined ? "" : `; worktree kept at ${result.worktree}`;
+    return { jsonValue: result, human: `removed run ${result.runId} (${result.status})${kept}` };
   });
 }
 

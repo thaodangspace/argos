@@ -70,7 +70,7 @@ Package `exports` point at `dist/`, so anything importing a sibling workspace ne
 | `$ARGOS_HOME/argos.sqlite` | `0600` | pi-durable SQLite; the single source of truth |
 | `$ARGOS_HOME/token` | `0600` | 32 random bytes hex; created on first serve |
 | `$ARGOS_HOME/serve.pid` | `0600` | single-writer pid file; dead pids are stale and replaced |
-| `$ARGOS_HOME/worktrees/<runId>/` | — | isolated run checkouts (never auto-removed) |
+| `$ARGOS_HOME/worktrees/<runId>/` | — | isolated run checkouts; removed only by `argos worktree rm` / `argos worktree gc` (FR4) |
 | `$ARGOS_HOME/fake-paseo.json` | `0600` | **test-only** fake agent snapshot |
 | `$ARGOS_HOME/fake-paseo-launches.jsonl` | `0600` | **test-only** fake creation ledger (E2E) |
 
@@ -107,6 +107,11 @@ Run and history are written in the same `runtime.commit()` as the task checkpoin
 only advances a phase may write an identical document (Chord stores no new revision); that is
 expected. Gate ids are `<stepId>:<n>`, so `${runId}.${gateId}` cannot collide.
 
+The history event vocabulary lives in `src/history.ts` (`HISTORY_EVENT_TYPES`, shared with the
+read model's schema): `run_started`, `select`, `dispatch`, `settle`, `gate`, `gate_decided`,
+`finish`, `effect_skipped`, `task_error`, `after_queued`, `after_start`, `retry`, and
+`script_repinned` (FR3.4 — one line per re-pinned script, `detail` = `<name>: <from> -> <to>`).
+
 ## Error codes
 
 Every deliberate failure is an `ArgosError` with one of these codes. The HTTP column is
@@ -135,10 +140,12 @@ Every deliberate failure is an `ArgosError` with one of these codes. The HTTP co
 | `step_failed` | step terminal failure (script non-zero exit, undeclared outcome, …) | 502 |
 | `step_timeout` | step timeout after retries | 504 |
 | `script_timeout` | script still running (or exiting 75) at its step deadline | 504 |
+| `script_changed` | a pinned script was edited, moved, or deleted after the run started; no automatic retry | 409 |
 | `concurrency_limit` | reserved for callers that enforce a playbook-level concurrency refusal; the engine parks extra steps as `ready` instead | 409 |
 | `unauthorized` | missing/bad bearer token | 401 |
 | `run_terminal` | write attempted on a finished run (e.g. deciding a gate afterwards) | 409 |
-| `invalid_request` | malformed/strict-body request, bad input coercion, body > 1 MiB | 400 |
+| `run_active` | a worktree operation named a run that has not finished (`worktree rm`/`gc`) | 409 |
+| `invalid_request` | malformed/strict-body request, bad input coercion, body > 1 MiB, or a `cwd` that is not an absolute existing directory | 400 |
 | `run_unknown` | `GET /runs/:id` for an unknown run | 404 |
 | `step_unknown` | `POST /runs/:id/retry` for an unknown step | 404 |
 
@@ -171,10 +178,14 @@ condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` 
 - Discovery: `.argos/playbooks/*.yaml` then `.paseo/plugins/playbooks/*.yaml` (same fallback for
   `roles/`, `defaults/main.yaml`, `scripts/`); playbook id = filename. An optional `home`
   (`loadPlaybook(repoDir, id, { home })`, and the same last argument on `discoverPlaybooks`,
-  `discoverRoles`, `discoverScripts`, `defaultsFile`) appends `<home>/playbooks`,
-  `<home>/roles`, `<home>/defaults/main.yaml`, and `<home>/scripts` **after** both repo roots; the
-  repo copy wins an id collision and the first existing defaults file wins whole-file (no per-field
-  merge). Omitting `home` keeps discovery repo-only. `POST /runs` passes the host home and
+  `discoverRoles`, `discoverScripts`, `defaultsFile`) also searches `<home>/playbooks`,
+  `<home>/roles`, `<home>/defaults/main.yaml`, and `<home>/scripts`. Playbooks, defaults, and
+  scripts stay repository-first: the repo copy wins an id collision and the first existing defaults
+  file wins whole-file (no per-field merge). **Roles are root-local (FR8)**: a home playbook
+  resolves `<home>/roles` then the repository roots, a repository playbook the reverse, and every
+  sub-playbook uses the family of its own file; one IR that resolves a role id to different
+  content fails `playbook_invalid` naming both role files (identical copies merge silently).
+  Omitting `home` keeps discovery repo-only. `POST /runs` passes the host home and
   `argos validate` passes `--home` (else `ARGOS_HOME`, else `~/.argos`); a script step carries it as
   `ScriptTaskInput.scriptHome` and still executes in the run cwd/worktree, never in the home.
   `loadPlaybook(repoDir, id)` returns a deep-frozen `PlaybookIR` with `hash`; it never writes.
@@ -182,8 +193,23 @@ condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` 
   `mode` | `mode_id` → `modeId`; `playbook: {name}` | `playbook: <id>` | `use: <id>` → sub-playbook;
   flat `gate`/`choices`/`script` and paseo block forms both load; `goto` accepts a bare id with
   sibling `max_loops` or `{target, max_loops}`.
+- Strict keys (FR1): the playbook, a step, and an input/output definition are `z.strictObject`, so
+  a typo is `playbook_invalid` naming the step (also under `after[n].steps[m]`), with every issue
+  (up to 20) in `ArgosError.issues`. Upstream-only keys stay declared as `z.unknown().optional()`
+  (step `handoff`, `queue`, `settle`, `silence`, `archive_agents`; playbook `hidden`, `manager`,
+  `workspace`, `next`, `singleton`) and never reach the IR. The origin of a file decides the
+  unknown-key rule: `argos` and `home` fail, and a `.paseo/plugins/playbooks/` file whose **only**
+  issues are unknown keys loads with one `unknown_key` warning per key (any other issue fails).
+- Warnings sink (FR7): `loadPlaybook(repoDir, id, { warnings })` appends `LoadWarning`
+  `{file, stepId, code, message}`; `ResolveContext` carries `origin` and `warn`. Warnings never
+  change the IR or `hash`, and messages never contain YAML values — only keys, ids, and paths.
+  `role_shadowed` (a resolved role id exists in both families with different content) and
+  `playbook_shadowed` (a repository playbook hides a home playbook with the same id) are emitted
+  only when the sink is present; identical role copies are silent. `argos validate` prints them
+  after the errors and exits 0 when there are only warnings.
 - Errors are `ArgosError` with the plan's stable code; loader/validator failures are
-  `playbook_invalid`, `playbook_cycle`, or `playbook_missing` and always name file + step.
+  `playbook_invalid`, `playbook_cycle`, or `playbook_missing` and always name file + step
+  (`details.issues` carries the per-issue `{path, stepId?, message}` list).
 - Golden compat fixtures live in `packages/core/test/fixtures/compat/` (copied from
   `lerenn/paseo-playbooks`, MIT; see `test/fixtures/ATTRIBUTION.md`). Alias, invalid, sub-playbook,
   precedence, `when`/`branch`, and discovery fixtures sit next to them. `docs/compat.md` lists
@@ -199,7 +225,9 @@ imports. `purity.test.ts` enforces the import graph. Consumers use the barrel
 next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: readonly Effect[] }
 ```
 
-- `RunRecord` is the whole checkpoint: frozen IR + inputs + step/gate/loop state.
+- `RunRecord` is the whole checkpoint: frozen IR + inputs + step/gate/loop state, plus the optional
+  additive `scripts` map (`Record<name, { path, sha256 }>`, FR3 pinning; absent when the playbook
+  has no script step and on a record written before pinning — hydration of old JSON is unchanged).
   `createRunRecord` starts every step `pending`; `hydrateRunRecord` validates strictly and returns
   the input untouched, so `JSON.stringify(hydrate(json)) === json`.
 - Run statuses: `pending | running | waiting | completed | failed | cancelled` (`waiting` = a gate
@@ -261,6 +289,14 @@ conversation (D5) and the initial mirror is written in the same commit. `resume(
 function that throws when **called**; `has` reports `false`. The engine never asks for a model,
 and no `pi.generation` task may ever appear in `inspect()`.
 
+The modules follow the responsibilities: `host.ts` (run lifecycle), `host-models.ts` (the D6
+stub), `pid.ts` (single-writer pid file and database modes), `host-types.ts` (public option/result
+types). The `argos.run` task keeps its definition in `tasks/run.ts` and spreads the rest over
+`run-checkpoint.ts` (checkpoint shape, schema, `hydrateRunCheckpoint`), `run-events.ts`
+(child-outcome → engine events, history), `run-plan.ts` (effects → next state, child inputs), and
+`run-recovery.ts` (`guarded`); `tasks/after.ts` also owns `plannedAfterTasks` and
+`createAfterRunTask`.
+
 ### Tasks
 
 ```ts
@@ -283,6 +319,11 @@ argos.gate v1: "await" | "decided"
   { phase, gateId, runId, stepId, kind, edge?, question, choices, seenAt,
     decision?, comment?, decidedBy?, decidedVia?, decidedAt? }
 ```
+
+`argos.script` input: `{ runId, stepId, attempt, requestId, cwd, scriptRoot, scriptHome?,
+script, pin?, env, pollMs, timeoutMs, outputs, outcomes, readonly? }`. `pin` is the
+`{ path, sha256 }` pair from `RunRecord.scripts`; it is absent only on a record written before
+pinning existed (FR3.6), and then `prepare` resolves the file as before.
 
 `select` feeds `next(record, {type:"tick"})`, creates one child per effect in the same commit as
 the mirror/history, then commits `waiting { on: childIds, policy: "allSettled" }`. `await` maps
@@ -383,6 +424,24 @@ target; `startRun` refuses `model_unavailable` before any task. Quota is a targe
 into `RunRecord.exhausted` before mirroring. All blocked → `provider_exhausted`. The primary
 target's `modeId`/`thinking` apply; fallbacks carry provider/model only.
 
+A quota hit can also arrive **after** launch: an error status/refresh failure, or a turn that ends
+on a bare usage-limit notice ("You've hit your 5-hour limit · resets …") instead of the schema
+result. `isQuotaNotice` (short text, only checked once the result failed the schema) classifies
+it; `status()` archives the agent, records the target, and relaunches the same attempt on the
+next available target (`argos/handover=1` label + handover note). Nothing left →
+`provider_exhausted` with the ledger.
+
+**Quota policy.** `providers` (playbook `defaults.providers`, else `defaults/main.yaml`
+`providers`, whole object) resolves to `PlaybookIR.providers` = `{ onExhausted, exhaustedForMs?,
+maxWaitMs? }`; absent keeps the IR (and hash) unchanged. `exhausted_for` overrides the executor's
+15 min window per step (`StepAgentContext.quotaWindowMs`). With `on_exhausted: wait`,
+`argos.step` turns `provider_exhausted` into a sleep until the first candidate leaves its window
+(min 30 s), then a fresh local attempt (new request id; the archived quota agent is never
+adopted; preferred target first). These relaunches are counted in `quotaRelaunches` and do not
+consume `retries`; `max_wait` bounds the total wait from the first exhaustion
+(`quotaWaitSince`), after which the step fails `provider_exhausted`. Default `fail`. The upstream
+`providers.fallback` key is parsed and ignored.
+
 **Structured output (D12).** `output.ts` compiles `outputs` + `outcomes` to
 `{ type:"object", properties:{...}, required:[...], additionalProperties:false }`.
 `parseStepResult` prefers a structured `output`; invalid output is not re-parsed as prose. Plain
@@ -412,11 +471,19 @@ A script step is dispatched by the same `dispatchStep` effect and settles throug
 `stepSettled` event as an agent step. `argos.script` is created for a frozen `kind: script` step;
 every other non-gate step keeps the agent executor.
 
-- Resolution: `<script>` must be a bare file name (no `/`, no `..`, not absolute), looked up in
-  `.argos/scripts/` then `.paseo/plugins/playbooks/scripts/` of the **run cwd**, and must be an
-  executable regular file. Resolution uses the repo root (so local helpers work); execution uses
-  `cwd = worktree.path` when isolation is on, otherwise the run cwd. Missing/non-executable →
-  `step_failed` naming the tried paths.
+- Resolution and pinning (FR3): `<script>` must be a bare file name (no `/`, no `..`, not absolute),
+  looked up in `.argos/scripts/` then `.paseo/plugins/playbooks/scripts/` of the **run cwd**, then
+  `<home>/scripts` when the host has a home, and must be an executable regular file.
+  `ArgosHost.startRun` resolves and hashes every main-step and after-step script **before the
+  worktree exists** (`src/durable/tasks/script-pin.ts`) and stores `RunRecord.scripts:
+  Record<name, { path, sha256 }>`; a missing or non-executable script is `playbook_invalid` naming
+  the step with no task and no worktree. Resolution uses the repo root (so local helpers work);
+  execution uses `cwd = worktree.path` when isolation is on, otherwise the run cwd. A script that
+  an earlier step would create is therefore refused at start (documented compat divergence).
+- `run` re-hashes the pinned file **before every spawn** (first run, an exit-75 re-run, a resume, a
+  local retry). A changed, moved, or deleted file settles the step as `script_changed` (the detail
+  says "missing" for a deleted file) and the engine never retries it; `argos retry` re-pins. A
+  record without `scripts` (written before pinning) keeps resolve-at-prepare (FR3.6).
 - `run` spawns with `shell: false`, the filtered env, and bounded (8 KiB) stdout/stderr **tails**.
   Exit `75` (`SCRIPT_NOT_YET`) commits `sleeping { until: now + pollMs }` and re-runs with
   `runs + 1`; any other non-zero exit is terminal. A script still alive at the deadline is killed
@@ -426,11 +493,25 @@ every other non-gate step keeps the agent executor.
   outcome `success` (or the first declared outcome) and exposes `stdout`, `stderr`,
   `exitCode`/`exit_code`, `runs`. Declared output names are never parsed as JSON. The receipt also
   carries `exitCode`, `runs`, `signal`, and a bounded `detail`.
-- Env filter (D10, `src/engine/env.ts`): drop keys matching
-  `/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i` unless declared in `env`; always keep `PATH`, `HOME`,
-  `LANG`, `TMPDIR`, plus `TMP`, `TEMP`, `SystemRoot`. Baseline names match case-insensitively;
-  declared names match exactly. Output keys are sorted for byte-stable checkpoints/logs. The same
-  pattern redacts secrets from git error messages.
+- Env filter (FR2, `src/engine/env.ts`): a script is deny-by-default. It inherits only the
+  baseline — `PATH`, `HOME`, `LANG`, `LC_*`, `TZ`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`,
+  `TMP`, `TEMP`, `SystemRoot`, `PATHEXT`, `COMSPEC` (matched case-insensitively) — plus the step's
+  `env:` grants: an exact name (grants it even when it looks like a credential), `PREFIX_*` (a
+  literal prefix ending in `_`; never a name matching
+  `/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i`), or `"*"` (every non-secret name — the old behavior;
+  `argos validate` warns `env_inherit_all`). Anything else is `playbook_invalid` naming the step.
+  `SCRIPT_ENV_DENY` — `ARGOS_PASEO_PASSWORD`, `ARGOS_HOME`, `ARGOS_PORT`, `ARGOS_PASEO_URL`, and
+  the four `ARGOS_FAKE_PASEO*` knobs — is never passed, even when granted exactly; the loader
+  warns `env_denied` and the IR keeps the entry verbatim. A spawned child therefore sees no name
+  the playbook did not grant. Output keys are sorted for byte-stable checkpoints/logs. The same
+  pattern redacts secrets from git error messages (FR2.6).
+
+`retryStep` re-pins (FR3.4): when the record has `scripts`, every script step in the reset
+`downstreamClosure` is resolved and hashed again — a missing one refuses the retry
+(`playbook_invalid`) before any task exists — and each changed digest appends a `script_repinned`
+history event whose `detail` is `<name>: <old sha256> -> <new sha256>`. An after-task child copies
+the parent's pins (`planAfterRun`), and a record written before pinning (no `scripts`) keeps the
+resolve-at-prepare path (FR3.6).
 
 **Worktree isolation (D9).** `createRunWorktree({ repo, home, runId, base?, git? })` →
 `{ path, branch, baseSha }`: `<ARGOS_HOME>/worktrees/<runId>`, branch `argos/<runId>`, created
@@ -442,7 +523,11 @@ run id: a clean existing worktree is returned, a branch without checkout is re-a
 one is refused. `startRun` creates it when the effective isolation is `{mode:"worktree"}` (from the
 IR or the `--isolation` override), stores it in `RunRecord.worktree`, and gives every agent/script
 child the worktree as `cwd`. Refusals happen before the run task exists, so no agent launches.
-Worktrees are never removed automatically; `removeRunWorktree` keeps the branch, and
+Worktrees are never removed automatically: `argos worktree rm` and `argos worktree gc` (FR4,
+`durable/worktrees.ts`) are the only paths, they take the path and branch from the record only
+(guarded against `runWorktreePath`/`runWorktreeBranch`), refuse a live run with `run_active`, and
+keep `argos/<runId>` unless `--delete-branch` is passed. `reattachRunWorktree` puts the branch back,
+so `argos retry` works after a removal (a deleted branch refuses the retry with `worktree_failed`).
 `listRunWorktrees` lists them. `src/git/exec.ts` is the only git spawner: `execFile("git", [args])`,
 never a shell/library; `GitRunner` is injectable.
 
@@ -473,9 +558,12 @@ is the single code → HTTP map; bodies are capped at 1 MiB.
 
 | Route | Behavior |
 |---|---|
-| `POST /runs` | load + validate from `cwd`, then `host.startRun`; `playbook_invalid` before any task |
+| `POST /runs` | validate `cwd` (absolute, NUL-free, existing directory — a git repo is not required; `invalid_request` before any task), then load + validate from `cwd`, then `host.startRun`; `playbook_invalid` before any task |
 | `GET /runs` | `{ runs }` newest first, from the `argos.runs` index |
 | `GET /runs/:id` | `RunDetail` = summary + bounded history + gate documents |
+| `DELETE /runs/:id` | `host.removeRun`: one commit retires the run, history, gate, and idempotency documents and drops the id from `argos.runs`; refuses a live run or a running after-task (`run_terminal`); task records and the worktree are kept |
+| `POST /runs/:id/worktree/remove` | `host.removeWorktree` (`argos worktree rm`): path and branch come from the record only (`runWorktreePath`/`runWorktreeBranch`, else `worktree_failed`); a dirty checkout without `force` is `worktree_failed` naming `--force`; `run_active` for a live run; `removed: false` when the run never had a worktree; `deleteBranch` runs `git branch -d` (`-D` with `force`) |
+| `POST /worktrees/gc` | `host.gcWorktrees` (`argos worktree gc`): terminal runs whose `updatedAt < now - olderThan` (`<n>(s\|m\|h\|d)`), `dryRun`, per-run `skipped` reasons (`active`, `path_mismatch`, a stable code), and `orphans` under `<home>/worktrees` that no run claims (reported, never deleted) |
 | `POST /runs/:id/cancel` | engine `cancel`; `run_terminal` if finished |
 | `POST /runs/:id/retry` | clone a terminal run into a fresh task (same `runId`), reset the step + downstream; refuses non-terminal (`run_terminal`), unknown run/step |
 | `POST /runs/:id/gates/:gateId` | first writer wins; `gate_unknown`/`gate_already_decided`/`run_terminal` |
@@ -484,7 +572,13 @@ is the single code → HTTP map; bodies are capped at 1 MiB.
 
 `POST /runs` defaults `cwd` to the server's cwd; the CLI always sends the caller's cwd. Declared
 inputs are coerced (`number`/`boolean`/`enum`), defaults fill missing values, a missing required
-input is `invalid_request`.
+input is `invalid_request`. `validateRunCwd` runs before `loadPlaybook`: the effective `cwd` must be
+absolute, NUL-free, exist, and be a directory (a git repository is not required); otherwise the
+route answers 400 `invalid_request` and creates no run, task, or worktree. The plugin's start tool
+confines an agent-supplied `cwd` to the calling agent's working directory (see the plugin section).
+The security model — what the token grants, the env rules, script pinning, record-only worktree
+paths, and plugin confinement — is documented in
+[`docs/architecture.md`](docs/architecture.md#security).
 
 **Auth/idempotency.** `ensureToken()` writes 32 random bytes as hex to `$ARGOS_HOME/token`
 (`0600`) on first serve; every request needs `Authorization: Bearer <token>` (SHA-256 +
@@ -502,7 +596,7 @@ commit that creates the run task, including after-task children and retry clones
 
 | Command | `--json` shape | Exit |
 |---|---|---|
-| `argos validate [path]` | `{valid, playbooks:[{id,file,hash}], errors:[{file,stepId,code,message}]}` | 0 valid, 2 invalid, 1 usage |
+| `argos validate [path]` | `{valid, playbooks:[{id,file,hash}], errors:[{file,stepId,code,message}], warnings:[{file,stepId,code,message}]}` (one `errors[]` entry per schema issue; warnings never change `valid`) | 0 valid or warnings only, 2 invalid, 1 usage |
 | `argos run <playbook> --input k=v [--cwd] [--isolation]` | `{runId, taskId}` | 0, 2 when refused |
 | `argos ls` | `{runs: RunSummary[]}` | 0 |
 | `argos status <runId>` | `RunDetail` | 0 |
@@ -510,6 +604,9 @@ commit that creates the run task, including after-task children and retry clones
 | `argos decide <runId> <gateId> <decision> [--comment]` | `GateDecisionResponse` | 0 |
 | `argos cancel <runId>` | `{runId, status}` | 0 |
 | `argos retry <runId> <stepId>` | `{runId, taskId}` | 0 |
+| `argos rm <runId>` | `{runId, status, worktree?}` | 0 |
+| `argos worktree rm <runId> [--force] [--delete-branch]` | `{runId, path, removed, branchDeleted}` | 0 |
+| `argos worktree gc --older-than <dur> [--dry-run] [--force] [--delete-branch]` | `{removed: [{runId, path, branchDeleted}], skipped: [{runId, reason}], orphans: [path]}` | 0 |
 | `argos serve [--port] [--home]` | `{port, home, pid}` | 0 |
 | `argos doctor [--home] [--port]` | `DoctorReport` | 0 (report), 1 old Node |
 
@@ -550,12 +647,18 @@ app may run on a different machine than the daemon.
 Tool names (exact): `argos_start_playbook` (`POST /runs`; playbook errors render as
 `playbook_invalid`), `argos_run_status` (`GET /runs/:id`; never prompts), `argos_decide_gate`,
 `argos_cancel_run`. Tools never throw; failures become `{error:{code,message}}`. A start call
-generates a `clientRequestId` unless supplied.
+generates a `clientRequestId` unless supplied. `argos_start_playbook` takes `execute(input,
+context)`: it defaults `cwd` to `context.agent.cwd` and confines an explicit `cwd` to that directory
+or a subdirectory (lexically: no `..` segment, absolute, exact match or `agentCwd + "/"` prefix); an
+empty agent cwd is refused. A local refusal is `invalid_request` with **no** HTTP call, and a server
+`invalid_request` stays `invalid_request` (not `playbook_invalid`). The confinement is lexical, not
+a sandbox (symlinks pass); see `docs/architecture.md#security`.
 
 `createArgosContribution({createClient?})` is the test seam. One call creates one runtime, registers
 exactly one `agent.open.before` hook that appends the tools, and registers the panel RPCs
 (`argos.runs.list`, `argos.runs.get`, `argos.runs.start`, `argos.runs.cancel`,
-`argos.gates.decide`). Teardown removes the hook and closes the client (aborting streams). No
+`argos.runs.remove`, `argos.runs.retry`, `argos.gates.decide`). Finished runs get a two-click
+**Remove** button (no `window.confirm`: the panel may render in React Native). Teardown removes the hook and closes the client (aborting streams). No
 settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token`
 lazily on first use (a plugin reload before `argos serve` still loads). RPC results are envelopes,
 so stable codes such as `gate_already_decided` reach the panel unchanged. The panel publishes an
@@ -602,12 +705,14 @@ The durable suite covers home/db modes and pid single-writer, mirror-vs-checkpoi
 checkpoint byte identity, diamond/reopen with one agent per step, crash inside `launch` adoption,
 timeout + retry, gate open/sleeping, one-writer decisions, pending gate survival, loop-limit
 approve/reject, gate feedback, after-tasks, scripts (exit 75, timeout, kill, env, resolution),
-worktrees, and `readonly_violation`. The Paseo suite covers create arguments, adoption with zero
-extra creates, `launch_uncertain`, handover, quota fallback/exhaustion, `invalid_output`, fenced
-JSON fallback, and `model_unavailable`. The RPC suite covers auth, idempotency, SSE, retry, gates,
-and response projection. The plugin suite covers manifest, hook/teardown, decide-once/SSE
-reconnect, tool names/errors, reload survival, and the import graph. The CLI suite covers validate
-exit codes, golden JSON shapes, the no-storage import graph, and a real-serve sentinel.
+script pinning (pins at start, `script_changed` on edit/delete/resume, `script_repinned` on retry,
+after-task copy, pre-pinning records), worktrees, and `readonly_violation`. The Paseo suite covers
+create arguments, adoption with zero extra creates, `launch_uncertain`, handover, quota
+fallback/exhaustion, `invalid_output`, fenced JSON fallback, and `model_unavailable`. The RPC suite
+covers auth, idempotency, SSE, retry, gates, and response projection. The plugin suite covers
+manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload survival, and the
+import graph. The CLI suite covers validate exit codes, golden JSON shapes, the no-storage import
+graph, and a real-serve sentinel.
 
 **E2E (`packages/core/test/e2e/kill-restart.test.ts`, `npm run test:e2e`).** Spawns the built CLI
 with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:
@@ -662,8 +767,19 @@ suite green.
 - **Read-only detects, it does not prevent** (created-and-deleted files, same-entry untracked
   directories, ignored paths; see `docs/compat.md`). A script can delete untracked files later
   steps needed; the engine does not sandbox scripts.
+- **Script pinning detects, it does not prevent (R4).** The hash is compared immediately before
+  the spawn, so a writer that changes the file between the check and the `exec` is not stopped
+  (and a script can still change its own file while it runs). A run also cannot use a script an
+  earlier step creates: pins are resolved at `startRun`, so such a script is `playbook_invalid`
+  at start (commit it instead).
+- **Script environment is deny-by-default (R1).** A script no longer inherits `NODE_OPTIONS`,
+  `SSH_AUTH_SOCK`, `GIT_*`, `CARGO_HOME`, or any other name its playbook does not grant, and
+  Argos' own configuration (`ARGOS_HOME`, `ARGOS_PORT`, `ARGOS_PASEO_PASSWORD`, …) is never passed
+  even when the step names it. `env: ["*"]` restores the old inherit-everything-that-is-not-secret
+  behavior (`argos validate` then warns `env_inherit_all`); see `docs/compat.md` rows 21 and 30.
 - **Worktrees are never cleaned up automatically**; a failed/violating step leaves its worktree
-  for inspection (`removeRunWorktree` is manual).
+  for inspection, and cleanup is the manual `argos worktree rm` / `argos worktree gc` pair (FR4).
+  gc only *reports* a directory under `<home>/worktrees` that no run index entry claims.
 - **No migration** from spec 02, paseo-playbooks run state, or pre-Phase-8 run indexes
   (pre-release; no migration path).
 - **Paseo SDK limitation.** `waitForFinish()` exposes text but no structured JSON value, so the

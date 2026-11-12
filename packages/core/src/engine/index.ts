@@ -26,6 +26,7 @@ export {
   type GateRecord,
   type RunRecord,
   type RunStatus,
+  type ScriptPinRecord,
   type StepRecord,
   type StepStatus,
   type WorktreeRecord,

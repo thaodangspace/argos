@@ -169,7 +169,11 @@ describe("plugin reload while a run is active", () => {
     // 1. Start a run through the chat tool (hook → tool → HTTP → host).
     const started = await tool(first, "argos_start_playbook").execute(
       { playbookId: "reload", cwd: harness.repo },
-      { agent: { id: "agent-1" }, paseo: {}, signal: new AbortController().signal } as never,
+      {
+        agent: { id: "agent-1", cwd: harness.repo },
+        paseo: {},
+        signal: new AbortController().signal,
+      } as never,
     );
     const runId = (started.structuredContent as { runId: string }).runId;
     expect(started.isError).toBeUndefined();

@@ -1,0 +1,9 @@
+title: Input definition typo
+inputs:
+  request:
+    typ: string
+    required: true
+steps:
+  - id: body
+    prompt: "Do {{ inputs.request }}"
+    inputs: [request]

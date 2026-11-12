@@ -1,0 +1,8 @@
+title: Conflict
+steps:
+  - id: block
+    use: child
+  - id: review
+    prompt: Review the change again
+    needs: [block]
+    role: reviewer

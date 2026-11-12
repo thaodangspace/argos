@@ -23,9 +23,10 @@ async function run(
   tools: AgentToolDefinition[],
   name: string,
   input: unknown,
+  agentCwd = "/repo",
 ): Promise<{ text?: string; structuredContent?: unknown; isError?: boolean }> {
   return byName(tools, name).execute(input, {
-    agent: { id: "agent-1" },
+    agent: { id: "agent-1", cwd: agentCwd },
     paseo: {},
     signal: new AbortController().signal,
   } as never);
@@ -108,6 +109,54 @@ describe("argos_start_playbook", () => {
     expect(client.startRun.mock.calls[0]?.[0]?.clientRequestId).toBe("request-1");
   });
 
+  it("defaults cwd to the calling agent's working directory (FR6.2)", async () => {
+    const client = fakeRpc();
+    const result = await run(argosTools(client), "argos_start_playbook", { playbookId: "demo" });
+
+    expect(result.isError).toBeUndefined();
+    expect(client.startRun).toHaveBeenCalledTimes(1);
+    expect(client.startRun.mock.calls[0]?.[0]?.cwd).toBe("/repo");
+  });
+
+  it("allows a subdirectory of the calling agent's working directory", async () => {
+    const client = fakeRpc();
+    const result = await run(argosTools(client), "argos_start_playbook", {
+      playbookId: "demo",
+      cwd: "/repo/packages/core",
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(client.startRun.mock.calls[0]?.[0]?.cwd).toBe("/repo/packages/core");
+  });
+
+  it("refuses a cwd outside the agent cwd without calling the server", async () => {
+    for (const cwd of ["/other", "/repo2", "/repo/../x"]) {
+      const client = fakeRpc();
+      const result = await run(argosTools(client), "argos_start_playbook", {
+        playbookId: "demo",
+        cwd,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: { code: "invalid_request" } });
+      expect(client.startRun).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses when the calling agent has no working directory", async () => {
+    const client = fakeRpc();
+    const result = await run(
+      argosTools(client),
+      "argos_start_playbook",
+      { playbookId: "demo" },
+      "",
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ error: { code: "invalid_request" } });
+    expect(client.startRun).not.toHaveBeenCalled();
+  });
+
   it("returns playbook_invalid (isError) for a server 422, never a raw throw", async () => {
     const client = fakeRpc();
     client.startRun.mockRejectedValueOnce(
@@ -129,8 +178,8 @@ describe("argos_start_playbook", () => {
     });
   });
 
-  it("collapses invalid_request / playbook_cycle / playbook_missing into playbook_invalid", async () => {
-    for (const code of ["invalid_request", "playbook_cycle", "playbook_missing"]) {
+  it("collapses playbook_cycle / playbook_missing into playbook_invalid", async () => {
+    for (const code of ["playbook_cycle", "playbook_missing"]) {
       const client = fakeRpc();
       client.startRun.mockRejectedValueOnce(new PluginRpcError(code, `${code} detail`, 422));
       const result = await run(argosTools(client), "argos_start_playbook", { playbookId: "demo" });
@@ -139,6 +188,20 @@ describe("argos_start_playbook", () => {
         "playbook_invalid",
       );
     }
+  });
+
+  it("keeps a server invalid_request as invalid_request (D4)", async () => {
+    const client = fakeRpc();
+    client.startRun.mockRejectedValueOnce(
+      new PluginRpcError("invalid_request", 'cwd "/repo" does not exist', 400),
+    );
+
+    const result = await run(argosTools(client), "argos_start_playbook", { playbookId: "demo" });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: { code: "invalid_request", message: 'cwd "/repo" does not exist' },
+    });
   });
 
   it("reports a stopped server as argos_server_unreachable", async () => {

@@ -35,6 +35,14 @@ function calls(overrides: Partial<ArgosRpcCalls> = {}): ArgosRpcCalls {
       ok: true,
       data: { runId, status: "cancelled" },
     })),
+    removeRun: vi.fn<ArgosRpcCalls["removeRun"]>(async ({ runId }) => ({
+      ok: true,
+      data: { runId, status: "failed" },
+    })),
+    retryStep: vi.fn<ArgosRpcCalls["retryStep"]>(async ({ runId }) => ({
+      ok: true,
+      data: { runId, taskId: "10" },
+    })),
     decideGate: vi.fn<ArgosRpcCalls["decideGate"]>(async (input) => ({
       ok: true,
       data: {
@@ -70,6 +78,15 @@ describe("RPC panel bridge", () => {
 
     await bridge.cancelRun("run-1");
     expect(rpc.cancelRun).toHaveBeenCalledWith({ runId: "run-1" });
+
+    await expect(bridge.removeRun("run-1")).resolves.toEqual({ runId: "run-1", status: "failed" });
+    expect(rpc.removeRun).toHaveBeenCalledWith({ runId: "run-1" });
+
+    await expect(bridge.retryStep("run-1", "build")).resolves.toEqual({
+      runId: "run-1",
+      taskId: "10",
+    });
+    expect(rpc.retryStep).toHaveBeenCalledWith({ runId: "run-1", stepId: "build" });
 
     bridge.close();
     await expect(bridge.listRuns()).rejects.toMatchObject({ code: "argos_server_closed" });

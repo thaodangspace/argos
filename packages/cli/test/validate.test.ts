@@ -3,7 +3,7 @@
  * every invalid fixture exits 2 and prints the file and step the loader blamed.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,22 @@ const compatDir = join(root, "core", "test", "fixtures", "compat", ".paseo", "pl
 const invalidDir = join(root, "core", "test", "fixtures", "invalid");
 const invalidPlaybookDir = join(invalidDir, ".argos", "playbooks");
 const precedenceDir = join(root, "core", "test", "fixtures", "precedence");
+const goldenDir = fileURLToPath(new URL("./golden/", import.meta.url));
+
+/**
+ * Commit a stable `--json` report as a golden file, exactly like `json-shapes.test.ts`:
+ * `UPDATE_GOLDEN=1 npx vitest run --project cli`.
+ */
+function expectGolden(name: string, value: unknown): void {
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const file = join(goldenDir, name);
+  if (process.env["UPDATE_GOLDEN"] === "1") {
+    mkdirSync(goldenDir, { recursive: true });
+    writeFileSync(file, text, "utf8");
+  }
+  if (!existsSync(file)) throw new Error(`missing golden ${file}; run with UPDATE_GOLDEN=1`);
+  expect(text).toBe(readFileSync(file, "utf8"));
+}
 
 const SIMPLE = (title: string): string => `title: ${title}\nsteps:\n  - id: a\n    prompt: Do A\n`;
 
@@ -219,5 +235,91 @@ describe("argos validate", () => {
     const report = JSON.parse(captured.stdout()) as ValidateReport;
     expect(report.valid).toBe(true);
     expect(report.playbooks.map((playbook) => playbook.id)).toStrictEqual(["global-parent"]);
+  });
+
+  /** A scratch repository with the given files, removed after the test. */
+  function repo(files: Readonly<Record<string, string>>): string {
+    const dir = tempDir();
+    for (const [relativePath, body] of Object.entries(files)) writeFile(dir, relativePath, body);
+    return dir;
+  }
+
+  const LEGACY = "title: Legacy\nsteps:\n  - id: work\n    prompt: Work\n    continue_on_error: true\n";
+  const TYPOS = [
+    "title: Typos",
+    "steps:",
+    "  - id: work",
+    "    prompt: Work",
+    "    typo_one: 1",
+    "    typo_two: 1",
+    "    typo_three: 1",
+    "",
+  ].join("\n");
+
+  it("reports warnings in --json and exits 0 when there are only warnings", async () => {
+    const dir = repo({ ".paseo/plugins/playbooks/legacy.yaml": LEGACY });
+    const captured = capture();
+    const code = await runCli(["validate", dir, "--json"], captured.io);
+
+    expect(code, captured.stdout() + captured.stderr()).toBe(0);
+    const report = JSON.parse(captured.stdout()) as ValidateReport;
+    expect(report.valid).toBe(true);
+    expect(report.errors).toStrictEqual([]);
+    expect(report.warnings).toStrictEqual([
+      {
+        file: ".paseo/plugins/playbooks/legacy.yaml",
+        stepId: "work",
+        code: "unknown_key",
+        message: 'unrecognized key "continue_on_error"',
+      },
+    ]);
+  });
+
+  it("prints warnings after errors in human output", async () => {
+    const dir = repo({
+      ".argos/playbooks/broken.yaml": "title: Broken\nsteps:\n  - id: work\n    prompt: Work\n    need: [prep]\n",
+      ".paseo/plugins/playbooks/legacy.yaml": LEGACY,
+    });
+    const captured = capture();
+    const code = await runCli(["validate", dir], captured.io);
+    const output = captured.stdout();
+
+    expect(code, output + captured.stderr()).toBe(2);
+    expect(output).toContain("FAIL");
+    expect(output).toContain("WARN");
+    expect(output.indexOf("FAIL")).toBeLessThan(output.indexOf("WARN"));
+    expect(output).toContain(".paseo/plugins/playbooks/legacy.yaml: step work: unknown_key");
+  });
+
+  it("writes one errors[] entry per schema issue", async () => {
+    const dir = repo({ ".argos/playbooks/typos.yaml": TYPOS });
+    const captured = capture();
+    const code = await runCli(["validate", dir, "--json"], captured.io);
+
+    expect(code).toBe(2);
+    const report = JSON.parse(captured.stdout()) as ValidateReport;
+    expect(report.errors).toHaveLength(3);
+    for (const error of report.errors) {
+      expect(error.file).toBe(".argos/playbooks/typos.yaml");
+      expect(error.stepId).toBe("work");
+      expect(error.code).toBe("playbook_invalid");
+    }
+    expect(report.errors.map((error) => error.message).join("\n")).toContain("typo_two");
+  });
+
+  it("matches the committed --json golden", async () => {
+    const dir = repo({
+      ".argos/playbooks/broken.yaml":
+        "title: Broken\nsteps:\n  - id: work\n    prompt: Work\n    need: [prep]\n",
+      ".argos/playbooks/good.yaml": SIMPLE("Good"),
+      ".argos/playbooks/legacy.yaml":
+        "title: Legacy\nsteps:\n  - id: work\n    prompt: Work\n    poll_ms: 25\n",
+      ".paseo/plugins/playbooks/unknown.yaml": LEGACY,
+    });
+    const captured = capture();
+    const code = await runCli(["validate", dir, "--json"], captured.io);
+
+    expect(code).toBe(2);
+    expectGolden("validate.json", JSON.parse(captured.stdout()));
   });
 });

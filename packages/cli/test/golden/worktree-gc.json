@@ -1,0 +1,18 @@
+{
+  "removed": [
+    {
+      "runId": "run-1",
+      "path": "/home/worktrees/run-1",
+      "branchDeleted": false
+    }
+  ],
+  "skipped": [
+    {
+      "runId": "run-2",
+      "reason": "active"
+    }
+  ],
+  "orphans": [
+    "/home/worktrees/orphan-1"
+  ]
+}

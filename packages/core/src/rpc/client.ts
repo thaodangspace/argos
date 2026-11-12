@@ -15,9 +15,14 @@ import { readFileSync } from "node:fs";
 import {
   DEFAULT_ARGOS_PORT,
   type CancelRunResponse,
+  type RemoveRunResponse,
   type DecideGateRequest,
+  type GcWorktreesRequest,
+  type GcWorktreesResponse,
   type GateDecisionResponse,
   type GateListResponse,
+  type RemoveWorktreeRequest,
+  type RemoveWorktreeResponse,
   type RunDetail,
   type RunListResponse,
   type ServerInfo,
@@ -145,6 +150,28 @@ export class RpcClient {
   /** `GET /runs/:id`. */
   async getRun(runId: string): Promise<RunDetail> {
     return this.request<RunDetail>("GET", `/runs/${encodeURIComponent(runId)}`);
+  }
+
+  /** `DELETE /runs/:id` (`argos rm`). */
+  async removeRun(runId: string): Promise<RemoveRunResponse> {
+    return this.request<RemoveRunResponse>("DELETE", `/runs/${encodeURIComponent(runId)}`);
+  }
+
+  /** `POST /runs/:id/worktree/remove` (`argos worktree rm`, FR4.1). */
+  async removeWorktree(
+    runId: string,
+    body: RemoveWorktreeRequest = {},
+  ): Promise<RemoveWorktreeResponse> {
+    return this.request<RemoveWorktreeResponse>(
+      "POST",
+      `/runs/${encodeURIComponent(runId)}/worktree/remove`,
+      body,
+    );
+  }
+
+  /** `POST /worktrees/gc` (`argos worktree gc`, FR4.5). */
+  async gcWorktrees(body: GcWorktreesRequest): Promise<GcWorktreesResponse> {
+    return this.request<GcWorktreesResponse>("POST", "/worktrees/gc", body);
   }
 
   /** `POST /runs/:id/cancel`. */

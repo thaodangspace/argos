@@ -1,0 +1,6 @@
+title: Legacy mixed
+steps:
+  - id: work
+    prompt: Work
+    continue_on_error: true
+    retries: soon

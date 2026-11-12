@@ -21,6 +21,9 @@ import {
   type GateSummary,
   type RunStatus,
   type RunSummary,
+  type Scalar,
+  type StartRunRequest,
+  type StartRunResponse,
   type StepKind,
   type StepStatus,
 } from "argos-core/rpc/contracts";
@@ -116,8 +119,10 @@ export interface PanelModel {
   readonly gates: readonly GateSummary[];
   /** Gate keys (`<runId>.<gateId>`) with a decision in flight. */
   readonly inFlight: readonly string[];
-  /** Run ids with a cancel in flight. */
+  /** Run ids with a cancel, retry, or remove in flight. */
   readonly busyRuns: readonly string[];
+  /** A start-run request is in flight: the start form disables. */
+  readonly starting: boolean;
   readonly loading: boolean;
   readonly connected: boolean;
   readonly error: PanelError | null;
@@ -129,6 +134,7 @@ export const EMPTY_PANEL: PanelModel = {
   gates: [],
   inFlight: [],
   busyRuns: [],
+  starting: false,
   loading: false,
   connected: false,
   error: null,
@@ -414,6 +420,75 @@ export function subscribeRuns(options: SubscribeRunsOptions): RunSubscription {
   };
 }
 
+// ------------------------------------------------------------------ start form
+
+export interface StartFormInput {
+  readonly playbookId: string;
+  /** Empty means "the server's default cwd". */
+  readonly cwd: string;
+  /** `key=value` per line, or one JSON object (`{"ticket": 42}`) for typed values. */
+  readonly inputs: string;
+}
+
+export type StartFormResult =
+  | { readonly ok: true; readonly request: StartRunRequest }
+  | { readonly ok: false; readonly error: PanelError };
+
+function invalidForm(message: string): StartFormResult {
+  return { ok: false, error: { code: "invalid_request", message } };
+}
+
+/**
+ * Turn the panel's start form into a `POST /runs` body. `key=value` lines stay strings (the
+ * loader validates against the playbook's declared inputs); a JSON object keeps numbers/booleans.
+ */
+export function parseStartForm(form: StartFormInput): StartFormResult {
+  const playbookId = form.playbookId.trim();
+  if (playbookId === "") return invalidForm("playbook id is required");
+  const cwd = form.cwd.trim();
+  const raw = form.inputs.trim();
+  const inputs: Record<string, Scalar> = {};
+  if (raw.startsWith("{")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return invalidForm("inputs are not valid JSON");
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return invalidForm("inputs JSON must be an object");
+    }
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+        return invalidForm(`input "${key}" must be a string, number or boolean`);
+      }
+      inputs[key] = value;
+    }
+  } else if (raw !== "") {
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.trim() === "") continue;
+      const eq = line.indexOf("=");
+      const key = eq === -1 ? "" : line.slice(0, eq).trim();
+      if (key === "") return invalidForm(`expected key=value, got "${line.trim()}"`);
+      inputs[key] = line.slice(eq + 1).trim();
+    }
+  }
+  return {
+    ok: true,
+    request: {
+      playbookId,
+      ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
+      ...(cwd === "" ? {} : { cwd }),
+    },
+  };
+}
+
+export interface StartRunOutcome {
+  readonly model: PanelModel;
+  readonly started?: StartRunResponse;
+  readonly error?: PanelError;
+}
+
 // ------------------------------------------------------------------ store
 
 export interface PanelStoreOptions {
@@ -436,6 +511,12 @@ export interface PanelStore {
   decideGate(action: DecideGateAction): Promise<DecideGateOnceResult>;
   /** Cancel one run; the buttons disable while it is in flight. */
   cancelRun(runId: string): Promise<PanelModel>;
+  /** Retry one step of a finished run (that step and its downstream re-run). */
+  retryStep(runId: string, stepId: string): Promise<PanelModel>;
+  /** Delete a finished run; the refresh drops it from the list. Failures land in `model.error`. */
+  removeRun(runId: string): Promise<PanelModel>;
+  /** Start a run from the panel form; never throws, failures land in `model.error`. */
+  startRun(request: StartRunRequest): Promise<StartRunOutcome>;
   /** Stop consuming and release the HTTP client (plugin teardown). */
   dispose(): void;
 }
@@ -460,6 +541,24 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
     model = next;
     for (const listener of listeners) listener(model);
     return model;
+  };
+
+  /** Mark one run busy, call `action` once, then refresh; a failure lands in `model.error`. */
+  const runBusy = async (runId: string, action: () => Promise<void>): Promise<PanelModel> => {
+    if (model.busyRuns.includes(runId)) return model;
+    const pending = set({ ...model, busyRuns: [...model.busyRuns, runId], error: null });
+    try {
+      await action();
+    } catch (error) {
+      return set({
+        ...pending,
+        busyRuns: without(model.busyRuns, runId),
+        error: toPanelError(error),
+      });
+    }
+    if (disposed) return model;
+    const loaded = await store.load();
+    return set({ ...loaded, busyRuns: without(loaded.busyRuns, runId) });
   };
 
   const store: PanelStore = {
@@ -543,23 +642,42 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
         },
       }),
 
-    cancelRun: async (runId) => {
-      if (model.busyRuns.includes(runId)) return model;
-      const pending = set({ ...model, busyRuns: [...model.busyRuns, runId], error: null });
-      try {
+    cancelRun: async (runId) =>
+      runBusy(runId, async () => {
         await options.client.cancelRun?.(runId);
+      }),
+
+    retryStep: async (runId, stepId) =>
+      runBusy(runId, async () => {
+        if (options.client.retryStep === undefined) {
+          throw new PluginRpcError("internal_error", "retry is not available on this client", 0);
+        }
+        await options.client.retryStep(runId, stepId);
+      }),
+
+    removeRun: async (runId) =>
+      runBusy(runId, async () => {
+        if (options.client.removeRun === undefined) {
+          throw new PluginRpcError("internal_error", "remove is not available on this client", 0);
+        }
+        await options.client.removeRun(runId);
+      }),
+
+    startRun: async (request) => {
+      if (model.starting) return { model };
+      set({ ...model, starting: true, error: null });
+      try {
+        if (options.client.startRun === undefined) {
+          throw new PluginRpcError("internal_error", "start is not available on this client", 0);
+        }
+        const started = await options.client.startRun(request);
+        if (disposed) return { model, started };
+        const loaded = await store.load();
+        return { model: set({ ...loaded, starting: false }), started };
       } catch (error) {
-        return set({
-          ...pending,
-          busyRuns: without(pending.busyRuns, runId),
-          error: toPanelError(error),
-        });
+        const failure = toPanelError(error);
+        return { model: set({ ...model, starting: false, error: failure }), error: failure };
       }
-      if (disposed) return model;
-      return store.load().then((loaded) => ({
-        ...loaded,
-        busyRuns: without(loaded.busyRuns, runId),
-      }));
     },
 
     dispose: () => {
@@ -588,6 +706,8 @@ export interface StepView {
   readonly tone: StatusTone;
   readonly attemptCount: number;
   readonly errorCode?: string;
+  /** The run is finished and this step failed (or was interrupted by a cancel): offer Retry. */
+  readonly retryable: boolean;
 }
 
 /** One choice button of a pending gate. */
@@ -625,7 +745,10 @@ export interface RunView {
   readonly steps: readonly StepView[];
   readonly gates: readonly GateView[];
   readonly active: boolean;
+  /** A cancel, retry, or remove for this run is in flight: disable its buttons. */
   readonly cancelling: boolean;
+  /** The run is finished, so it can be removed from Argos. */
+  readonly removable: boolean;
 }
 
 export interface PanelView {
@@ -654,7 +777,7 @@ function choiceTone(choice: GateSummary["choices"][string]): StatusTone {
   return choice.color === undefined ? "accent" : (CHOICE_TONES[choice.color] ?? "accent");
 }
 
-function stepView(step: RunSummary["steps"][number]): StepView {
+function stepView(step: RunSummary["steps"][number], runActive: boolean): StepView {
   return {
     id: step.id,
     title: step.title === "" ? step.id : step.title,
@@ -664,6 +787,7 @@ function stepView(step: RunSummary["steps"][number]): StepView {
     statusLabel: STEP_STATUS_LABELS[step.status],
     tone: stepStatusTone(step.status),
     attemptCount: step.attemptCount,
+    retryable: !runActive && step.status === "failed",
     ...(step.errorCode === undefined ? {} : { errorCode: step.errorCode }),
   };
 }
@@ -728,10 +852,11 @@ export function runView(
     updatedAt: run.updatedAt,
     updatedLabel: new Date(run.updatedAt).toISOString(),
     detail: runDetail(run, gates),
-    steps: run.steps.map(stepView),
+    steps: run.steps.map((step) => stepView(step, isActiveRun(run.status))),
     gates,
     active: isActiveRun(run.status),
     cancelling: busyRuns.includes(run.id),
+    removable: !isActiveRun(run.status),
   };
 }
 

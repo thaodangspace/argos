@@ -1,0 +1,9 @@
+title: Global Shared
+steps:
+  - id: review
+    prompt: Review the change
+    role: reviewer
+  - id: polish
+    prompt: Polish the result
+    needs: [review]
+    role: home-only

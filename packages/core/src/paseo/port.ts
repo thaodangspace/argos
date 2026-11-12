@@ -220,7 +220,15 @@ const QUOTA_MESSAGE_PATTERNS: readonly RegExp[] = [
   /\bbilling (hard )?limit\b/i,
   /\bexceeded your current quota\b/i,
   /\bresource[ _-]exhausted\b/i,
+  // Subscription CLIs (Claude Code, Codex) report the plan limit as plain text, e.g.
+  // "You've hit your 5-hour limit · resets 1:50am (Asia/Saigon)" or "You've hit your weekly limit".
+  /\bhit your\b[^.\n]{0,40}\blimit\b/i,
+  /\b\d+[- ]hour limit\b/i,
+  /\bweekly limit\b/i,
 ];
+
+/** A final agent message longer than this is a real answer, never a bare usage-limit notice. */
+const QUOTA_NOTICE_MAX_LENGTH = 1_000;
 
 const CONNECTION_CODES = new Set([
   "DAEMON_CONNECTION_LOST",
@@ -279,6 +287,19 @@ export function isQuotaError(error: unknown): boolean {
   if (status === 429) return true;
   if (code !== undefined && QUOTA_CODES.has(code)) return true;
   return QUOTA_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/**
+ * True when an agent's final message is a provider usage-limit notice instead of an answer. Some
+ * providers finish the turn "successfully" with only that text, so it never surfaces as an error.
+ * Callers only ask after the message failed the step's output schema, and long text never counts,
+ * so a real answer that merely mentions a rate limit is not mistaken for one.
+ */
+export function isQuotaNotice(text: string | null | undefined): boolean {
+  if (text === null || text === undefined) return false;
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > QUOTA_NOTICE_MAX_LENGTH) return false;
+  return QUOTA_MESSAGE_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
 /** True when the daemon rejected a label filter as unsupported. */

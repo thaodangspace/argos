@@ -20,6 +20,7 @@ import { z } from "zod";
 
 import { ARGOS_ERROR_CODES } from "../errors.js";
 import { RUN_STATUSES, STEP_STATUSES } from "../engine/record.js";
+import { HISTORY_EVENT_TYPES } from "../history.js";
 
 /** Version of the RPC contract; bumped only for a breaking change. */
 export const ARGOS_RPC_VERSION = 1;
@@ -112,6 +113,8 @@ export const RPC_ERROR_STATUS: Readonly<Record<string, number>> = {
   gate_already_decided: 409,
   run_terminal: 409,
   loop_limit: 409,
+  // FR4: a worktree operation named a run that has not finished yet.
+  run_active: 409,
   // runtime failures
   paseo_unreachable: 503,
   provider_exhausted: 503,
@@ -119,6 +122,8 @@ export const RPC_ERROR_STATUS: Readonly<Record<string, number>> = {
   launch_uncertain: 409,
   invalid_output: 422,
   readonly_violation: 409,
+  // FR3: a pinned script changed after the run started.
+  script_changed: 409,
   step_failed: 502,
   step_timeout: 504,
   script_timeout: 504,
@@ -180,6 +185,63 @@ export const CancelRunResponseSchema = z.strictObject({
   status: RunStatusSchema,
 });
 export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
+
+/** `DELETE /runs/:id` (`argos rm`). `worktree` is the checkout left on disk, when the run had one. */
+export const RemoveRunResponseSchema = z.strictObject({
+  runId: z.string().min(1),
+  status: RunStatusSchema,
+  worktree: z.string().min(1).optional(),
+});
+export type RemoveRunResponse = z.infer<typeof RemoveRunResponseSchema>;
+
+/** `POST /runs/:id/worktree/remove` (`argos worktree rm`, FR4.1). Strict: a typo is a 400. */
+export const RemoveWorktreeRequestSchema = z.strictObject({
+  /** Remove a dirty checkout (FR4.2); default `false` refuses with `worktree_failed`. */
+  force: z.boolean().optional(),
+  /** Delete `argos/<runId>` too (FR4.3); default `false` keeps the branch. */
+  deleteBranch: z.boolean().optional(),
+});
+export type RemoveWorktreeRequest = z.infer<typeof RemoveWorktreeRequestSchema>;
+
+export const RemoveWorktreeResponseSchema = z.strictObject({
+  runId: z.string().min(1),
+  /** The record's worktree path; `""` when the run never had one (`removed: false`). */
+  path: z.string(),
+  removed: z.boolean(),
+  branchDeleted: z.boolean(),
+});
+export type RemoveWorktreeResponse = z.infer<typeof RemoveWorktreeResponseSchema>;
+
+/** `POST /worktrees/gc` (FR4.5). `olderThan` is `<n>(s|m|h|d)`; the server turns it into ms. */
+export const GcWorktreesRequestSchema = z.strictObject({
+  olderThan: z.string().regex(/^[0-9]+[smhd]$/, "olderThan must be <n>(s|m|h|d), e.g. 24h"),
+  dryRun: z.boolean().optional(),
+  force: z.boolean().optional(),
+  deleteBranch: z.boolean().optional(),
+});
+export type GcWorktreesRequest = z.infer<typeof GcWorktreesRequestSchema>;
+
+export const GcRemovedWorktreeSchema = z.strictObject({
+  runId: z.string().min(1),
+  path: z.string().min(1),
+  branchDeleted: z.boolean(),
+});
+export type GcRemovedWorktree = z.infer<typeof GcRemovedWorktreeSchema>;
+
+/** A run gc looked at and left alone: `active`, `path_mismatch`, or a stable error code. */
+export const GcSkippedWorktreeSchema = z.strictObject({
+  runId: z.string().min(1),
+  reason: z.string().min(1),
+});
+export type GcSkippedWorktree = z.infer<typeof GcSkippedWorktreeSchema>;
+
+export const GcWorktreesResponseSchema = z.strictObject({
+  removed: z.array(GcRemovedWorktreeSchema),
+  skipped: z.array(GcSkippedWorktreeSchema),
+  /** Directories under `<home>/worktrees` that no run index entry claims; reported, never deleted. */
+  orphans: z.array(z.string().min(1)),
+});
+export type GcWorktreesResponse = z.infer<typeof GcWorktreesResponseSchema>;
 
 // ------------------------------------------------------------------ read model
 
@@ -257,7 +319,8 @@ export type RunSummary = z.infer<typeof RunSummarySchema>;
 export const HistoryEventSchema = z.strictObject({
   at: z.number(),
   seq: z.number().int().min(0),
-  type: z.string().min(1),
+  /** One of {@link HISTORY_EVENT_TYPES} — `script_repinned` included (FR3.4). */
+  type: z.enum(HISTORY_EVENT_TYPES),
   stepId: z.string().nullable(),
   attempt: z.number().int().nullable(),
   detail: z.string().nullable(),
@@ -388,10 +451,36 @@ export const ValidateErrorSchema = z.strictObject({
 });
 export type ValidateError = z.infer<typeof ValidateErrorSchema>;
 
+/**
+ * FR7.2 warning codes, all of them already in the contract so later phases only start emitting.
+ * `warnings.test.ts` asserts this list matches the loader's `WARNING_CODES`.
+ */
+export const ValidateWarningCodeSchema = z.enum([
+  "alias_conflict",
+  "alias_deprecated",
+  "unknown_key",
+  "env_inherit_all",
+  "env_denied",
+  "role_shadowed",
+  "playbook_shadowed",
+]);
+export type ValidateWarningCode = z.infer<typeof ValidateWarningCodeSchema>;
+
+/** One non-fatal finding (FR7.1). Never carries a YAML value, only keys, ids, and paths. */
+export const ValidateWarningSchema = z.strictObject({
+  file: z.string(),
+  stepId: z.string().nullable(),
+  code: ValidateWarningCodeSchema,
+  message: z.string(),
+});
+export type ValidateWarning = z.infer<typeof ValidateWarningSchema>;
+
 export const ValidateReportSchema = z.strictObject({
   valid: z.boolean(),
   playbooks: z.array(ValidatePlaybookSchema),
   errors: z.array(ValidateErrorSchema),
+  /** Warnings never change `valid` or the exit code (FR7.1). */
+  warnings: z.array(ValidateWarningSchema),
 });
 export type ValidateReport = z.infer<typeof ValidateReportSchema>;
 

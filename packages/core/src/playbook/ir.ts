@@ -206,6 +206,19 @@ export interface AfterIR {
   readonly steps: readonly StepIR[];
 }
 
+/**
+ * `providers` quota policy (FR24): from the playbook's `defaults.providers`, else
+ * `defaults/main.yaml` `providers` (whole object, no per-field merge). Absent = executor defaults
+ * and `on_exhausted: fail`.
+ */
+export interface ProvidersIR {
+  readonly onExhausted: "fail" | "wait";
+  /** `exhausted_for`: how long a quota-exhausted target is skipped. */
+  readonly exhaustedForMs?: number;
+  /** `max_wait`: total time one step may spend parked on `provider_exhausted`. */
+  readonly maxWaitMs?: number;
+}
+
 export interface DefaultsIR {
   readonly agent?: AgentSettingsIR;
   readonly isolation?: IsolationIR;
@@ -233,6 +246,7 @@ export interface PlaybookIR {
   readonly labels: Readonly<Record<string, string>>;
   readonly roles: Readonly<Record<string, RoleIR>>;
   readonly defaults?: DefaultsIR;
+  readonly providers?: ProvidersIR;
 }
 
 /** A resolved but not yet hashed/frozen playbook; internal to the load pipeline. */

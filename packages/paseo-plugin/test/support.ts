@@ -79,6 +79,8 @@ export interface FakeRpcOptions {
   readonly startRun?: ArgosRpc["startRun"];
   readonly decideGate?: ArgosRpc["decideGate"];
   readonly cancelRun?: ArgosRpc["cancelRun"];
+  readonly removeRun?: ArgosRpc["removeRun"];
+  readonly retryStep?: ArgosRpc["retryStep"];
   readonly openEvents?: OpenEvents;
   readonly close?: () => void;
 }
@@ -89,6 +91,8 @@ export interface FakeRpc extends ArgosRpc {
   readonly decideGate: ReturnType<typeof vi.fn<ArgosRpc["decideGate"]>>;
   readonly startRun: ReturnType<typeof vi.fn<ArgosRpc["startRun"]>>;
   readonly cancelRun: ReturnType<typeof vi.fn<ArgosRpc["cancelRun"]>>;
+  readonly removeRun: ReturnType<typeof vi.fn<ArgosRpc["removeRun"]>>;
+  readonly retryStep: ReturnType<typeof vi.fn<ArgosRpc["retryStep"]>>;
   readonly close: ReturnType<typeof vi.fn<() => void>>;
 }
 
@@ -125,6 +129,12 @@ export function fakeRpc(options: FakeRpcOptions = {}): FakeRpc {
   const cancelRun = vi.fn<ArgosRpc["cancelRun"]>(
     options.cancelRun ?? (async (runId: string) => ({ runId, status: "cancelled" as const })),
   );
+  const removeRun = vi.fn<ArgosRpc["removeRun"]>(
+    options.removeRun ?? (async (runId: string) => ({ runId, status: "completed" as const })),
+  );
+  const retryStep = vi.fn<ArgosRpc["retryStep"]>(
+    options.retryStep ?? (async (runId: string) => ({ runId, taskId: "43" })),
+  );
   const close = vi.fn<() => void>(options.close ?? (() => undefined));
   const openEvents = options.openEvents ?? NOOP_STREAM;
 
@@ -140,6 +150,8 @@ export function fakeRpc(options: FakeRpcOptions = {}): FakeRpc {
     decideGate,
     startRun,
     cancelRun,
+    removeRun,
+    retryStep,
     openEvents,
     close,
   } as unknown as FakeRpc;

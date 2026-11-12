@@ -1,0 +1,42 @@
+{
+  "valid": false,
+  "playbooks": [
+    {
+      "id": "good",
+      "file": ".argos/playbooks/good.yaml",
+      "hash": "3af8c3abd5b77e7e7fb55e3ba70dc60c6013416f62eee93b42a0a818fc7bd4b5"
+    },
+    {
+      "id": "legacy",
+      "file": ".argos/playbooks/legacy.yaml",
+      "hash": "25916217dee098e9d36942a318acae6f3d11ed968d3a133493b34419458dd2f8"
+    },
+    {
+      "id": "unknown",
+      "file": ".paseo/plugins/playbooks/unknown.yaml",
+      "hash": "ac104ec067079fb55627130a95351f48ca1975fbe945dc6c86621e6a24993710"
+    }
+  ],
+  "errors": [
+    {
+      "file": ".argos/playbooks/broken.yaml",
+      "stepId": "work",
+      "code": "playbook_invalid",
+      "message": "steps.0.need: unrecognized key \"need\""
+    }
+  ],
+  "warnings": [
+    {
+      "file": ".argos/playbooks/legacy.yaml",
+      "stepId": "work",
+      "code": "alias_deprecated",
+      "message": "poll: the \"poll_ms\" spelling is deprecated in .argos and home playbooks; use \"pollMs\""
+    },
+    {
+      "file": ".paseo/plugins/playbooks/unknown.yaml",
+      "stepId": "work",
+      "code": "unknown_key",
+      "message": "unrecognized key \"continue_on_error\""
+    }
+  ]
+}

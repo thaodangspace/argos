@@ -77,6 +77,19 @@ export async function startStubServer(token = "stub-token"): Promise<StubServer>
         send(200, serverInfo(port));
         return;
       }
+      if (req.method === "POST" && segments[0] === "worktrees" && segments[1] === "gc") {
+        const request = body as { olderThan?: string } | undefined;
+        if (request?.olderThan === undefined) {
+          error(400, "invalid_request", "olderThan is required");
+          return;
+        }
+        send(200, {
+          removed: [{ runId: RUN_ID, path: "/home/worktrees/run-1", branchDeleted: false }],
+          skipped: [{ runId: "run-2", reason: "active" }],
+          orphans: ["/home/worktrees/orphan-1"],
+        });
+        return;
+      }
       if (segments[0] !== "runs") {
         error(404, "not_found", "unknown route");
         return;
@@ -102,12 +115,26 @@ export async function startStubServer(token = "stub-token"): Promise<StubServer>
         send(200, RUN_DETAIL);
         return;
       }
+      if (segments.length === 2 && req.method === "DELETE") {
+        send(200, { runId: RUN_ID, status: "completed", worktree: "/home/worktrees/run-1" });
+        return;
+      }
       if (segments.length === 3 && segments[2] === "cancel") {
         send(200, { runId: RUN_ID, status: "cancelled" });
         return;
       }
       if (segments.length === 3 && segments[2] === "retry") {
         send(201, { runId: RUN_ID, taskId: "12" });
+        return;
+      }
+      if (segments.length === 4 && segments[2] === "worktree" && segments[3] === "remove") {
+        const request = body as { force?: boolean; deleteBranch?: boolean } | undefined;
+        send(200, {
+          runId: RUN_ID,
+          path: "/home/worktrees/run-1",
+          removed: true,
+          branchDeleted: request?.deleteBranch === true,
+        });
         return;
       }
       if (segments.length === 4 && segments[2] === "gates") {

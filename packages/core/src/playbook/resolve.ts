@@ -1,4 +1,5 @@
 import { argosError } from "../errors.js";
+import { isDeniedEnvName, parseEnvGrant, SCRIPT_ENV_DENY } from "../engine/env.js";
 import type {
   AfterIR,
   AgentSettingsIR,
@@ -8,6 +9,7 @@ import type {
   BranchCaseIR,
   DeciderIR,
   DefaultsIR,
+  ProvidersIR,
   GateChoiceIR,
   GateIR,
   InputBindingIR,
@@ -28,6 +30,7 @@ import type {
   RawChoices,
   RawDecider,
   RawDefaults,
+  RawProviders,
   RawGateStep,
   RawInputDef,
   RawIsolation,
@@ -57,6 +60,39 @@ export const DEFAULT_GATE_CHOICES: Readonly<Record<string, GateChoiceIR>> = {
 /** Outcomes of a step that declares none (paseo compatibility). */
 export const IMPLICIT_AGENT_OUTCOMES = ["success", "failure"] as const;
 
+/**
+ * Validate warning codes (FR7.2). Kept in sync with `ValidateWarningCodeSchema` in
+ * `rpc/contracts.ts`; `warnings.test.ts` asserts the two lists match.
+ */
+export const WARNING_CODES = [
+  "alias_conflict",
+  "alias_deprecated",
+  "unknown_key",
+  "env_inherit_all",
+  "env_denied",
+  "role_shadowed",
+  "playbook_shadowed",
+] as const;
+
+export type WarningCode = (typeof WARNING_CODES)[number];
+
+/** Where a playbook file came from (FR1.3). `.paseo/` files are upstream, so they may warn. */
+export type PlaybookOrigin = "argos" | "paseo" | "home";
+
+/**
+ * One non-fatal loader finding (FR7.1). `file` is absolute, like `ArgosError.file`; the CLI
+ * projects it to a display path. Warnings never contain YAML values (FR7.3).
+ */
+export interface LoadWarning {
+  readonly file: string;
+  readonly stepId: string | null;
+  readonly code: WarningCode;
+  readonly message: string;
+}
+
+/** The optional sink the loader writes warnings into (FR7.4). */
+export type WarningSink = (warning: LoadWarning) => void;
+
 export interface LoadedRole {
   readonly id: string;
   readonly raw: RawRoleFile;
@@ -77,6 +113,10 @@ export interface ResolveContext {
   readonly defaults?: LoadedDefaults;
   /** Roles referenced by this playbook, collected while resolving. */
   readonly referencedRoles: Map<string, RoleIR>;
+  /** File family: an unknown key fails for `argos`/`home`, warns for `paseo` (FR1.3). */
+  readonly origin: PlaybookOrigin;
+  /** Optional warnings sink; absent means the loader stays silent (FR7.4). */
+  readonly warn?: WarningSink;
 }
 
 interface Location {
@@ -96,8 +136,102 @@ function plain<T>(value: Record<string, unknown>): T {
   return value as unknown as T;
 }
 
-// ------------------------------------------------------------------ durations
+// ------------------------------------------------------------------ warnings
 
+/** Emit one warning through the optional sink (FR7.4). Messages name keys and ids only. */
+function warn(
+  ctx: ResolveContext,
+  stepId: string | undefined,
+  code: WarningCode,
+  message: string,
+): void {
+  ctx.warn?.({ file: ctx.file, stepId: stepId ?? null, code, message });
+}
+
+interface Spelling {
+  readonly name: string;
+  readonly set: boolean;
+  /** Set when this spelling is deprecated in `.argos/` and home files (FR7.2). */
+  readonly deprecatedAs?: string;
+}
+
+/**
+ * FR7.2: say which spelling Argos keeps when two are set for one field, and flag the
+ * deprecated FR9 spellings for `.argos/` and home files (upstream `.paseo/` files keep them).
+ */
+function checkAliases(
+  ctx: ResolveContext,
+  stepId: string,
+  field: string,
+  spellings: readonly Spelling[],
+): void {
+  const present = spellings.filter((spelling) => spelling.set);
+  const kept = present[0];
+  if (kept !== undefined && present.length > 1) {
+    warn(
+      ctx,
+      stepId,
+      "alias_conflict",
+      `${field}: ${present.map((spelling) => `"${spelling.name}"`).join(" and ")} are all set; Argos keeps "${kept.name}"`,
+    );
+  }
+  if (ctx.origin === "paseo") return;
+  for (const spelling of present) {
+    if (spelling.deprecatedAs === undefined) continue;
+    warn(
+      ctx,
+      stepId,
+      "alias_deprecated",
+      `${field}: the "${spelling.name}" spelling is deprecated in .argos and home playbooks; use "${spelling.deprecatedAs}"`,
+    );
+  }
+}
+
+// ------------------------------------------------------------------ script env (FR2)
+
+/**
+ * FR2.2/FR2.3: validate one script step's `env:` grants and emit the two env warnings
+ * (FR2.4/FR2.5). A malformed entry fails the load with `playbook_invalid` naming the step; `"*"`
+ * and a deny-listed name only warn. The IR keeps the entries exactly as written, so a warning
+ * never changes the IR or its hash (FR7.4) — the filter in `engine/env.ts` is what enforces them.
+ */
+function checkEnvGrants(env: readonly string[], ctx: ResolveContext, location: Location): void {
+  for (const entry of env) {
+    const grant = parseEnvGrant(entry);
+    if (grant === undefined) {
+      invalid(
+        location,
+        `script env entry "${entry}" is not a variable name, a "PREFIX_*" grant, or "*"`,
+      );
+    }
+    if (grant.kind === "all") {
+      warn(
+        ctx,
+        location.stepId,
+        "env_inherit_all",
+        `script env: "*" passes every variable that does not look like a credential; name the variables the script needs instead`,
+      );
+      continue;
+    }
+    const covered =
+      grant.kind === "exact"
+        ? [grant.name]
+        : SCRIPT_ENV_DENY.filter((name) =>
+            name.toUpperCase().startsWith(grant.prefix.toUpperCase()),
+          );
+    for (const name of covered) {
+      if (!isDeniedEnvName(name)) continue;
+      warn(
+        ctx,
+        location.stepId,
+        "env_denied",
+        `script env: "${name}" is on the Argos deny list and is never passed to a script`,
+      );
+    }
+  }
+}
+
+// ------------------------------------------------------------------ durations
 const DURATION_UNITS: Readonly<Record<string, number>> = {
   ms: 1,
   s: 1000,
@@ -519,6 +653,34 @@ function resolveStep(
   const labels: Record<string, string> = { ...playbook.labels, ...(raw.labels ?? {}) };
   const roleBlock: RawRoleStep | undefined = typeof raw.role === "object" ? raw.role : undefined;
   const roleId = typeof raw.role === "string" ? raw.role : roleBlock?.name;
+  const scriptBlock: RawScriptStep | undefined =
+    typeof raw.script === "object" ? raw.script : undefined;
+
+  // FR7.2: name the spelling Argos keeps when both are set, and flag the deprecated spellings.
+  checkAliases(ctx, raw.id, "poll", [
+    { name: "pollMs", set: raw.pollMs !== undefined },
+    { name: "poll_ms", set: raw.poll_ms !== undefined, deprecatedAs: "pollMs" },
+    { name: "poll", set: raw.poll !== undefined },
+  ]);
+  for (const agent of [raw.agent, roleBlock?.agent]) {
+    if (agent === undefined) continue;
+    checkAliases(ctx, raw.id, "mode", [
+      { name: "mode_id", set: agent.mode_id !== undefined, deprecatedAs: "mode" },
+      { name: "mode", set: agent.mode !== undefined },
+    ]);
+  }
+  checkAliases(ctx, raw.id, "sub-playbook", [
+    { name: "use", set: raw.use !== undefined },
+    { name: "playbook", set: raw.playbook !== undefined },
+  ]);
+  checkAliases(ctx, raw.id, "gate choices", [
+    { name: "choices", set: raw.choices !== undefined },
+    { name: "gate.choices", set: gateStep(raw)?.choices !== undefined },
+  ]);
+  checkAliases(ctx, raw.id, "script env", [
+    { name: "script.env", set: scriptBlock?.env !== undefined },
+    { name: "env", set: raw.env !== undefined },
+  ]);
 
   let role: RoleIR | undefined;
   let roleFile: LoadedRole | undefined;
@@ -581,10 +743,11 @@ function resolveStep(
 
   let script: ScriptIR | undefined;
   if (kind === "script") {
-    const block: RawScriptStep | undefined = typeof raw.script === "object" ? raw.script : undefined;
-    const run = typeof raw.script === "string" ? raw.script : block?.run;
+    const run = typeof raw.script === "string" ? raw.script : scriptBlock?.run;
     if (run === undefined || run === "") invalid(location, "a script step needs `script: <name>` or `script: { run }`");
-    script = { run, env: [...(block?.env ?? raw.env ?? [])] };
+    const env = [...(scriptBlock?.env ?? raw.env ?? [])];
+    checkEnvGrants(env, ctx, location);
+    script = { run, env };
   }
 
   const pollMs =
@@ -645,6 +808,23 @@ function resolveStepList(
     steps.push(resolveStep(raw, ctx, playbook, steps));
   }
   return steps;
+}
+
+/** A `providers` duration: a number is milliseconds, a string uses `durationToMs` units. */
+function providerDurationMs(value: string | number | undefined, key: string, location: Location): number | undefined {
+  if (value === undefined) return undefined;
+  const ms = typeof value === "number" ? value : durationToMs(value);
+  if (ms === undefined || ms <= 0) invalid(location, `providers.${key}: invalid duration ${JSON.stringify(value)}`);
+  return ms;
+}
+
+function providersIR(raw: RawProviders | undefined, location: Location): ProvidersIR | undefined {
+  if (raw === undefined) return undefined;
+  return plain<ProvidersIR>({
+    onExhausted: raw.on_exhausted ?? "fail",
+    exhaustedForMs: providerDurationMs(raw.exhausted_for, "exhausted_for", location),
+    maxWaitMs: providerDurationMs(raw.max_wait, "max_wait", location),
+  });
 }
 
 /**
@@ -720,5 +900,6 @@ export function resolvePlaybook(raw: RawPlaybook, ctx: ResolveContext): Unhashed
     labels: playbookLabels,
     roles,
     defaults,
+    providers: providersIR(raw.defaults?.providers ?? ctx.defaults?.raw.providers, { file: ctx.file }),
   });
 }

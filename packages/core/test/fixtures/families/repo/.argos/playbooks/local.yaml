@@ -1,0 +1,5 @@
+title: Local Review
+steps:
+  - id: review
+    prompt: Review the change
+    role: reviewer

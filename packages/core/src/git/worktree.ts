@@ -18,6 +18,10 @@
  * Idempotency: creating the same run id twice (a restart between worktree creation and the run
  * task's first commit) returns the existing clean worktree instead of failing, and re-attaches the
  * branch if the checkout itself is missing. A dirty worktree is never silently reused.
+ *
+ * Removal is manual (`argos worktree rm`, `argos worktree gc`, FR4): `removeRunWorktree` refuses a
+ * dirty checkout unless `force` is set and keeps `argos/<runId>` unless `deleteBranch` is set, and
+ * `reattachRunWorktree` puts the same branch back so a removed worktree can still be retried.
  */
 
 import { mkdirSync, realpathSync } from "node:fs";
@@ -64,6 +68,28 @@ export interface RemoveRunWorktreeInput {
   readonly runId: string;
   /** Remove a worktree with local modifications (default `false`: refuse). */
   readonly force?: boolean;
+  /** Delete `argos/<runId>` too (default `false`: keep the branch). */
+  readonly deleteBranch?: boolean;
+  readonly git?: GitRunner;
+}
+
+/** What {@link removeRunWorktree} did: the checkout (when present) and the branch. */
+export interface RemoveRunWorktreeResult {
+  readonly removed: boolean;
+  readonly path: string;
+  /**
+   * True only when `deleteBranch` was asked for **and** `git branch -d`/`-D` succeeded. An
+   * unmerged branch without `force` is reported here as `false` (the branch is kept), not thrown:
+   * the worktree is already gone and gc reports per-run outcomes.
+   */
+  readonly branchDeleted: boolean;
+}
+
+export interface ReattachRunWorktreeInput {
+  /** The source checkout the worktree belongs to (the run's `cwd`). */
+  readonly repo: string;
+  readonly home: string;
+  readonly runId: string;
   readonly git?: GitRunner;
 }
 
@@ -352,12 +378,52 @@ export async function createRunWorktree(input: CreateRunWorktreeInput): Promise<
 // ------------------------------------------------------------------ cleanup
 
 /**
- * Remove one run's worktree (never automatic). The branch is **kept**, so committed work can still
- * be inspected or pushed after the directory is gone.
+ * Refuse a worktree that still has uncommitted (or untracked) changes unless `force` is set
+ * (FR4.2). The message names the flag the caller has to pass, so `argos worktree rm` can be
+ * retried as printed.
+ */
+async function assertWorktreeRemovable(context: Context, path: string): Promise<void> {
+  const status = await gitOr(
+    context,
+    ["status", "--porcelain=v1", "-z"],
+    `inspect worktree ${path}`,
+    path,
+  );
+  if (status.trim() !== "") {
+    throw new ArgosError(
+      "worktree_failed",
+      `${path}: the worktree has local changes; pass --force (removeRunWorktree({ force: true })) to remove it and lose them`,
+    );
+  }
+}
+
+/**
+ * Delete `argos/<runId>` (FR4.3): `git branch -d`, or `-D` with `force`. Returns `false` — without
+ * throwing — when the branch does not exist or git refuses (an unmerged branch): the worktree is
+ * already gone by then, so the outcome belongs in the receipt, not in an exception.
+ */
+async function deleteRunBranch(context: Context, runId: string, force: boolean): Promise<boolean> {
+  const branch = runWorktreeBranch(runId);
+  const exists =
+    (await probe(context, ["rev-parse", "--quiet", "--verify", `refs/heads/${branch}`])) !==
+    undefined;
+  if (!exists) return false;
+  try {
+    await context.git({ cwd: context.repo, args: ["branch", force ? "-D" : "-d", branch] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove one run's worktree (never automatic). The branch is kept by default, so committed work
+ * can still be inspected or pushed after the directory is gone; `deleteBranch` removes it too.
+ * Without `force` a dirty worktree is refused with `worktree_failed` before git is asked.
  */
 export async function removeRunWorktree(
   input: RemoveRunWorktreeInput,
-): Promise<{ readonly removed: boolean; readonly path: string }> {
+): Promise<RemoveRunWorktreeResult> {
   const context: Context = { repo: input.repo, git: input.git ?? execFileGit };
   const path = runWorktreePath(input.home, input.runId);
   const canonicalPath = canonical(path);
@@ -365,11 +431,47 @@ export async function removeRunWorktree(
     repo: input.repo,
     ...(input.git === undefined ? {} : { git: input.git }),
   })).find((entry) => canonical(entry.path) === canonicalPath);
-  if (existing === undefined) return { removed: false, path };
 
-  const args = ["worktree", "remove"];
-  if (input.force === true) args.push("--force");
-  args.push(path);
-  await gitOr(context, args, `remove worktree ${path}`);
-  return { removed: true, path };
+  let removed = false;
+  if (existing !== undefined) {
+    if (input.force !== true) await assertWorktreeRemovable(context, path);
+    const args = ["worktree", "remove"];
+    if (input.force === true) args.push("--force");
+    args.push(path);
+    await gitOr(context, args, `remove worktree ${path}`);
+    removed = true;
+  }
+
+  const branchDeleted =
+    input.deleteBranch === true
+      ? await deleteRunBranch(context, input.runId, input.force === true)
+      : false;
+  return { removed, path, branchDeleted };
+}
+
+/**
+ * Attach `argos/<runId>` to `<home>/worktrees/<runId>` again (FR4.7): a retry after
+ * `argos worktree rm` reuses the branch's commits instead of re-cutting the checkout from the base.
+ * Prune first, so a directory deleted out of band leaves no stale registration behind. A branch
+ * that is gone is `worktree_failed` — Argos never re-creates the worktree from the base here.
+ */
+export async function reattachRunWorktree(
+  input: ReattachRunWorktreeInput,
+): Promise<{ readonly path: string; readonly branch: string }> {
+  const context: Context = { repo: input.repo, git: input.git ?? execFileGit };
+  const path = runWorktreePath(input.home, input.runId);
+  const branch = runWorktreeBranch(input.runId);
+  const exists =
+    (await probe(context, ["rev-parse", "--quiet", "--verify", `refs/heads/${branch}`])) !==
+    undefined;
+  if (!exists) {
+    throw new ArgosError(
+      "worktree_failed",
+      `${input.repo}: branch ${branch} no longer exists, so the worktree of run ${input.runId} cannot be re-attached; its commits are gone (delete the branch only when the run does not need to be retried)`,
+    );
+  }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  await gitOr(context, ["worktree", "prune"], "prune stale worktrees");
+  await gitOr(context, ["worktree", "add", path, branch], `re-attach ${branch} at ${path}`);
+  return { path, branch };
 }

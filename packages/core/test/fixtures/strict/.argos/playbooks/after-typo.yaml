@@ -1,0 +1,11 @@
+title: After step typo
+steps:
+  - id: body
+    prompt: Do the body work
+after:
+  - id: cleanup
+    trigger: manual
+    steps:
+      - id: tidy
+        prompt: Tidy up
+        retires: 2

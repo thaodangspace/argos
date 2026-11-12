@@ -46,6 +46,7 @@ import {
   isConnectionError,
   isLabelFilterUnsupported,
   isQuotaError,
+  isQuotaNotice,
   LabelFilterUnsupportedError,
   PaseoUnreachableError,
   ProviderTimeoutError,
@@ -100,6 +101,10 @@ function renderFeedback(prompt: string, feedback: string | undefined): string {
   return prompt.replace(/\{\{\s*feedback\s*\}\}/g, feedback);
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** The stable Argos code for a port-level throw (never leaks an SDK detail). */
 function toArgosError(error: unknown, target: string | undefined): ArgosError {
   if (error instanceof ArgosError) return error;
@@ -121,7 +126,8 @@ function toArgosError(error: unknown, target: string | undefined): ArgosError {
   );
 }
 
-export function createAgentStepExecutor(options: AgentStepExecutorOptions): StepExecutor {  const { port } = options;
+export function createAgentStepExecutor(options: AgentStepExecutorOptions): StepExecutor {
+  const { port } = options;
   const now = options.now ?? (() => Date.now());
   const quotaWindowMs = options.quotaWindowMs ?? DEFAULT_EXHAUSTED_WINDOW_MS;
   const handoverNote = options.handoverNote ?? DEFAULT_HANDOVER_NOTE;
@@ -148,7 +154,12 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
     return known;
   }
 
-  function blockedAt(target: string, persisted: readonly ExhaustedTarget[] | undefined, at: number): number | undefined {
+  function blockedAt(
+    target: string,
+    persisted: readonly ExhaustedTarget[] | undefined,
+    at: number,
+    windowMs: number,
+  ): number | undefined {
     const candidates: number[] = [];
     const memory = exhaustedAt.get(target);
     if (memory !== undefined) candidates.push(memory);
@@ -156,7 +167,7 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
     if (recorded !== undefined) candidates.push(recorded);
     if (candidates.length === 0) return undefined;
     const since = Math.max(...candidates);
-    return at >= since && at - since < quotaWindowMs ? since : undefined;
+    return at >= since && at - since < windowMs ? since : undefined;
   }
 
   function agentConfigFor(input: LaunchInput | AgentStatusInput, target: string): AgentStepConfig {
@@ -218,10 +229,11 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
   ): Promise<AgentLaunch> {
     const at = now();
     const candidates = candidatesOf(input);
+    const windowMs = input.quotaWindowMs ?? quotaWindowMs;
     const exhausted: ExhaustedTarget[] = [];
     const available: string[] = [];
     for (const target of candidates) {
-      const since = blockedAt(target, input.exhausted, at);
+      const since = blockedAt(target, input.exhausted, at, windowMs);
       if (since === undefined) available.push(target);
       else exhausted.push({ target, at: since });
     }
@@ -280,11 +292,12 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
     return createWithFallback(input, false);
   }
 
+  /** The validated result, or `null` when the turn ended on a usage-limit notice (FR24). */
   function validateFinish(
     input: AgentStatusInput,
     finish: FinishResult,
     info: AgentInfo,
-  ): StepAgentStatus {
+  ): StepAgentStatus | null {
     const compiled: StepOutputSchema = buildStepOutputSchema({
       outputs: input.outputDefs,
       outcomes: input.outcomes,
@@ -299,6 +312,7 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
     const validation = parseStepResult(compiled, raw);
     const usage = finish.usage ?? info.usage;
     const rawField = { raw };
+    if (!validation.ok && output === undefined && isQuotaNotice(text)) return null;
     if (!validation.ok) {
       return {
         state: "done",
@@ -341,6 +355,48 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
     };
   }
 
+  /**
+   * The running agent hit a usage limit (an error or a bare notice as its final message). Record
+   * the target as exhausted and relaunch the same attempt on the next available candidate, like a
+   * launch-time quota error (FR24). When every candidate is blocked the step reports
+   * `provider_exhausted` with the ledger, and the step task decides whether to wait or fail.
+   */
+  async function quotaRelaunch(input: AgentStatusInput, detail: string | undefined): Promise<StepAgentStatus> {
+    const at = now();
+    const target = input.target;
+    const hit: ExhaustedTarget[] = target === undefined ? [] : [{ target, at }];
+    if (target !== undefined) exhaustedAt.set(target, at);
+    try {
+      await port.archive(input.agentId);
+    } catch {
+      // Best effort: the archived agent only keeps its launch label from being adopted again.
+    }
+    const withHit = (entries: readonly ExhaustedTarget[]): ExhaustedTarget[] => [
+      ...hit,
+      ...entries.filter((entry) => entry.target !== target),
+    ];
+    const ledger = withHit(input.exhausted ?? []);
+    try {
+      const created = await createWithFallback({ ...input, exhausted: ledger }, true);
+      return {
+        state: "running",
+        agentId: created.agentId,
+        ...(created.target === undefined ? {} : { target: created.target }),
+        exhausted: withHit(created.exhausted ?? []),
+      };
+    } catch (error) {
+      if (error instanceof ProviderExhaustedError) {
+        return {
+          state: "done",
+          errorCode: "provider_exhausted",
+          feedback: detail === undefined ? error.message : `${error.message}: ${detail}`,
+          exhausted: withHit(error.exhausted),
+        };
+      }
+      throw error;
+    }
+  }
+
   return {
     launch,
 
@@ -354,9 +410,7 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
           // Transient: park the step; the durable deadline bounds the wait and owns retries.
           return { state: "running" };
         }
-        if (isQuotaError(error)) {
-          throw new ProviderExhaustedError(candidatesOf(input), []);
-        }
+        if (isQuotaError(error)) return quotaRelaunch(input, errorMessage(error));
         throw toArgosError(error, input.target);
       }
 
@@ -371,6 +425,7 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
         return { state: "running" };
       }
       if (info.status === "error") {
+        if (isQuotaNotice(info.error)) return quotaRelaunch(input, info.error ?? undefined);
         return {
           state: "done",
           errorCode: "step_failed",
@@ -393,13 +448,16 @@ export function createAgentStepExecutor(options: AgentStepExecutorOptions): Step
         return { state: "running" };
       }
       if (finish.status === "error") {
+        if (isQuotaNotice(finish.error)) return quotaRelaunch(input, finish.error ?? undefined);
         return {
           state: "done",
           errorCode: "step_failed",
           ...(finish.error === null || finish.error === undefined ? {} : { feedback: finish.error }),
         };
       }
-      return validateFinish(input, finish, info);
+      const validated = validateFinish(input, finish, info);
+      if (validated !== null) return validated;
+      return quotaRelaunch(input, (finish.lastMessage ?? info.lastMessage ?? "").trim() || undefined);
     },
 
     /**

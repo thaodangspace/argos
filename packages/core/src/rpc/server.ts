@@ -17,13 +17,14 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import {
   createServer,
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
+import { isAbsolute } from "node:path";
 
 import { z } from "zod";
 
@@ -38,6 +39,11 @@ import {
   ARGOS_RPC_VERSION,
   ARGOS_SCHEMA_VERSION,
   CancelRunResponseSchema,
+  RemoveRunResponseSchema,
+  RemoveWorktreeRequestSchema,
+  RemoveWorktreeResponseSchema,
+  GcWorktreesRequestSchema,
+  GcWorktreesResponseSchema,
   DecideGateRequestSchema,
   DEFAULT_ARGOS_PORT,
   GateDecisionResponseSchema,
@@ -319,10 +325,55 @@ function prepareInputs(
   return result;
 }
 
+/**
+ * A run's `cwd` must be absolute, NUL-free, and an existing directory (FR6.1). A git repository
+ * is deliberately not required: scripts and agents can work in any directory the operator names.
+ * The check runs before `loadPlaybook`, so a refused cwd never creates a run or a worktree.
+ */
+function validateRunCwd(cwd: string): void {
+  if (cwd.includes("\0")) {
+    throw new ArgosError("invalid_request", "cwd must not contain a NUL byte");
+  }
+  if (!isAbsolute(cwd)) {
+    throw new ArgosError("invalid_request", `cwd ${JSON.stringify(cwd)} is not an absolute path`);
+  }
+  let stats: ReturnType<typeof statSync>;
+  try {
+    stats = statSync(cwd);
+  } catch {
+    throw new ArgosError("invalid_request", `cwd ${JSON.stringify(cwd)} does not exist`);
+  }
+  if (!stats.isDirectory()) {
+    throw new ArgosError("invalid_request", `cwd ${JSON.stringify(cwd)} is not a directory`);
+  }
+}
+
 function sortSummaries(runs: readonly RunSummary[]): RunSummary[] {
   return [...runs].sort(
     (left, right) => right.createdAt - left.createdAt || (left.id < right.id ? -1 : 1),
   );
+}
+
+/**
+ * `<n>(s|m|h|d)` → milliseconds (FR4.5). The request schema already rejected every other shape, so
+ * this only translates; the plan keeps the conversion next to the route instead of in the contract.
+ */
+function parseOlderThan(value: string): number {
+  const match = /^([0-9]+)([smhd])$/.exec(value.trim());
+  if (match === null) {
+    throw new ArgosError(
+      "invalid_request",
+      `olderThan ${JSON.stringify(value)} is not a duration like 30m, 24h, or 7d`,
+    );
+  }
+  const amount = Number.parseInt(match[1] ?? "0", 10);
+  const factors: Readonly<Record<string, number>> = {
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  };
+  return amount * (factors[match[2] ?? "s"] ?? 1_000);
 }
 
 function providerInfos(catalog: ProviderCatalog): ProviderInfo[] {
@@ -387,7 +438,7 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
     return {
       "access-control-allow-origin": allowed === "*" ? "*" : (origin ?? allowed),
       "access-control-allow-headers": "authorization, content-type, accept",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
       vary: "origin",
     };
   };
@@ -585,6 +636,24 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         return;
       }
 
+      // POST /worktrees/gc (FR4.5). Registered **before** the `/runs` guard below, which is the one
+      // place the router answers 404 for an unknown prefix.
+      if (segments.length === 2 && segments[0] === "worktrees" && segments[1] === "gc") {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+          return;
+        }
+        const body = GcWorktreesRequestSchema.parse(await readJson(req, maxBodyBytes));
+        const result = await options.host.gcWorktrees({
+          olderThanMs: parseOlderThan(body.olderThan),
+          ...(body.dryRun === undefined ? {} : { dryRun: body.dryRun }),
+          ...(body.force === undefined ? {} : { force: body.force }),
+          ...(body.deleteBranch === undefined ? {} : { deleteBranch: body.deleteBranch }),
+        });
+        sendJson(res, 200, GcWorktreesResponseSchema.parse(result), extra);
+        return;
+      }
+
       if (segments[0] !== "runs") {
         sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
         return;
@@ -610,6 +679,8 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         }
         const body = StartRunRequestSchema.parse(await readJson(req, maxBodyBytes));
         const cwd = body.cwd ?? options.cwd ?? process.cwd();
+        // FR6.1: a bad cwd is refused before the loader runs, so no task, worktree, or run exists.
+        validateRunCwd(cwd);
         // The loader is read-only and runs before `startRun`, so an invalid playbook never
         // creates a task (FR12). The host's home is where `argos serve` was opened, so global
         // playbooks under `<home>/playbooks` resolve even when `--home` differs from `ARGOS_HOME`.
@@ -633,6 +704,13 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
       const runId = decodeURIComponent(segments[1] ?? "");
       if (runId === "") {
         sendJson(res, 404, { error: { code: "not_found", message: "missing run id" } }, extra);
+        return;
+      }
+
+      // DELETE /runs/:id
+      if (segments.length === 2 && req.method === "DELETE") {
+        const result = await options.host.removeRun(runId);
+        sendJson(res, 200, RemoveRunResponseSchema.parse(result), extra);
         return;
       }
 
@@ -680,6 +758,21 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         const body = RetryRequestSchema.parse(await readJson(req, maxBodyBytes));
         const started = await options.host.retryStep(runId, body.stepId);
         sendJson(res, 201, StartRunResponseSchema.parse(started), extra);
+        return;
+      }
+
+      // POST /runs/:id/worktree/remove (FR4.1). Path and branch come from the record only.
+      if (segments.length === 4 && segments[2] === "worktree" && segments[3] === "remove") {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+          return;
+        }
+        const body = RemoveWorktreeRequestSchema.parse(await readJson(req, maxBodyBytes));
+        const result = await options.host.removeWorktree(runId, {
+          ...(body.force === undefined ? {} : { force: body.force }),
+          ...(body.deleteBranch === undefined ? {} : { deleteBranch: body.deleteBranch }),
+        });
+        sendJson(res, 200, RemoveWorktreeResponseSchema.parse(result), extra);
         return;
       }
 

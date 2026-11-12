@@ -1,11 +1,12 @@
 /** The `argos` command dispatcher (FR25). No storage import anywhere on this path. */
 
 import { parseArgs } from "./args.js";
-import { cancelCommand, decideCommand, retryCommand } from "./commands/actions.js";
+import { cancelCommand, decideCommand, retryCommand, rmCommand } from "./commands/actions.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { gatesCommand, lsCommand, statusCommand } from "./commands/runs.js";
 import { runCommand } from "./commands/run.js";
 import { validateCommand } from "./commands/validate.js";
+import { worktreeCommand } from "./commands/worktree.js";
 import {
   EXIT_OK,
   EXIT_RUNTIME,
@@ -51,6 +52,10 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
       return cancelCommand(args, io);
     case "retry":
       return retryCommand(args, io);
+    case "rm":
+      return rmCommand(args, io);
+    case "worktree":
+      return worktreeCommand(args, io);
     case "doctor":
       return doctorCommand(args, io);
     case "serve": {

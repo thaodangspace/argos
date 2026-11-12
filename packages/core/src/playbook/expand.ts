@@ -1,4 +1,5 @@
 import { argosError } from "../errors.js";
+import { canonicalJson } from "./hash.js";
 import type { BlockIR, InputBindingIR, RoleIR, StepIR, TransitionIR, UnhashedPlaybookIR } from "./ir.js";
 import { toPlainJson } from "./ir.js";
 
@@ -15,6 +16,11 @@ export interface ExpandOptions {
   readonly depth: number;
   /** Load and normalize a sub-playbook; throws `playbook_missing` when absent. */
   readonly loadSub: (playbookId: string, location: ExpandLocation) => UnhashedPlaybookIR;
+  /**
+   * The role file a playbook resolved for one role id (FR8.3). Used only to name both files when
+   * one IR resolves the same role id to different content.
+   */
+  readonly roleSource?: (playbookId: string, roleId: string) => string | undefined;
 }
 
 const EMPTY_BLOCKS: Readonly<Record<string, BlockIR>> = {};
@@ -102,7 +108,25 @@ export function expandPlaybook(book: UnhashedPlaybookIR, options: ExpandOptions)
       ...(step.when !== undefined ? { when: step.when } : {}),
     });
 
-    for (const [id, role] of Object.entries(sub.roles)) roles[id] = role;
+    for (const [id, role] of Object.entries(sub.roles)) {
+      const existing = roles[id];
+      if (existing === undefined) {
+        roles[id] = role;
+        continue;
+      }
+      // FR8.3: one IR must resolve a role id to one content. Different copies fail the load
+      // instead of silently overwriting the earlier one; identical copies are interchangeable.
+      if (canonicalJson(existing) !== canonicalJson(role)) {
+        const parentSource = options.roleSource?.(book.id, id);
+        const subSource = options.roleSource?.(sub.id, id);
+        const named = [parentSource ?? `"${book.id}"`, subSource ?? `"${sub.id}"`].join(" and ");
+        throw argosError(
+          "playbook_invalid",
+          { file: options.file, stepId: step.id },
+          `role "${id}" has different content in one IR: ${named} (playbooks "${book.id}" and "${sub.id}"); one role id must resolve to one content`,
+        );
+      }
+    }
   }
 
   // `needs: [block]` means "the whole sub-graph finished": resolve it to the block's terminals.

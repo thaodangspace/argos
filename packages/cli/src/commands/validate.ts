@@ -17,9 +17,15 @@ import { argosHome, errorLocation, isArgosError } from "argos-core";
 import {
   discoverPlaybooks,
   loadPlaybook,
+  type LoadWarning,
   type PlaybookEntry,
 } from "argos-core/playbook";
-import type { ValidateError, ValidatePlaybook, ValidateReport } from "argos-core/rpc";
+import type {
+  ValidateError,
+  ValidatePlaybook,
+  ValidateReport,
+  ValidateWarning,
+} from "argos-core/rpc";
 
 import type { ParsedArgs } from "../args.js";
 import { flag, rejectUnknownFlags } from "../args.js";
@@ -129,12 +135,15 @@ export function validatePlaybooks(
 
   const playbooks: ValidatePlaybook[] = [];
   const errors: ValidateError[] = [];
+  const warnings: LoadWarning[] = [];
   for (const candidate of candidates) {
     try {
       const ir = loadPlaybook(
         repoDir,
         candidate.entry.id,
-        candidate.explicit ? { file: candidate.entry.file, home } : { home },
+        candidate.explicit
+          ? { file: candidate.entry.file, home, warnings }
+          : { home, warnings },
       );
       playbooks.push({
         id: ir.id,
@@ -143,13 +152,26 @@ export function validatePlaybooks(
       });
     } catch (error) {
       const file = isArgosError(error) && error.file !== undefined ? error.file : candidate.entry.file;
-      const stepId = isArgosError(error) ? (error.stepId ?? null) : null;
       const code = isArgosError(error) ? error.code : "playbook_invalid";
+      const errorStepId = isArgosError(error) ? (error.stepId ?? null) : null;
+      const issues = isArgosError(error) ? (error.issues ?? []) : [];
+      if (issues.length > 0) {
+        // FR1.4: one `errors[]` entry per schema issue, so every typo is named in one run.
+        for (const issue of issues) {
+          errors.push({
+            file: displayPath(repoDir, file),
+            stepId: issue.stepId ?? errorStepId,
+            code,
+            message: `${issue.path}: ${issue.message}`,
+          });
+        }
+        continue;
+      }
       const message = error instanceof Error ? error.message : String(error);
-      const prefix = errorLocation(file, stepId ?? undefined);
+      const prefix = errorLocation(file, errorStepId ?? undefined);
       errors.push({
         file: displayPath(repoDir, file),
-        stepId,
+        stepId: errorStepId,
         code,
         message: message.startsWith(prefix) ? message.slice(prefix.length) : message,
       });
@@ -157,7 +179,14 @@ export function validatePlaybooks(
   }
   return {
     repoDir,
-    report: { valid: errors.length === 0, playbooks, errors },
+    report: {
+      valid: errors.length === 0,
+      playbooks,
+      errors,
+      warnings: warnings.map(
+        (warning): ValidateWarning => ({ ...warning, file: displayPath(repoDir, warning.file) }),
+      ),
+    },
   };
 }
 
@@ -192,6 +221,11 @@ export function validateCommand(args: ParsedArgs, io: CliIo): number {
     for (const error of result.report.errors) {
       const location = error.stepId === null ? error.file : `${error.file}: step ${error.stepId}`;
       io.stdout(`FAIL  ${location}: ${error.code}: ${error.message}\n`);
+    }
+    // FR7.1: warnings print after the errors and never change the exit code.
+    for (const warning of result.report.warnings) {
+      const location = warning.stepId === null ? warning.file : `${warning.file}: step ${warning.stepId}`;
+      io.stdout(`WARN  ${location}: ${warning.code}: ${warning.message}\n`);
     }
     const total = result.report.playbooks.length + result.report.errors.length;
     io.stdout(

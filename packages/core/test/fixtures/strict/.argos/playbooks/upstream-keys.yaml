@@ -1,0 +1,16 @@
+title: Upstream keys
+hidden: true
+manager:
+  prompt: Coordinate the run.
+  compact: { above_tokens: 1000 }
+workspace:
+  archive: on_end
+  keep_failed: true
+next: { when: never }
+singleton: true
+steps:
+  - id: work
+    prompt: Work
+    handoff: { to: manager }
+    queue: true
+    settle: 30s

@@ -112,6 +112,9 @@ Usage:
   argos decide <runId> <gateId> <decision> [--comment text] [--json]
   argos cancel <runId> [--json]
   argos retry <runId> <stepId> [--json]
+  argos rm <runId> [--json]
+  argos worktree rm <runId> [--force] [--delete-branch] [--json]
+  argos worktree gc --older-than <n>(s|m|h|d) [--dry-run] [--force] [--delete-branch] [--json]
   argos serve [--port N] [--home dir] [--json]
   argos doctor [--home dir] [--port N] [--json]
 

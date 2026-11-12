@@ -153,6 +153,16 @@ export interface WorktreeRecord {
   readonly baseSha: string;
 }
 
+/**
+ * FR3: the pinned location of one script — the absolute path resolution found when the run
+ * started, and the sha256 of its bytes at that moment. The script task re-hashes the file before
+ * every spawn and fails the step with `script_changed` on a mismatch.
+ */
+export interface ScriptPinRecord {
+  readonly path: string;
+  readonly sha256: string;
+}
+
 /** A provider/model the run may not use until `at` (FR24 quota exhaustion). */
 export interface ExhaustedRecord {
   readonly target: string;
@@ -169,6 +179,12 @@ export interface RunRecord {
   readonly status: RunStatus;
   readonly cwd: string;
   readonly worktree?: WorktreeRecord;
+  /**
+   * FR3: one pin per script name (`<name> → {path, sha256}`), covering the main steps and every
+   * after-step. Absent when the run has no script step, and absent on a record written before
+   * pinning existed (FR3.6) — such a record resolves at `prepare` instead.
+   */
+  readonly scripts?: Readonly<Record<string, ScriptPinRecord>>;
   /** Absolute epoch ms for the global run deadline (FR18). Absent = no deadline. */
   readonly deadline?: number;
   /** Final outcome from an `end` transition, when one names it. */
@@ -249,6 +265,12 @@ const WorktreeSchema = z.strictObject({
   baseSha: z.string().min(1),
 });
 
+/** FR3: a pinned script. The digest is lowercase hex, so a hand-edited record cannot lie. */
+const ScriptPinSchema = z.strictObject({
+  path: z.string().min(1),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/, "expected a lowercase sha256 hex digest"),
+});
+
 /**
  * The IR is validated by the loader (Phase 2) and frozen into the run. The checkpoint only
  * checks the identity fields the engine relies on; the rest is opaque so IR additions do not
@@ -274,6 +296,7 @@ export const RunRecordSchema = z.strictObject({
   status: z.enum(RUN_STATUSES),
   cwd: z.string().min(1),
   worktree: WorktreeSchema.optional(),
+  scripts: z.record(z.string().min(1), ScriptPinSchema).optional(),
   deadline: z.number().optional(),
   outcome: z.string().min(1).optional(),
   errorCode: ErrorCodeSchema.optional(),
@@ -313,6 +336,8 @@ export interface CreateRunRecordInput {
   /** Event time of creation; also the initial `updatedAt`. */
   readonly now: number;
   readonly worktree?: WorktreeRecord;
+  /** FR3: script pins resolved by the host before the run task exists. */
+  readonly scripts?: Readonly<Record<string, ScriptPinRecord>>;
   readonly deadline?: number;
 }
 
@@ -340,6 +365,14 @@ export function createRunRecord(input: CreateRunRecordInput): RunRecord {
     cwd: input.cwd,
   };
   if (input.worktree !== undefined) record["worktree"] = input.worktree;
+  // FR3: copying the entries keeps the record free of aliases into the caller's object.
+  if (input.scripts !== undefined) {
+    const scripts: Record<string, ScriptPinRecord> = {};
+    for (const [name, pin] of Object.entries(input.scripts)) {
+      scripts[name] = { path: pin.path, sha256: pin.sha256 };
+    }
+    record["scripts"] = scripts;
+  }
   if (input.deadline !== undefined) record["deadline"] = input.deadline;
   Object.assign(record, {
     steps,

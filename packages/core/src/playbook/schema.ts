@@ -2,9 +2,11 @@ import { z } from "zod";
 
 /**
  * Raw YAML shapes. These mirror the paseo-playbooks format (FR6–FR11) plus the Argos
- * extensions. Only Argos-owned blocks are `.strict()` (agent, isolation, role, after,
- * defaults, the Argos part of a step): typos there fail loudly, while the paseo-compatible
- * surfaces stay permissive so real playbooks keep loading unchanged.
+ * extensions. Every Argos surface is strict (FR1): the playbook, a step, and an input/output
+ * definition reject unknown keys, so a typo like `need:` is `playbook_invalid` instead of a
+ * silently ignored dependency. Upstream-only keys (FR1.2) are declared as
+ * `z.unknown().optional()` so real paseo files keep loading; the inner `manager`/`workspace`
+ * shapes stay loose because upstream may extend them.
  *
  * Compatibility aliases accepted and normalized by `resolve.ts`:
  * - `poll_ms` | `pollMs` | `poll` (duration string, paseo script block) -> `StepIR.pollMs`
@@ -22,7 +24,7 @@ const DurationSchema = z.union([z.string().min(1), z.number().nonnegative()]);
 const ColorSchema = z.enum(["primary", "neutral", "success", "warning", "danger"]);
 const CommentSchema = z.enum(["none", "optional", "required"]);
 
-const RawVarDefSchema = z.object({
+const RawVarDefSchema = z.strictObject({
   type: z.enum(["string", "number", "boolean", "enum"]).optional(),
   values: z.array(z.string()).optional(),
   required: z.boolean().optional(),
@@ -161,7 +163,7 @@ export const RawScriptStepSchema = z.strictObject({
 });
 export type RawScriptStep = z.infer<typeof RawScriptStepSchema>;
 
-export const RawStepSchema = z.object({
+export const RawStepSchema = z.strictObject({
   id: z.string().min(1),
   title: z.string().min(1).optional(),
   short_title: z.string().min(1).optional(),
@@ -197,6 +199,9 @@ export const RawStepSchema = z.object({
   /** paseo fields accepted but not part of the v1 IR. */
   silence: z.string().optional(),
   archive_agents: z.boolean().optional(),
+  handoff: z.unknown().optional(),
+  queue: z.unknown().optional(),
+  settle: z.unknown().optional(),
 });
 export type RawStep = z.infer<typeof RawStepSchema>;
 
@@ -209,19 +214,21 @@ export const RawAfterSchema = z.strictObject({
 });
 export type RawAfter = z.infer<typeof RawAfterSchema>;
 
+/** FR24 quota policy; `fallback` is parsed for paseo-playbooks compatibility and ignored. */
+export const RawProvidersSchema = z.strictObject({
+  exhausted_for: DurationSchema.optional(),
+  on_exhausted: z.enum(["fail", "wait"]).optional(),
+  max_wait: DurationSchema.optional(),
+  fallback: z.array(z.string().min(1)).optional(),
+});
+export type RawProviders = z.infer<typeof RawProvidersSchema>;
+
 export const RawDefaultsSchema = z.strictObject({
   agent: RawAgentSchema.optional(),
   tiers: z
     .record(z.string(), z.union([RawAgentTargetSchema, z.array(RawAgentTargetSchema).min(1)]))
     .optional(),
-  providers: z
-    .strictObject({
-      exhausted_for: DurationSchema.optional(),
-      on_exhausted: z.enum(["fail", "wait"]).optional(),
-      max_wait: DurationSchema.optional(),
-      fallback: z.array(z.string().min(1)).optional(),
-    })
-    .optional(),
+  providers: RawProvidersSchema.optional(),
   manager: RawAgentSchema.extend({ compact: z.unknown().optional() }).optional(),
   workspace: z.object({ archive: z.enum(["never", "on_end"]).optional(), keep_failed: z.boolean().optional() }).optional(),
   isolation: RawIsolationSchema.optional(),
@@ -247,12 +254,13 @@ export type RawRoleFile = z.infer<typeof RawRoleFileSchema>;
 /** Argos-only playbook defaults block. */
 export const RawPlaybookDefaultsSchema = z.strictObject({
   agent: RawAgentSchema.optional(),
+  providers: RawProvidersSchema.optional(),
   isolation: RawIsolationSchema.optional(),
   labels: z.record(z.string(), z.string()).optional(),
 });
 export type RawPlaybookDefaults = z.infer<typeof RawPlaybookDefaultsSchema>;
 
-export const RawPlaybookSchema = z.object({
+export const RawPlaybookSchema = z.strictObject({
   title: z.string().optional(),
   description: z.string().optional(),
   agent: RawAgentSchema.optional(),
@@ -274,10 +282,21 @@ export const RawPlaybookSchema = z.object({
 });
 export type RawPlaybook = z.infer<typeof RawPlaybookSchema>;
 
-/** Locate the step id an issue refers to, for errors that must name the step. */
+/**
+ * Locate the step id an issue refers to, for errors that must name the step. Covers both main
+ * steps (`steps[n]`) and after-task steps (`after[n].steps[m]`) — FR1.5.
+ */
 export function stepIdAtPath(document: unknown, path: readonly PropertyKey[]): string | undefined {
-  const steps = (document as { steps?: unknown } | null)?.steps;
-  if (!Array.isArray(steps) || path[0] !== "steps" || typeof path[1] !== "number") return undefined;
-  const step = steps[path[1]] as { id?: unknown } | undefined;
-  return typeof step?.id === "string" ? step.id : undefined;
+  const root = (document ?? {}) as { steps?: unknown; after?: unknown };
+  const at = (value: unknown, index: PropertyKey | undefined): unknown =>
+    Array.isArray(value) && typeof index === "number" ? value[index] : undefined;
+  let step: unknown;
+  if (path[0] === "steps") {
+    step = at(root.steps, path[1]);
+  } else if (path[0] === "after" && path[2] === "steps") {
+    const after = at(root.after, path[1]) as { steps?: unknown } | undefined;
+    step = at(after?.steps, path[3]);
+  }
+  const id = (step as { id?: unknown } | undefined)?.id;
+  return typeof id === "string" ? id : undefined;
 }

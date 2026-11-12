@@ -227,6 +227,104 @@ with a snapshot frame and reconnecting clients; the plugin re-fetches on reconne
 inputs. The plugin holds no durable state: teardown closes only its HTTP client and streams, and a
 new plugin instance reconnects to the same `argos serve` run.
 
+## Security
+
+Argos is a **single-user, local** tool. It does not sandbox the work it starts: a playbook's scripts
+and agents run as the local user, with that user's files, environment, and credentials (whatever
+the env rules below allow). The security model is therefore about *who can ask Argos to run
+something*, not about containing what the run does.
+
+### Threat model
+
+| Trusted | Untrusted / out of scope |
+|---|---|
+| The operator's account, `$ARGOS_HOME` (`0700`), the token file (`0600`), the `argos serve` process | A repository's playbook or script contents (they are code, reviewed like code), a compromised Paseo daemon or agent, a process running as the same user |
+| The local loopback listener | Remote network peers (the server binds `127.0.0.1` and never advertises itself) |
+| The CLI/plugin as the operator | Agents the run launches: they inherit only the granted environment and act inside the run `cwd`/worktree, but they are not kernel-isolated |
+
+The main risks are (a) someone who obtains the token starting an arbitrary run, (b) a playbook
+leaking secrets into a child process, and (c) a script or agent changing files outside what the
+operator expected. (a) is bounded by the token file's mode, (b) by the env allowlist, and (c) is
+accepted: filesystem permissions are the boundary, not Argos.
+
+### What the token grants
+
+`$ARGOS_HOME/token` is the only authorization. Every route requires
+`Authorization: Bearer <token>` and compares it in constant time; `OPTIONS` is unauthenticated.
+Possession of the token means full control of that server:
+
+- `POST /runs` starts a playbook in **any accepted `cwd`** — so it can make Argos execute the
+  playbook's scripts and launch agent turns as the local user in that directory. The token is
+  therefore equivalent to code execution as the operator, not a read-only status key.
+- `POST /runs/:id/gates/:gateId` approves human gates (including `max_loops` grants),
+  `cancel`/`retry`/`DELETE /runs/:id` change or retire runs, and the worktree routes remove
+  checkouts. `GET` routes expose run metadata only: no prompts, transcripts, agent messages, or
+  playbook IR ever appear in `RunSummary`/`RunDetail`.
+
+The token and `ARGOS_PASEO_PASSWORD` are never logged, never stored in the database, and never
+returned by a route.
+
+### `cwd` trust
+
+`POST /runs` refuses a `cwd` that is not absolute, contains a NUL byte, does not exist, or is not
+a directory (`invalid_request`, HTTP 400, before the loader runs, so no run or worktree is
+created). A git repository is deliberately **not** required: Argos can run a playbook in any
+directory the operator names, and `isolation: worktree` is what asks for a git checkout.
+Because the API accepts any existing directory, the plugin (not the server) is where a calling
+agent is confined — see *Plugin confinement*.
+
+### Environment rules
+
+A script is deny-by-default (FR2). It inherits only the baseline (`PATH`, `HOME`, `LANG`, `LC_*`,
+`TZ`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`, `TMP`, `TEMP`, `SystemRoot`, `PATHEXT`,
+`COMSPEC`) plus the names its step `env:` list grants: an exact name (granted even when it looks
+like a credential), a `PREFIX_*` prefix (which never covers a name matching
+`/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i`), or `"*"` (every non-secret name — the old
+inherit-everything behavior, which `argos validate` warns about as `env_inherit_all`). The deny list
+(`ARGOS_PASEO_PASSWORD`, `ARGOS_HOME`, `ARGOS_PORT`, `ARGOS_PASEO_URL`, the `ARGOS_FAKE_PASEO*`
+knobs) is never passed, even when named. `NODE_OPTIONS`, `SSH_AUTH_SOCK`, and `GIT_*` are absent
+unless granted; a run cannot "inherit" a credential by accident. Agents launched by a step see the
+same filtered environment.
+
+### Script pinning
+
+Every script is resolved and hashed (SHA-256) when the run starts and stored in
+`RunRecord.scripts`; the script task re-hashes the file immediately before **every** spawn. A
+changed, moved, or deleted script means `script_changed` (409) and no automatic retry; `argos retry`
+is the operator's re-pin. This is **detection, not prevention** (accepted risk R4): a writer that
+changes the file between the hash check and `exec` is not stopped, and a running script can modify
+its own file or any file it can write. Scripts are not sandboxed — they run as the local user and
+can delete untracked files later steps expected (see `docs/compat.md` row 25).
+
+### Read-only and worktrees
+
+`role.readonly` is enforced by a git snapshot before and after the step; a difference is
+`readonly_violation` and the worktree is kept for inspection. The guard detects, it does not
+prevent (created-and-deleted files, new files inside an already-untracked directory, and ignored
+paths are invisible). Worktree cleanup is manual (`argos worktree rm`, `argos worktree gc`) and
+**record-only**: the path and branch come from the stored run record, guarded against
+`<home>/worktrees/<runId>` and `argos/<runId>`, so an API caller cannot point removal at an
+arbitrary directory. gc only *reports* a directory that no run index entry claims.
+
+### Plugin confinement
+
+The plugin's panel is human-driven, so its `argos.runs.start` RPC is not confined (the operator
+chooses the directory). The **agent chat tool** is different: `argos_start_playbook` fills `cwd`
+from the calling agent's working directory (A2, verified against Paseo 0.15.4 — `AgentToolContext`
+carries `agent.cwd: string`) and refuses a request outside it.
+
+- Omitted `cwd` → the agent's own working directory.
+- An explicit `cwd` must be that directory or a subdirectory of it (`agentCwd + "/"` prefix),
+  after the tool rejects any path containing a `..` segment, and it must be absolute.
+- An empty or missing agent cwd is refused (`invalid_request`); there is **no** fallback to the
+  server's cwd.
+
+The check is **lexical and not a sandbox**: it stops a model from pointing a run at an unrelated
+directory, but a symlink inside the agent cwd that resolves elsewhere still passes, as does a
+subdirectory whose own contents are symlinks. A refusal is local: the tool returns
+`{error:{code:"invalid_request"}}` and makes no HTTP call. A server-side `invalid_request` stays
+`invalid_request` (it is not collapsed into `playbook_invalid`).
+
 ## Invariants
 
 - **No LLM in control flow.** Transitions, readiness, loop limits, gates, retries, and timeouts

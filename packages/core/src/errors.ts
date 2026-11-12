@@ -22,9 +22,13 @@ export const ARGOS_ERROR_CODES = [
   "step_failed",
   "step_timeout",
   "script_timeout",
+  // FR3: a pinned script was edited, moved, or deleted after the run started (HTTP 409).
+  "script_changed",
   "concurrency_limit",
   "unauthorized",
   "run_terminal",
+  // FR4: a worktree operation named a run that has not finished yet (HTTP 409).
+  "run_active",
   // Phase 8 (RPC surface): names the request/route failure instead of guessing a domain code.
   "invalid_request",
   "run_unknown",
@@ -33,11 +37,23 @@ export const ARGOS_ERROR_CODES = [
 
 export type ArgosErrorCode = (typeof ARGOS_ERROR_CODES)[number];
 
+/**
+ * One loader/validator problem (FR1.4): the path inside the document, the step it belongs to
+ * (FR1.5), and the message. Values never appear — only paths, keys, and step ids (FR7.3).
+ */
+export interface ArgosIssue {
+  readonly path: string;
+  readonly stepId?: string;
+  readonly message: string;
+}
+
 export interface ArgosErrorDetails {
   /** Absolute path of the file the failure belongs to, when there is one. */
   readonly file?: string;
   /** Playbook step the failure belongs to, when there is one. */
   readonly stepId?: string;
+  /** Every schema issue the loader found, capped at 20 (FR1.4). */
+  readonly issues?: readonly ArgosIssue[];
   readonly cause?: unknown;
 }
 
@@ -49,6 +65,8 @@ export class ArgosError extends Error {
   readonly code: ArgosErrorCode;
   readonly file: string | undefined;
   readonly stepId: string | undefined;
+  /** Every issue behind a loader failure; `undefined` for errors that have no schema issues. */
+  readonly issues: readonly ArgosIssue[] | undefined;
 
   constructor(code: ArgosErrorCode, message: string, details: ArgosErrorDetails = {}) {
     super(message, details.cause === undefined ? undefined : { cause: details.cause });
@@ -56,6 +74,7 @@ export class ArgosError extends Error {
     this.code = code;
     this.file = details.file;
     this.stepId = details.stepId;
+    this.issues = details.issues;
   }
 }
 
@@ -76,11 +95,13 @@ export function argosError(
   location: { file?: string | undefined; stepId?: string | undefined },
   detail: string,
   cause?: unknown,
+  extra?: { readonly issues?: readonly ArgosIssue[] },
 ): ArgosError {
   const message = `${errorLocation(location.file, location.stepId)}${detail}`;
   const details: ArgosErrorDetails = {};
   if (location.file !== undefined) Object.assign(details, { file: location.file });
   if (location.stepId !== undefined) Object.assign(details, { stepId: location.stepId });
+  if (extra?.issues !== undefined) Object.assign(details, { issues: extra.issues });
   if (cause !== undefined) Object.assign(details, { cause });
   return new ArgosError(code, message, details);
 }

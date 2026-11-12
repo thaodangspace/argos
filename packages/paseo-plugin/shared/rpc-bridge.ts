@@ -12,6 +12,7 @@ import {
   type CancelRunResponse,
   type DecideGateRequest,
   type GateDecisionResponse,
+  type RemoveRunResponse,
   type RunDetail,
   type RunSummary,
   type StartRunRequest,
@@ -30,12 +31,17 @@ import {
   type SseHandlers,
 } from "./rpc-client";
 
-/** The four RPC call functions, as returned by `useRpc(contract)` in the panel. */
+/** The RPC call functions, as returned by `useRpc(contract)` in the panel. */
 export interface ArgosRpcCalls {
   listRuns(input: Record<string, never>): Promise<PluginResult<RunSummary[]>>;
   getRun(input: { readonly runId: string }): Promise<PluginResult<RunDetail>>;
   startRun(input: StartRunRequest): Promise<PluginResult<StartRunResponse>>;
   cancelRun(input: { readonly runId: string }): Promise<PluginResult<CancelRunResponse>>;
+  removeRun(input: { readonly runId: string }): Promise<PluginResult<RemoveRunResponse>>;
+  retryStep(input: {
+    readonly runId: string;
+    readonly stepId: string;
+  }): Promise<PluginResult<StartRunResponse>>;
   decideGate(
     input: DecideGateRequest & { readonly runId: string; readonly gateId: string },
   ): Promise<PluginResult<GateDecisionResponse>>;
@@ -145,6 +151,14 @@ export function createRpcClientBridge(
     cancelRun: async (runId) => {
       assertOpen();
       return unwrap(await calls.cancelRun({ runId }));
+    },
+    removeRun: async (runId) => {
+      assertOpen();
+      return unwrap(await calls.removeRun({ runId }));
+    },
+    retryStep: async (runId, stepId) => {
+      assertOpen();
+      return unwrap(await calls.retryStep({ runId, stepId }));
     },
     openEvents,
     close: () => {

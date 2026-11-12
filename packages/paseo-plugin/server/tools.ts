@@ -54,12 +54,47 @@ export const CancelRunInputSchema = z.strictObject({
 
 /** Codes that all mean "fix the playbook or its inputs before retrying". */
 const START_FAILURE_CODES: Readonly<Record<string, string>> = {
-  invalid_request: "playbook_invalid",
   playbook_missing: "playbook_invalid",
   playbook_invalid: "playbook_invalid",
   playbook_cycle: "playbook_invalid",
   worktree_base_dirty: "playbook_invalid",
 };
+
+/**
+ * Confine a start request's `cwd` to the calling agent's working directory (FR6.2).
+ *
+ * The check is **lexical**: the path must be absolute, contain no `..` segment, and be either the
+ * agent cwd or a descendant (`agentCwd + "/"`). It is not a sandbox — a symlink inside the agent
+ * cwd that points elsewhere still passes (documented in `docs/architecture.md`). A missing/empty
+ * agent cwd is refused rather than falling back to the server's cwd (plan edge case).
+ *
+ * Returns `{ cwd }` on success or `{ message }` for a local `invalid_request` refusal.
+ */
+function confineCwd(
+  requested: string | undefined,
+  agentCwd: string,
+): { readonly cwd: string } | { readonly message: string } {
+  const base = agentCwd.replace(/\/+$/, "");
+  if (base === "" && agentCwd !== "/") {
+    return {
+      message: "the calling agent has no working directory, so a run cwd cannot be chosen",
+    };
+  }
+  const target = requested ?? agentCwd;
+  if (target.includes("\0")) return { message: "cwd must not contain a NUL byte" };
+  if (!target.startsWith("/")) return { message: `cwd ${JSON.stringify(target)} is not absolute` };
+  if (target.split("/").includes("..")) {
+    return { message: `cwd ${JSON.stringify(target)} must not contain a ".." segment` };
+  }
+  if (target === agentCwd || target === `${base}/` || target.startsWith(`${base}/`)) {
+    return { cwd: target };
+  }
+  return {
+    message:
+      `cwd ${JSON.stringify(target)} is outside the calling agent's working directory ` +
+      `${JSON.stringify(agentCwd)}`,
+  };
+}
 
 function failure(code: string, message: string): AgentToolResult {
   return {
@@ -149,13 +184,19 @@ export function argosTools(client: ArgosRpc): AgentToolDefinition[] {
     title: "Start an Argos playbook",
     description:
       "Start an Argos YAML playbook (YAML files under .argos/playbooks in the workspace). " +
-      "Returns the run id to follow with argos_run_status. Invalid inputs or an invalid playbook " +
-      "return isError with code playbook_invalid.",
+      "Returns the run id to follow with argos_run_status. cwd defaults to the calling agent's " +
+      "working directory and must name that directory or a subdirectory. An invalid playbook " +
+      "returns isError with code playbook_invalid; a bad input or an out-of-scope cwd returns " +
+      "invalid_request.",
     input: StartPlaybookInputSchema,
-    execute: async (input) => {
+    execute: async (input, context) => {
+      const agentCwd = typeof context?.agent?.cwd === "string" ? context.agent.cwd : "";
+      const confined = confineCwd(input.cwd, agentCwd);
+      if ("message" in confined) return failure("invalid_request", confined.message);
       try {
         const started = await client.startRun({
           ...input,
+          cwd: confined.cwd,
           clientRequestId: input.clientRequestId ?? globalThis.crypto.randomUUID(),
         });
         return ok(`started run ${started.runId} (task ${started.taskId})`, {

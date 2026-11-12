@@ -1,0 +1,8 @@
+title: Same Role
+steps:
+  - id: block
+    use: same-child
+  - id: finish
+    prompt: Finish the work
+    needs: [block]
+    role: same-reviewer

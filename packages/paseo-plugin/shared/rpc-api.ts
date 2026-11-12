@@ -17,6 +17,7 @@ import {
   CancelRunResponseSchema,
   DecideGateRequestSchema,
   GateDecisionResponseSchema,
+  RemoveRunResponseSchema,
   RunDetailSchema,
   RunSummarySchema,
   StartRunRequestSchema,
@@ -72,6 +73,20 @@ export const RunCancelRpc = {
   output: result(CancelRunResponseSchema),
 } satisfies PluginRpcContract;
 
+/** `argos.runs.remove` -> `DELETE /runs/:id`: delete a finished run (its worktree is kept). */
+export const RunRemoveRpc = {
+  name: "argos.runs.remove",
+  input: z.strictObject({ runId: z.string() }),
+  output: result(RemoveRunResponseSchema),
+} satisfies PluginRpcContract;
+
+/** `argos.runs.retry` -> `POST /runs/:id/retry`: reset a step and its downstream in a finished run. */
+export const RunRetryRpc = {
+  name: "argos.runs.retry",
+  input: z.strictObject({ runId: z.string(), stepId: z.string() }),
+  output: result(StartRunResponseSchema),
+} satisfies PluginRpcContract;
+
 /** `argos.gates.decide` -> `POST /runs/:id/gates/:gateId`, first writer wins. */
 export const GateDecideRpc = {
   name: "argos.gates.decide",
@@ -88,5 +103,7 @@ export const PLUGIN_RPC_CONTRACTS = [
   RunGetRpc,
   RunStartRpc,
   RunCancelRpc,
+  RunRemoveRpc,
+  RunRetryRpc,
   GateDecideRpc,
 ] as const;

@@ -17,12 +17,22 @@
  * steps go through the same `argos.step`/`argos.gate` machinery as any other run.
  */
 
+import type {
+  ConversationId,
+  Task,
+  TaskId,
+  TaskOwnership,
+  Tx,
+} from "@earendil-works/pi-durable";
+
 import type { AfterIR, PlaybookIR } from "../../playbook/ir.js";
 import { deepFreeze } from "../../playbook/ir.js";
 import { playbookHash } from "../../playbook/hash.js";
 import { createRunRecord, type RunRecord } from "../../engine/index.js";
-import type { AfterTaskLink } from "../context.js";
+import type { AfterTaskLink, RunTaskResult } from "../context.js";
+import { registerRun, writeRunState, type NewHistoryEvent } from "../mirror.js";
 import { ulid } from "../ulid.js";
+import type { RunCheckpoint, RunTaskInput } from "./run-checkpoint.js";
 
 /**
  * The scoped IR of one after-task: the entry's steps only, with a content hash of its own (the
@@ -65,10 +75,60 @@ export function planAfterRun(parent: RunRecord, after: AfterIR, now: number): Pl
     cwd: parent.cwd,
     now,
     ...(parent.worktree === undefined ? {} : { worktree: parent.worktree }),
+    // FR3.5: an after-task runs the same pinned scripts as the run that spawned it, so a script
+    // fixed in the parent's worktree cannot slip into an after-task unnoticed.
+    ...(parent.scripts === undefined ? {} : { scripts: parent.scripts }),
   });
   return {
     afterId: after.id,
     link: { parentRunId: parent.id, afterId: after.id },
     record,
   };
+}
+
+/**
+ * `after` entries whose child must be created now: `auto` entries the reducer already moved to
+ * `running` and that have no child task yet. A manual entry is never started here (FR11).
+ */
+export function plannedAfterTasks(checkpoint: RunCheckpoint, now: number): PlannedAfterRun[] {
+  const planned: PlannedAfterRun[] = [];
+  for (const after of checkpoint.record.ir.after) {
+    if (after.trigger !== "auto") continue;
+    if (checkpoint.afterTasks[after.id] !== undefined) continue;
+    const state = checkpoint.record.after[after.id];
+    if (state === undefined || state.status !== "running") continue;
+    planned.push(planAfterRun(checkpoint.record, after, now));
+  }
+  return planned;
+}
+
+/**
+ * Start one `argos.run` child as an after-task (FR11). Shared by the `done` phase (auto) and
+ * `ArgosHost.startAfterTask` (manual) so both write the child mirror identically.
+ */
+export async function createAfterRunTask(
+  tx: Tx,
+  runTask: Task<RunTaskInput, RunCheckpoint, RunTaskResult, object>,
+  planned: PlannedAfterRun,
+  options: {
+    readonly ownership: TaskOwnership;
+    /** Required for a conversation-owned child created outside a task commit. */
+    readonly conversationId?: ConversationId;
+    readonly history?: NewHistoryEvent;
+  },
+): Promise<TaskId> {
+  const childId = await tx.createTask(
+    runTask,
+    { runId: planned.record.id, record: planned.record, after: planned.link },
+    {
+      ownership: options.ownership,
+      ...(options.conversationId === undefined ? {} : { conversationId: options.conversationId }),
+    },
+  );
+  await writeRunState(tx, childId, planned.record, options.history ?? {
+    type: "run_started",
+    detail: planned.afterId,
+  });
+  await registerRun(tx, planned.record.id);
+  return childId;
 }

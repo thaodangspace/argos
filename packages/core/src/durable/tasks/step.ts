@@ -54,6 +54,11 @@ import {
 
 // ------------------------------------------------------------------ shape
 
+/** Same default as the Paseo executor's quota window (FR24: 15 min). */
+const DEFAULT_QUOTA_WINDOW_MS = 15 * 60_000;
+/** Never re-poll a blocked provider in a tight loop. */
+const MIN_QUOTA_WAIT_MS = 30_000;
+
 export type StepPhase = "locate" | "launch" | "await" | "collect";
 
 export interface StepTaskInput {
@@ -84,6 +89,12 @@ export interface StepTaskInput {
   readonly exhausted?: readonly ExhaustedTarget[];
   /** D8: `role.readonly` — snapshot before launch, refuse any change after the turn. */
   readonly readonly?: boolean;
+  /** `providers.exhausted_for`: how long an exhausted target is skipped (executor default if absent). */
+  readonly quotaWindowMs?: number;
+  /** `providers.on_exhausted`: `wait` parks the step until a target leaves its window; default `fail`. */
+  readonly onExhausted?: "fail" | "wait";
+  /** `providers.max_wait`: total quota wait budget of the step; absent = unbounded. */
+  readonly maxQuotaWaitMs?: number;
 }
 
 export interface StepCheckpointFields {
@@ -116,6 +127,10 @@ export interface StepCheckpointFields {
   readonly readonlyViolation?: SnapshotComparison;
   /** Human-readable reason for a failure; the run record only carries the stable code. */
   readonly detail?: string;
+  /** Fresh attempts started after a quota wait; they do not consume `retries`. */
+  readonly quotaRelaunches?: number;
+  /** When this step first parked on `provider_exhausted` (the `max_wait` clock). */
+  readonly quotaWaitSince?: number;
 }
 
 /**
@@ -260,6 +275,7 @@ function agentContext(input: StepTaskInput, checkpoint: StepCheckpoint) {
     ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
     ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
     ...(checkpoint.exhausted.length === 0 ? {} : { exhausted: checkpoint.exhausted }),
+    ...(input.quotaWindowMs === undefined ? {} : { quotaWindowMs: input.quotaWindowMs }),
   };
 }
 
@@ -314,7 +330,57 @@ function retryCheckpoint(
     // must not forget it (every attempt has to leave the tree alone).
     ...(checkpoint.snapshotBefore === undefined ? {} : { snapshotBefore: checkpoint.snapshotBefore }),
     ...(checkpoint.target === undefined ? {} : { target: checkpoint.target }),
+    ...(checkpoint.quotaRelaunches === undefined ? {} : { quotaRelaunches: checkpoint.quotaRelaunches }),
+    ...(checkpoint.quotaWaitSince === undefined ? {} : { quotaWaitSince: checkpoint.quotaWaitSince }),
   };
+}
+
+/** Local attempts that count against `retries` (quota relaunches are free, FR24). */
+function retryAttempts(checkpoint: StepCheckpoint): number {
+  return checkpoint.attempt - (checkpoint.quotaRelaunches ?? 0);
+}
+
+/**
+ * `providers.on_exhausted: wait`: instead of failing `provider_exhausted`, park until the first
+ * candidate leaves its exhaustion window and relaunch as a fresh attempt (new request id, so the
+ * archived quota agent is never adopted). Returns `undefined` when the step must fail: the policy
+ * is `fail`, the ledger is empty, or the wait would exceed `max_wait`.
+ */
+function quotaWait(
+  input: StepTaskInput,
+  checkpoint: StepCheckpoint,
+  status: StepAgentStatus,
+  now: number,
+): { readonly until: number; readonly checkpoint: StepCheckpoint } | undefined {
+  if (status.state !== "done" || status.errorCode !== "provider_exhausted") return undefined;
+  if (input.onExhausted !== "wait") return undefined;
+  const ledger = mergeExhausted(checkpoint.exhausted, status.exhausted ?? []);
+  const windowMs = input.quotaWindowMs ?? DEFAULT_QUOTA_WINDOW_MS;
+  const candidates = [...new Set([...(input.target === undefined ? [] : [input.target]), ...(input.targets ?? [])])];
+  const reopens = candidates.map((target) => {
+    const at = ledger.find((entry) => entry.target === target)?.at;
+    return at === undefined ? now : at + windowMs;
+  });
+  if (reopens.length === 0) return undefined;
+  const until = Math.max(now + MIN_QUOTA_WAIT_MS, Math.min(...reopens));
+  const since = checkpoint.quotaWaitSince ?? now;
+  if (input.maxQuotaWaitMs !== undefined && until - since > input.maxQuotaWaitMs) {
+    return undefined;
+  }
+  const attempt = checkpoint.attempt + 1;
+  const next: StepCheckpoint = {
+    ...retryCheckpoint(input, { ...checkpoint, exhausted: ledger }, now, attempt),
+    deadlineAt: until + input.timeoutMs,
+    quotaRelaunches: (checkpoint.quotaRelaunches ?? 0) + 1,
+    quotaWaitSince: since,
+    detail: `waiting for a provider quota window until ${new Date(until).toISOString()}${
+      status.feedback === undefined ? "" : ` (${status.feedback})`
+    }`,
+  };
+  // The fresh attempt launches the preferred target again, not whichever fallback ran last.
+  const reset: StepCheckpoint =
+    input.target === undefined ? next : { ...next, target: input.target };
+  return { until, checkpoint: reset };
 }
 
 // ------------------------------------------------------------------ definition
@@ -406,6 +472,14 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           if (runtime.signal.aborted) throw error;
           // Launch failed: record a step failure (with its stable code), not a task fault.
           const status = failureStatus(error);
+          const wait = quotaWait(task.input, checkpoint, status, now);
+          if (wait !== undefined) {
+            await runtime.commit(
+              () => ({ status: "sleeping", until: wait.until, checkpoint: wait.checkpoint }),
+              context,
+            );
+            return;
+          }
           await runtime.commit(
             () => ({ status: "running", checkpoint: doneCheckpoint(checkpoint, status) }),
             context,
@@ -445,9 +519,17 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
         }
 
         if (status.state === "done") {
+          const wait = quotaWait(task.input, checkpoint, status, now);
+          if (wait !== undefined) {
+            await runtime.commit(
+              () => ({ status: "sleeping", until: wait.until, checkpoint: wait.checkpoint }),
+              context,
+            );
+            return;
+          }
           const canRetry =
             status.errorCode === "invalid_output" &&
-            checkpoint.attempt < task.input.attempt + task.input.retries;
+            retryAttempts(checkpoint) < task.input.attempt + task.input.retries;
           if (canRetry) {
             // Schema-invalid output is retried like a timeout: a fresh agent attempt after a
             // deterministic backoff, bounded by `retries` (FR17).
@@ -480,7 +562,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
         };
 
         if (now >= running.deadlineAt) {
-          const canRetry = running.attempt < task.input.attempt + task.input.retries;
+          const canRetry = retryAttempts(running) < task.input.attempt + task.input.retries;
           if (!canRetry) {
             const timedOut: StepAgentStatus = { state: "done", errorCode: "step_timeout" };
             await runtime.commit(

@@ -94,6 +94,7 @@ argos gates                           # pending gates across runs
 argos decide <runId> <gateId> approved
 argos cancel <runId>
 argos retry <runId> <stepId>
+argos rm <runId>                      # delete a finished run (its worktree is kept)
 ```
 
 Every command supports `--json` with a stable shape. Exit codes: `0` success, `1` usage/runtime,

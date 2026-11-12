@@ -18,6 +18,7 @@
 
 import type {
   CancelRunResponse,
+  RemoveRunResponse,
   DecideGateRequest,
   GateDecisionResponse,
   GateSummary,
@@ -108,7 +109,7 @@ export function parseSseBlock(block: string): SseFrame | undefined {
 
 /**
  * The whole RPC surface the plugin uses (FR28). Deliberately smaller than the CLI client: no
- * retry, no info/doctor, no raw request. `listGates` is the pending-gate projection of `listRuns`.
+ * info/doctor, no raw request. `listGates` is the pending-gate projection of `listRuns`.
  */
 export interface ArgosRpc {
   readonly url: string;
@@ -123,6 +124,10 @@ export interface ArgosRpc {
   ): Promise<GateDecisionResponse>;
   startRun(body: StartRunRequest): Promise<StartRunResponse>;
   cancelRun(runId: string): Promise<CancelRunResponse>;
+  /** Delete a finished run (`DELETE /runs/:id`); a live run is refused with `run_terminal`. */
+  removeRun(runId: string): Promise<RemoveRunResponse>;
+  /** Reset `stepId` and everything downstream of it in a finished run, then resume the run. */
+  retryStep(runId: string, stepId: string): Promise<StartRunResponse>;
   openEvents: OpenEvents;
   /** Abort every event stream and refuse further calls. Safe to call twice. */
   close(): void;
@@ -131,6 +136,9 @@ export interface ArgosRpc {
 /** What the panel needs; a mocked object with these members satisfies it. */
 export type PanelRpc = Pick<ArgosRpc, "listRuns" | "decideGate" | "openEvents"> & {
   readonly cancelRun?: (runId: string) => Promise<unknown>;
+  readonly removeRun?: (runId: string) => Promise<unknown>;
+  readonly retryStep?: (runId: string, stepId: string) => Promise<unknown>;
+  readonly startRun?: (body: StartRunRequest) => Promise<StartRunResponse>;
   readonly close?: () => void;
 };
 
@@ -326,6 +334,10 @@ export function createArgosClient(options: CreateArgosClientOptions): ArgosRpc {
     startRun: (body) => request<StartRunResponse>("POST", "/runs", body),
     cancelRun: (runId) =>
       request<CancelRunResponse>("POST", `/runs/${encodeURIComponent(runId)}/cancel`, {}),
+    removeRun: (runId) =>
+      request<RemoveRunResponse>("DELETE", `/runs/${encodeURIComponent(runId)}`),
+    retryStep: (runId, stepId) =>
+      request<StartRunResponse>("POST", `/runs/${encodeURIComponent(runId)}/retry`, { stepId }),
     openEvents,
     close: () => {
       closed = true;

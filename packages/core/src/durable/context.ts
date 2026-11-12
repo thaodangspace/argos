@@ -79,6 +79,8 @@ export interface StepAgentContext {
   readonly outputDefs: Readonly<Record<string, OutputDefIR>>;
   /** Targets the run already recorded as quota-exhausted, with their exhaustion time (FR24). */
   readonly exhausted?: readonly ExhaustedTarget[];
+  /** How long an exhausted target is skipped (`providers.exhausted_for`); executor default if absent. */
+  readonly quotaWindowMs?: number;
 }
 
 /** Provider settings for the preferred target. */

@@ -20,6 +20,11 @@ import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, defineDocFamily, type TaskId, type Tx } from "@earendil-works/pi-durable";
 
 import type { GateChoiceRecord, GateKind, GateRecord, RunRecord } from "../engine/index.js";
+import { HISTORY_EVENT_TYPES, type HistoryEventType } from "../history.js";
+
+// The vocabulary is shared with the read model (`rpc/contracts.ts`); re-exported here so the
+// durable surface keeps exporting `HISTORY_EVENT_TYPES` from the same place as before.
+export { HISTORY_EVENT_TYPES, type HistoryEventType };
 
 /** D4 task/document kinds. */
 export const ARGOS_RUN_DOC_KIND = "argos.run";
@@ -398,22 +403,6 @@ export async function writeAfterStatus(
 }
 
 // ------------------------------------------------------------------ history document
-
-export const HISTORY_EVENT_TYPES = [
-  "run_started",
-  "select",
-  "dispatch",
-  "settle",
-  "gate",
-  "gate_decided",
-  "finish",
-  "effect_skipped",
-  "task_error",
-  "after_queued",
-  "after_start",
-  "retry",
-] as const;
-export type HistoryEventType = (typeof HISTORY_EVENT_TYPES)[number];
 
 /**
  * One history line. Optional fields are `null` rather than absent so the value satisfies Chord's

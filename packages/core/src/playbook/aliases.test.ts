@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { isArgosError } from "../errors.js";
-import { loadPlaybook } from "./load.js";
+import { loadPlaybook, type LoadWarning } from "./load.js";
 
 const FIXTURES = fileURLToPath(new URL("../../test/fixtures", import.meta.url));
 const ROOT = join(FIXTURES, "aliases");
@@ -54,6 +54,23 @@ describe("playbook compatibility aliases", () => {
       "delegate.work",
     ]);
     expect(loadPlaybook(ROOT, "aliases").hash).toBe(ir.hash);
+  });
+
+  it("pins the hash and warns about the deprecated spellings only (FR7.2, FR7.4)", () => {
+    const warnings: LoadWarning[] = [];
+    const loaded = loadPlaybook(ROOT, "aliases", { warnings });
+
+    // Strict keys and the warnings sink never move the IR hash.
+    expect(loaded.hash).toBe("6479f2932fa631c6e768469959b585f33104e434b40bbedba96fb9b73f15fcfa");
+    expect(loaded.hash).toBe(ir.hash);
+    expect(warnings.map((warning) => `${warning.stepId}:${warning.code}`)).toStrictEqual([
+      "review:alias_deprecated",
+      "work:alias_deprecated",
+      "work:alias_deprecated",
+    ]);
+    expect(warnings.every((warning) => warning.file.startsWith(ROOT))).toBe(true);
+    expect(warnings.map((warning) => warning.message).join("\n")).toContain('"poll_ms"');
+    expect(warnings.map((warning) => warning.message).join("\n")).toContain('"mode_id"');
   });
 
   it("rejects `use` inside an after-task", () => {

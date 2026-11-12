@@ -181,10 +181,70 @@ describe("write commands", () => {
     expectGolden("cancel.json", result.json);
   });
 
+  it("argos rm --json", async () => {
+    const result = await invoke(["rm", "run-1", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("rm.json", result.json);
+  });
+
+  it("argos rm (human) names the kept worktree", async () => {
+    const captured = capture();
+    const code = await runCli(["rm", "run-1"], captured.io);
+    expect(code).toBe(0);
+    expect(captured.stdout()).toContain("removed run run-1 (completed); worktree kept at /home/worktrees/run-1");
+  });
+
+  it("argos rm of an unknown run exits 1 with run_unknown", async () => {
+    const result = await invoke(["rm", "nope", "--json"]);
+    expect(result.code).toBe(1);
+  });
+
   it("argos retry --json", async () => {
     const result = await invoke(["retry", "run-1", "draft", "--json"]);
     expect(result.code).toBe(0);
     expectGolden("retry.json", result.json);
+  });
+});
+
+describe("argos worktree (FR4.6)", () => {
+  it("argos worktree rm --json keeps --force boolean and sends the contract body", async () => {
+    // `--force` comes before the run id: it must not swallow the positional.
+    const result = await invoke(["worktree", "rm", "--force", "run-1", "--delete-branch", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("worktree-rm.json", result.json);
+    const request = current().stub.requests.find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/runs/run-1/worktree/remove",
+    );
+    expect(request?.authorization).toBe(`Bearer ${current().stub.token}`);
+    expect(request?.body).toEqual({ force: true, deleteBranch: true });
+  });
+
+  it("argos worktree gc --json sends olderThan and dryRun", async () => {
+    const result = await invoke(["worktree", "gc", "--older-than", "24h", "--dry-run", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("worktree-gc.json", result.json);
+    const request = current().stub.requests.find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/worktrees/gc",
+    );
+    expect(request?.body).toEqual({ olderThan: "24h", dryRun: true });
+  });
+
+  it("exits 1 for a usage error (no --older-than, unknown option, extra run id)", async () => {
+    const missing = await invoke(["worktree", "gc", "--json"]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("--older-than");
+
+    const unknown = await invoke(["worktree", "rm", "run-1", "--nope", "--json"]);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain("unknown option --nope");
+
+    const extra = await invoke(["worktree", "rm", "run-1", "run-2", "--json"]);
+    expect(extra.code).toBe(1);
+    expect(extra.stderr).toContain("exactly one run id");
+
+    const noSub = await invoke(["worktree", "--json"]);
+    expect(noSub.code).toBe(1);
+    expect(noSub.stderr).toContain("worktree needs a sub-command");
   });
 });
 

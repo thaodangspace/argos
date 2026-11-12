@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import { ArgosHost } from "../../src/durable/host.js";
 import { resolveScriptPath, type ScriptCheckpoint } from "../../src/durable/tasks/script.js";
+import { isArgosError } from "../../src/errors.js";
 import type { RunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
@@ -454,6 +455,71 @@ describe("script steps: env filter (D10)", () => {
       repo.cleanup();
     }
   });
+
+  /** Run `env-keys.mjs` with `overrides` in the parent env and return the child's variable names. */
+  async function runEnvKeys(
+    id: string,
+    overrides: Readonly<Record<string, string>>,
+    grants: readonly string[] = [],
+  ): Promise<string[]> {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    installFixtureScript(repo.repo, "env-keys.mjs");
+    const clock = new FakeClock();
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      home,
+      clock,
+      executor: new FakeExecutor(),
+    });
+    const saved = Object.keys(overrides).map((name) => [name, process.env[name]] as const);
+    try {
+      Object.assign(process.env, overrides);
+      const { runId } = await host.startRun({
+        ir: scriptPlaybook({
+          script: "env-keys.mjs",
+          env: grants,
+          outputs: { stdout: { type: "string" } },
+        }),
+        inputs: {},
+        cwd: repo.repo,
+        id,
+      });
+      await waitForReal(async () => (await host.getRun(runId))?.record.status === "completed");
+      return await envKeys(host, runId);
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await host.close();
+      cleanup();
+      repo.cleanup();
+    }
+  }
+
+  it("omits a name the playbook never grants, even a harmless one (FR2.1)", async () => {
+    const keys = await runEnvKeys("run-script-env-ungranted", {
+      CARGO_HOME: "/home/tester/.cargo",
+      SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
+      NODE_OPTIONS: "--max-old-space-size=4096",
+    });
+    for (const name of ["CARGO_HOME", "SSH_AUTH_SOCK", "NODE_OPTIONS"]) {
+      expect(keys, name).not.toContain(name);
+    }
+    expect(keys).toContain("PATH");
+  });
+
+  it("never passes a deny-listed name, even when the step grants it (FR2.4)", async () => {
+    const keys = await runEnvKeys(
+      "run-script-env-denied",
+      { ARGOS_PASEO_PASSWORD: "daemon-password", ARGOS_PORT: "7676" },
+      ["ARGOS_PASEO_PASSWORD", "ARGOS_PORT"],
+    );
+    expect(keys).not.toContain("ARGOS_PASEO_PASSWORD");
+    expect(keys).not.toContain("ARGOS_PORT");
+    expect(keys).toContain("PATH");
+  });
 });
 
 describe("resolveScriptPath (FR22)", () => {
@@ -530,7 +596,7 @@ describe("resolveScriptPath (FR22)", () => {
 });
 
 describe("script steps: resolution", () => {
-  it("fails step_failed when the script does not exist, naming what was tried", async () => {
+  it("refuses the run with playbook_invalid when the script does not exist (FR3.2)", async () => {
     const repo = makeTempRepo();
     const { home, cleanup } = makeTempHome();
     const clock = new FakeClock();
@@ -541,20 +607,26 @@ describe("script steps: resolution", () => {
       executor: new FakeExecutor(),
     });
     try {
-      const { runId } = await host.startRun({
-        ir: scriptPlaybook({ script: "missing.mjs" }),
-        inputs: {},
-        cwd: repo.repo,
-        id: "run-script-missing",
-      });
-      await waitForReal(async () => (await host.getRun(runId))?.record.status === "failed");
-      const record = (await host.getRun(runId))?.record;
-      expect(record?.errorCode).toBe("step_failed");
-      expect(record?.steps["run"]?.errorCode).toBe("step_failed");
-      // Nothing ran: resolution failed before the executable was ever spawned.
-      const history = await host.getHistory(runId);
-      expect(history?.events.some((event) => event.type === "dispatch")).toBe(true);
-      expect(history?.events.some((event) => event.type === "finish")).toBe(true);
+      // Pinning happens before any task exists, so the refusal is synchronous (a rejected
+      // `startRun`) and names the step and every path that was tried.
+      const error = await host
+        .startRun({
+          ir: scriptPlaybook({ script: "missing.mjs" }),
+          inputs: {},
+          cwd: repo.repo,
+          id: "run-script-missing",
+        })
+        .then(
+          () => undefined,
+          (cause: unknown) => cause,
+        );
+      expect(isArgosError(error) && error.code).toBe("playbook_invalid");
+      expect(error instanceof Error ? error.message : "").toContain("step run");
+      expect(error instanceof Error ? error.message : "").toContain("missing.mjs");
+      // Nothing exists to run: no run task, no mirror, no history.
+      expect((await host.inspect()).tasks).toHaveLength(0);
+      expect(await host.getRun("run-script-missing")).toBeUndefined();
+      expect(await host.getHistory("run-script-missing")).toBeUndefined();
     } finally {
       await host.close();
       cleanup();

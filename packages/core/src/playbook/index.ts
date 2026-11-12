@@ -14,9 +14,13 @@ export {
   discoverScripts,
   loadPlaybook,
   type LoadOptions,
+  type LoadWarning,
   type PlaybookEntry,
+  type PlaybookOrigin,
   type RoleEntry,
   type ScriptEntry,
+  type WarningCode,
+  type WarningSink,
 } from "./load.js";
 export {
   DEFAULT_GATE_CHOICES,
@@ -52,6 +56,7 @@ export type {
   BranchIR,
   DeciderIR,
   DefaultsIR,
+  ProvidersIR,
   GateChoiceIR,
   GateIR,
   InputBindingIR,
