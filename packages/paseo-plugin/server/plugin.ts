@@ -15,8 +15,8 @@ import type {
 import type { PluginCleanup } from "@getpaseo/plugin";
 
 import type { ArgosRpc } from "../shared/rpc-client";
-import { ConnectionRpc } from "../shared/connection";
-import { createServerArgosClient, resolveArgosConnection } from "./connection";
+import { createServerArgosClient } from "./connection";
+import { registerArgosRpc } from "./rpc";
 import { appendArgosTools, argosTools } from "./tools";
 
 /** Name of the one hook the plugin registers. */
@@ -76,9 +76,9 @@ export function createArgosContribution(
     const removeHook = server.addHook(AGENT_OPEN_HOOK, async ({ request }) =>
       withArgosTools(request, runtime.tools),
     );
-    // The panel runs in the Paseo client bundle, which cannot read `$ARGOS_HOME/token`; this one
-    // handler hands it the loopback URL + token. The chat tools call `argos serve` directly.
-    server.handle(ConnectionRpc, () => resolveArgosConnection());
+    // The panel cannot reach `argos serve` directly (token file, CORS, remote hosts): it calls
+    // these handlers, which run on the daemon host and use the same client as the chat tools.
+    registerArgosRpc(server, runtime.client);
     let disposed = false;
     return async () => {
       if (disposed) return;

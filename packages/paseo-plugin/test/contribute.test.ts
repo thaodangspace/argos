@@ -4,10 +4,6 @@
  * second contribution, and tears down by removing the hook and closing **only** the HTTP client.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { describe, expect, it, vi } from "vitest";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
@@ -22,7 +18,7 @@ import {
   PluginRpcError,
   createArgosClient,
 } from "../shared/rpc-client";
-import { fakePluginServer, fakeRpc, sessionOpenRequest } from "./support.js";
+import { fakePluginServer, fakeRpc, makeRun, sessionOpenRequest } from "./support.js";
 
 const EXPECTED_TOOLS = [
   "argos_start_playbook",
@@ -58,52 +54,56 @@ describe("contribute (server half)", () => {
     await cleanup();
   });
 
-  it("hands the panel its loopback URL and token through argos.connection", async () => {
-    const home = mkdtempSync(join(tmpdir(), "argos-plugin-home-"));
-    const previousHome = process.env["ARGOS_HOME"];
-    const previousPort = process.env["ARGOS_PORT"];
-    try {
-      writeFileSync(join(home, "token"), "secret-token\n", { mode: 0o600 });
-      process.env["ARGOS_HOME"] = home;
-      process.env["ARGOS_PORT"] = "7811";
-      const server = fakePluginServer();
-      const cleanup = createArgosContribution({ createClient: () => fakeRpc() })(
-        asServer(server),
-      );
+  it("bridges the panel through the tools client with result envelopes", async () => {
+    const server = fakePluginServer();
+    const run = makeRun({ id: "run-1" });
+    const client = fakeRpc({ runs: [run] });
+    const cleanup = createArgosContribution({ createClient: () => client })(
+      asServer(server),
+    );
 
-      await expect(server.runHandler("argos.connection", {})).resolves.toEqual({
-        url: "http://127.0.0.1:7811",
-        token: "secret-token",
-      });
+    await expect(server.runHandler("argos.runs.list", {})).resolves.toEqual({
+      ok: true,
+      data: [run],
+    });
+    await expect(server.runHandler("argos.runs.cancel", { runId: "run-1" })).resolves.toEqual({
+      ok: true,
+      data: { runId: "run-1", status: "cancelled" },
+    });
+    await expect(
+      server.runHandler("argos.gates.decide", {
+        runId: "run-1",
+        gateId: "gate:1",
+        decision: "approve",
+      }),
+    ).resolves.toMatchObject({ ok: true, data: { decision: "approve" } });
 
-      await cleanup();
-    } finally {
-      if (previousHome === undefined) delete process.env["ARGOS_HOME"];
-      else process.env["ARGOS_HOME"] = previousHome;
-      if (previousPort === undefined) delete process.env["ARGOS_PORT"];
-      else process.env["ARGOS_PORT"] = previousPort;
-      rmSync(home, { recursive: true, force: true });
-    }
+    await cleanup();
   });
 
-  it("loads before argos serve exists and reports the actionable error on first use", async () => {
-    const previousHome = process.env["ARGOS_HOME"];
-    process.env["ARGOS_HOME"] = join(tmpdir(), "argos-missing-home-does-not-exist");
-    try {
-      const server = fakePluginServer();
-      // No `createClient`: the real lazy server client must not read the token at load time.
-      const cleanup = createArgosContribution()(asServer(server));
-      expect(server.hooks.map((hook) => hook.name)).toEqual([AGENT_OPEN_HOOK]);
+  it("keeps a stable Argos code when the server rejects a call", async () => {
+    const server = fakePluginServer();
+    const client = fakeRpc({
+      decideGate: async () => {
+        throw new PluginRpcError("gate_already_decided", "already decided", 409);
+      },
+    });
+    const cleanup = createArgosContribution({ createClient: () => client })(
+      asServer(server),
+    );
 
-      await expect(server.runHandler("argos.connection", {})).rejects.toThrow(
-        /start the server with `argos serve`/,
-      );
+    await expect(
+      server.runHandler("argos.gates.decide", {
+        runId: "run-1",
+        gateId: "gate:1",
+        decision: "approve",
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: "gate_already_decided", message: "already decided", status: 409 },
+    });
 
-      await cleanup();
-    } finally {
-      if (previousHome === undefined) delete process.env["ARGOS_HOME"];
-      else process.env["ARGOS_HOME"] = previousHome;
-    }
+    await cleanup();
   });
 
   it("replaces a stale Argos tool instead of duplicating it", async () => {
@@ -149,7 +149,11 @@ describe("contribute (server half)", () => {
     // One hook for the chat tools and one RPC handler that hands the panel its connection.
     expect(server.calls).toEqual([
       `addHook:${AGENT_OPEN_HOOK}`,
-      "handle:argos.connection",
+      "handle:argos.runs.list",
+      "handle:argos.runs.get",
+      "handle:argos.runs.start",
+      "handle:argos.runs.cancel",
+      "handle:argos.gates.decide",
     ]);
 
     await cleanup();
@@ -160,7 +164,11 @@ describe("contribute (server half)", () => {
     // Teardown touched nothing else on the server (no storage, no settings).
     expect(server.calls).toEqual([
       `addHook:${AGENT_OPEN_HOOK}`,
-      "handle:argos.connection",
+      "handle:argos.runs.list",
+      "handle:argos.runs.get",
+      "handle:argos.runs.start",
+      "handle:argos.runs.cancel",
+      "handle:argos.gates.decide",
     ]);
 
     // Idempotent: a second teardown neither re-removes the hook nor re-closes the client.

@@ -26,8 +26,15 @@ import {
   type StatusTone,
 } from "./shared/panel";
 import { useRpc } from "@getpaseo/plugin/client";
-import { ConnectionRpc } from "./shared/connection";
 import { acquirePanel, disposeAllPanels } from "./shared/panel-hub";
+import type { ArgosRpcCalls } from "./shared/rpc-bridge";
+import {
+  GateDecideRpc,
+  RunCancelRpc,
+  RunGetRpc,
+  RunStartRpc,
+  RunsListRpc,
+} from "./shared/rpc-api";
 
 export const ARGOS_SCREEN_ID = "argos";
 export const ARGOS_SIDEBAR_ITEM_ID = "argos";
@@ -55,39 +62,27 @@ function usePanel(panel: PanelStore): PanelModel {
 }
 
 /**
- * Resolve the Argos connection through the plugin's own server RPC, then lease the shared panel.
- * The Paseo client bundle cannot read `$ARGOS_HOME/token`; the plugin server can, so this keeps
- * the token out of the client bundle and still lets the panel talk HTTP/SSE to `argos serve`.
+ * Lease the shared panel over the plugin RPC channel. The Paseo client bundle never reads the
+ * token and never calls `argos serve` directly: the plugin's server half does both, so this works
+ * across remote hosts and browser CORS.
  */
 function useArgosPanel(): { readonly panel: PanelStore | null; readonly error: string | null } {
-  const fetchConnection = useRpc(ConnectionRpc);
+  const listRuns = useRpc(RunsListRpc);
+  const getRun = useRpc(RunGetRpc);
+  const startRun = useRpc(RunStartRpc);
+  const cancelRun = useRpc(RunCancelRpc);
+  const decideGate = useRpc(GateDecideRpc);
   const [state, setState] = useState<{
     readonly panel: PanelStore | null;
     readonly error: string | null;
   }>({ panel: null, error: null });
 
   useEffect(() => {
-    let active = true;
-    let release: (() => void) | undefined;
-    void fetchConnection({})
-      .then((connection) => {
-        if (!active) return;
-        const lease = acquirePanel(connection);
-        release = lease.release;
-        setState({ panel: lease.panel, error: null });
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        setState({
-          panel: null,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    return () => {
-      active = false;
-      release?.();
-    };
-  }, [fetchConnection]);
+    const calls: ArgosRpcCalls = { listRuns, getRun, startRun, cancelRun, decideGate };
+    const lease = acquirePanel(calls);
+    setState({ panel: lease.panel, error: null });
+    return () => lease.release();
+  }, [listRuns, getRun, startRun, cancelRun, decideGate]);
 
   return state;
 }

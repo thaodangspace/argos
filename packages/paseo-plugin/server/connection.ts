@@ -19,7 +19,11 @@ import {
   PluginRpcError,
   type ArgosRpc,
 } from "../shared/rpc-client";
-import type { ArgosConnection } from "../shared/connection";
+/** Loopback URL + bearer token for the tools client. */
+export interface ArgosConnection {
+  readonly url: string;
+  readonly token: string;
+}
 
 const DEFAULT_PORT = 7676;
 

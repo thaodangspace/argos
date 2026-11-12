@@ -116,10 +116,11 @@ paseo plugin logs argos                          # load errors, if any
 paseo plugin reload argos                        # after changing plugin source
 ```
 
-The Paseo daemon and `argos serve` must agree on `ARGOS_HOME`/`ARGOS_PORT`; the plugin's server half
-reads the token, and the panel gets `{url, token}` through the plugin's `argos.connection` RPC
-(the client bundle cannot read files). Because the engine lives in `argos serve`, reloading the
-plugin cannot kill a run; it reconnects to the same server and re-renders.
+The Paseo daemon and `argos serve` must agree on `ARGOS_HOME`/`ARGOS_PORT`. The plugin's server half
+reads the token; the chat tools call `argos serve` over HTTP, and the panel calls the plugin's RPC
+handlers (`argos.runs.list`, `argos.gates.decide`, …), which run beside the server. That is why the
+panel works across remote hosts even though `argos serve` binds `127.0.0.1`. Because the engine
+lives in `argos serve`, reloading the plugin cannot kill a run; it reconnects and re-renders.
 
 ## Isolation and read-only roles
 

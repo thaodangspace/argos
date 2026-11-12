@@ -517,22 +517,27 @@ test-only.
 
 ## Paseo plugin
 
-`packages/paseo-plugin` is a thin HTTP client: a sidebar row, a screen listing runs/steps/gates,
-and four chat tools. It never opens SQLite and keeps no run state, so a plugin reload cannot kill a
-run (the engine lives in `argos serve`).
+`packages/paseo-plugin` is a thin client: a sidebar row, a screen listing runs/steps/gates, and four
+chat tools. It never opens SQLite and keeps no run state, so a plugin reload cannot kill a run (the
+engine lives in `argos serve`). The **chat tools** call `argos serve` over HTTP from the plugin
+server (Node), while the **panel** calls the plugin server over Paseo RPC. That is deliberate: the
+client bundle cannot read `$ARGOS_HOME/token`, browser CORS would block a direct HTTP call, and the
+app may run on a different machine than the daemon.
 
 | File | Role |
 |---|---|
 | `paseo-plugin.json` | manifest: `id: argos`, `requirements.paseo: ">=0.15.3"` |
-| `index.server.ts` | default-exports `contribute(server)`; `agent.open.before` + `argos.connection`; teardown removes the hook and closes the client |
-| `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), theme tokens |
-| `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools`; registers the connection RPC |
+| `index.server.ts` | default-exports `contribute(server)`; `agent.open.before` + the panel RPC handlers; teardown removes the hook and closes the client |
+| `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), theme tokens, `useRpc()` |
+| `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` |
 | `server/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
 | `server/connection.ts` | Node-only: resolves `ARGOS_HOME`/`ARGOS_PORT` + token, builds the tools client |
-| `shared/rpc-client.ts` | portable `createArgosClient({url, token})`; `PluginRpcError`, SSE parser/opener |
+| `server/rpc.ts` | panel RPC handlers (`argos.runs.*`, `argos.gates.decide`) over the same client |
+| `shared/rpc-api.ts` | zod RPC contracts + `{ok, data}` / `{ok:false, error}` result envelope |
+| `shared/rpc-bridge.ts` | panel `ArgosRpc` over RPC: unwraps envelopes, polls snapshots every 2 s |
+| `shared/rpc-client.ts` | portable `createArgosClient({url, token})` for the tools/HTTP path |
 | `shared/panel.ts` | pure panel model, `loadPanel`, `decideGateOnce`, `subscribeRuns`, `runView` |
-| `shared/panel-hub.ts` | one ref-counted panel per connection (sidebar + screen share one SSE stream) |
-| `shared/connection.ts` | `argos.connection` plugin RPC contract (`{url, token}`) |
+| `shared/panel-hub.ts` | one ref-counted panel per plugin instance (sidebar + screen share one poll loop) |
 | `shared/identity.ts` | `PLUGIN_ID`, `REQUIRED_PASEO_VERSION` |
 
 Tool names (exact): `argos_start_playbook` (`POST /runs`; playbook errors render as
@@ -540,16 +545,17 @@ Tool names (exact): `argos_start_playbook` (`POST /runs`; playbook errors render
 `argos_cancel_run`. Tools never throw; failures become `{error:{code,message}}`. A start call
 generates a `clientRequestId` unless supplied.
 
-`createArgosContribution({createClient?})` is the test seam. One call creates one runtime,
-registers exactly one `agent.open.before` hook that appends the tools, and registers the
-`argos.connection` RPC. Teardown removes that hook and closes the client (aborting streams). No
+`createArgosContribution({createClient?})` is the test seam. One call creates one runtime, registers
+exactly one `agent.open.before` hook that appends the tools, and registers the panel RPCs
+(`argos.runs.list`, `argos.runs.get`, `argos.runs.start`, `argos.runs.cancel`,
+`argos.gates.decide`). Teardown removes the hook and closes the client (aborting streams). No
 settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token`
-lazily on first tool use (a plugin reload before `argos serve` still loads); the **client** panel
-cannot read files, so it calls `argos.connection` through
-`useRpc()` and receives `{url, token}`. That keeps the server's bearer auth intact (FR27) without a
-Node builtin in the client bundle. The panel publishes an in-flight model before deciding (buttons
-disable), calls `decideGate` exactly once, treats an already-decided gate as refresh-without-retry,
-and reconnects SSE with capped exponential backoff (1 s doubling to 8 s).
+lazily on first use (a plugin reload before `argos serve` still loads). RPC results are envelopes,
+so stable codes such as `gate_already_decided` reach the panel unchanged. The panel publishes an
+in-flight model before deciding (buttons disable), calls `decideGate` exactly once, treats an
+already-decided gate as refresh-without-retry, and reconnects with capped exponential backoff (1 s
+doubling to 8 s). Since Paseo RPC has no server push, `shared/rpc-bridge.ts` polls
+`argos.runs.list` every 2 s and feeds the panel the same `snapshot` frames the SSE endpoint uses.
 
 **Install (Paseo 0.15.4):** start `argos serve` first (it creates `$ARGOS_HOME/token`), then
 `paseo plugin install /Users/dt/code/github.com/argos/packages/paseo-plugin`. Paseo bundles the

@@ -1,13 +1,14 @@
 /**
- * One panel store per Argos connection, shared by the sidebar row and the screen. Both are mounted
- * at the same time, so a naive `createPanel()` per component would open two SSE streams; this
- * small ref-counted hub keeps one stream and disposes it when both contributions unmount.
+ * One panel store per Paseo plugin instance, shared by the sidebar row and the screen. Both are
+ * mounted at the same time, so a naive `createPanel()` per component would poll twice; this small
+ * ref-counted hub keeps one poll loop and disposes it when both contributions unmount.
  *
- * No React and no Node APIs: the panel model and the HTTP client are portable modules.
+ * No React and no Node APIs: the panel model and the RPC bridge are portable modules.
  */
 
 import { createPanel, type PanelStore } from "./panel";
-import { createArgosClient, type ArgosRpc } from "./rpc-client";
+import { createRpcClientBridge, type ArgosRpcCalls } from "./rpc-bridge";
+import type { ArgosRpc } from "./rpc-client";
 
 export interface PanelLease {
   readonly panel: PanelStore;
@@ -22,16 +23,12 @@ interface Entry {
 
 const entries = new Map<string, Entry>();
 
-function keyOf(connection: { readonly url: string; readonly token: string }): string {
-  return `${connection.url}\n${connection.token}`;
-}
-
-/** Acquire the shared panel for a connection. Every call must be paired with `release()`. */
-export function acquirePanel(connection: { readonly url: string; readonly token: string }): PanelLease {
-  const key = keyOf(connection);
+/** Acquire the shared panel. Every call must be paired with `release()`. */
+export function acquirePanel(calls: ArgosRpcCalls): PanelLease {
+  const key = "argos";
   let entry = entries.get(key);
   if (entry === undefined) {
-    const client = createArgosClient(connection);
+    const client = createRpcClientBridge(calls);
     const panel = createPanel({ client });
     panel.start();
     void panel.load();
