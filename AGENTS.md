@@ -528,7 +528,7 @@ app may run on a different machine than the daemon.
 |---|---|
 | `paseo-plugin.json` | manifest: `id: argos`, `requirements.paseo: ">=0.15.3"` |
 | `index.server.ts` | default-exports `contribute(server)`; `agent.open.before` + the panel RPC handlers; teardown removes the hook and closes the client |
-| `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), theme tokens, `useRpc()` |
+| `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), `SidebarRow` with the Lucide `Workflow` icon, theme tokens, `useRpc()` |
 | `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` |
 | `server/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
 | `server/connection.ts` | Node-only: resolves `ARGOS_HOME`/`ARGOS_PORT` + token, builds the tools client |

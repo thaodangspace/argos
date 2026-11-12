@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { PLUGIN_ID, REQUIRED_PASEO_VERSION } from "../shared/identity";
+import { ARGOS_SIDEBAR_ICON, PLUGIN_ID, REQUIRED_PASEO_VERSION } from "../shared/identity";
 import contribute from "../index.server.js";
 
 /** The manifest fields the loader reads. `version` is ours (Paseo ignores it). */
@@ -63,6 +63,7 @@ describe("paseo-plugin.json", () => {
   });
 
   it("ships a server entry with a default contribution function", () => {
+    expect(ARGOS_SIDEBAR_ICON).toBe("Workflow");
     expect(typeof contribute).toBe("function");
     expect(contribute.length).toBe(1);
   });

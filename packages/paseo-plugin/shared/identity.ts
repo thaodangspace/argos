@@ -6,3 +6,6 @@ export const PLUGIN_ID = "argos";
 
 /** Minimum Paseo version required by this plugin (spec FR28/D2). */
 export const REQUIRED_PASEO_VERSION = ">=0.15.3";
+
+/** Lucide icon shown by the sidebar row (a workflow graph). */
+export const ARGOS_SIDEBAR_ICON = "Workflow";

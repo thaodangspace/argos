@@ -26,6 +26,8 @@ import {
   type StatusTone,
 } from "./shared/panel";
 import { useRpc } from "@getpaseo/plugin/client";
+import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import { ARGOS_SIDEBAR_ICON } from "./shared/identity";
 import { acquirePanel, disposeAllPanels } from "./shared/panel-hub";
 import type { ArgosRpcCalls } from "./shared/rpc-bridge";
 import {
@@ -324,44 +326,56 @@ function ArgosScreenView({ theme, panel }: { theme: PluginTheme; panel: PanelSto
   );
 }
 
+function ArgosSidebarTrailing({
+  theme,
+  running,
+  pendingGates,
+  error,
+}: {
+  theme: PluginTheme;
+  running: number;
+  pendingGates: number;
+  error: boolean;
+}) {
+  return (
+    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      {error ? <Pill theme={theme} label="not running" tone="danger" /> : null}
+      {running === 0 ? null : <Pill theme={theme} label={`${running} running`} tone="success" />}
+      {pendingGates === 0 ? null : (
+        <Pill theme={theme} label={`${pendingGates} waiting`} tone="warning" />
+      )}
+    </span>
+  );
+}
+
 function ArgosSidebarView({
   theme,
   panel,
   openScreen,
+  currentScreen,
 }: {
   theme: PluginTheme;
   panel: PanelStore;
   openScreen: PluginSidebarItemProps["openScreen"];
+  currentScreen: PluginSidebarItemProps["currentScreen"];
 }) {
   const view = panelView(usePanel(panel));
   return (
-    <button
-      type="button"
-      onClick={() => {
+    <SidebarRow
+      icon={ARGOS_SIDEBAR_ICON}
+      active={currentScreen?.screenId === ARGOS_SCREEN_ID}
+      onPress={() => {
         openScreen({ screenId: ARGOS_SCREEN_ID });
       }}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        width: "100%",
-        background: "transparent",
-        color: theme.colors.foreground,
-        border: "none",
-        padding: "4px 6px",
-        cursor: "pointer",
-        fontSize: 12,
-      }}
-    >
-      <span>Argos</span>
-      {view.error === null ? null : (
-        <Pill theme={theme} label="Argos server not running" tone="danger" />
-      )}
-      {view.running === 0 ? null : <Pill theme={theme} label={`${view.running} running`} tone="success" />}
-      {view.pendingGates === 0 ? null : (
-        <Pill theme={theme} label={`${view.pendingGates} waiting`} tone="warning" />
-      )}
-    </button>
+      trailing={
+        <ArgosSidebarTrailing
+          theme={theme}
+          running={view.running}
+          pendingGates={view.pendingGates}
+          error={view.error !== null}
+        />
+      }
+    />
   );
 }
 
@@ -371,38 +385,34 @@ function ArgosScreen({ theme }: PluginScreenProps) {
   return <ArgosScreenView theme={theme} panel={panel} />;
 }
 
-function ArgosSidebar({ theme, openScreen }: PluginSidebarItemProps) {
+function ArgosSidebar({ theme, openScreen, currentScreen }: PluginSidebarItemProps) {
   const { panel, error } = useArgosPanel();
   if (panel === null) {
     return (
-      <button
-        type="button"
-        onClick={() => {
+      <SidebarRow
+        icon={ARGOS_SIDEBAR_ICON}
+        active={currentScreen?.screenId === ARGOS_SCREEN_ID}
+        onPress={() => {
           openScreen({ screenId: ARGOS_SCREEN_ID });
         }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          width: "100%",
-          background: "transparent",
-          color: theme.colors.foreground,
-          border: "none",
-          padding: "4px 6px",
-          cursor: "pointer",
-          fontSize: 12,
-        }}
-      >
-        <span>Argos</span>
-        <Pill
-          theme={theme}
-          label={error === null ? "connecting" : "server not running"}
-          tone={error === null ? "neutral" : "danger"}
-        />
-      </button>
+        trailing={
+          <Pill
+            theme={theme}
+            label={error === null ? "connecting" : "not running"}
+            tone={error === null ? "neutral" : "danger"}
+          />
+        }
+      />
     );
   }
-  return <ArgosSidebarView theme={theme} panel={panel} openScreen={openScreen} />;
+  return (
+    <ArgosSidebarView
+      theme={theme}
+      panel={panel}
+      openScreen={openScreen}
+      currentScreen={currentScreen}
+    />
+  );
 }
 
 /** Install the sidebar row and the screen; both are removed (and the client closed) on cleanup. */
