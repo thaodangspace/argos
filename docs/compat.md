@@ -21,6 +21,7 @@ npm run test:e2e   # the two real-process scenarios
 | Behavior | paseo-playbooks | Evidence |
 |---|---|---|
 | Discovery roots | `.argos/playbooks/*.yaml` first, then `.paseo/plugins/playbooks/*.yaml`; the first root wins an id collision. Roles/defaults/scripts follow the same fallback. | `packages/core/src/playbook/load.ts`; `test/fixtures/compat/.paseo/plugins/playbooks/` loads via the fallback in `src/playbook/load.test.ts` |
+| Global library | When a caller passes a home (`$ARGOS_HOME`), `<home>/playbooks/*.yaml`, `<home>/roles/<id>/role.yaml`, `<home>/defaults/main.yaml`, and `<home>/scripts/<name>` are searched **after** both repo roots; the repo copy wins an id collision and defaults stay whole-file (first existing file wins, home last, no per-field merge). Sub-playbooks use the same order. Omitting the home keeps discovery repo-only, so no real `~/.argos` leaks into a caller that did not ask for it. Upstream has no global library. | `packages/core/src/playbook/load.ts`; `src/playbook/load.test.ts` (`global workflows in $ARGOS_HOME`); `test/durable/scripts.test.ts`; `packages/cli/test/validate.test.ts` |
 | Playbook id | File name without the extension (`pr.yaml` → `pr`). | `src/playbook/load.test.ts` (`discoverPlaybooks`) |
 | Extensions | `.yaml` and `.yml`; other files ignored. | `src/playbook/load.ts` |
 | Definition freeze | The fully resolved IR + `playbookHash` is stored in the run checkpoint; restarting a run never reloads the file. | `test/durable/run-checkpoint.test.ts`; `src/engine/record.ts` |

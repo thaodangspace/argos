@@ -278,6 +278,28 @@ describe("POST /runs (FR26, D15)", () => {
     const list = await call(harness.base, "GET", "/runs");
     expect((list.body as { runs: RunSummary[] }).runs).toHaveLength(0);
   });
+
+  it("loads a global playbook from the home the server was opened with", async () => {
+    const harness = await startHarness(new FakeExecutor({ completeAfterPolls: 1 }));
+    // The repository has no playbooks at all: only the server's home can satisfy the id.
+    const repo = registerRepo(makeTempHome());
+    mkdirSync(join(harness.home.home, "playbooks"), { recursive: true });
+    writeFileSync(
+      join(harness.home.home, "playbooks", "global.yaml"),
+      'title: Global\nsteps:\n  - id: a\n    prompt: Do the work.\n',
+      "utf8",
+    );
+
+    const started = await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "global", cwd: repo },
+    });
+    expect(started.status, started.text).toBe(201);
+    const { runId } = started.body as { runId: string };
+    const detail = await waitForStatus(harness, runId, "completed");
+    expect(detail.playbookId).toBe("global");
+    // The run works in the project, never in the home that holds the library.
+    expect(detail.cwd).toBe(repo);
+  });
 });
 
 describe("GET /runs (FR26)", () => {

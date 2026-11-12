@@ -598,7 +598,11 @@ function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispat
  * worktree when isolated); `scriptRoot` is where `.argos/scripts` is resolved from, so a local
  * uncommitted helper can drive an isolated run while still working on the private checkout.
  */
-function scriptInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): ScriptTaskInput | undefined {
+function scriptInputFor(
+  record: RunRecord,
+  effect: Extract<Effect, { type: "dispatchStep" }>,
+  home: string | undefined,
+): ScriptTaskInput | undefined {
   const definition = stepDefinition(record, effect.stepId);
   const script = definition?.script;
   if (definition === undefined || script === undefined) return undefined;
@@ -609,6 +613,7 @@ function scriptInputFor(record: RunRecord, effect: Extract<Effect, { type: "disp
     requestId: effect.requestId,
     cwd: record.worktree?.path ?? record.cwd,
     scriptRoot: record.cwd,
+    ...(home === undefined ? {} : { scriptHome: home }),
     script: script.run,
     env: script.env,
     pollMs: definition.pollMs,
@@ -620,11 +625,15 @@ function scriptInputFor(record: RunRecord, effect: Extract<Effect, { type: "disp
 }
 
 /** Choose the child task kind for one dispatch effect (`script` steps never reach the executor). */
-function dispatchPlanFor(record: RunRecord, effect: Extract<Effect, { type: "dispatchStep" }>): DispatchPlan | undefined {
+function dispatchPlanFor(
+  record: RunRecord,
+  effect: Extract<Effect, { type: "dispatchStep" }>,
+  home: string | undefined,
+): DispatchPlan | undefined {
   const definition = stepDefinition(record, effect.stepId);
   if (definition === undefined) return undefined;
   if (definition.kind === "script") {
-    const input = scriptInputFor(record, effect);
+    const input = scriptInputFor(record, effect, home);
     return input === undefined ? undefined : { kind: "script", input };
   }
   const input = stepInputFor(record, effect);
@@ -730,6 +739,11 @@ export interface RunTaskOptions {
   readonly stepTask: StepTaskDefinition;
   readonly scriptTask: ScriptTaskDefinition;
   readonly gateTask: GateTaskDefinition;
+  /**
+   * `$ARGOS_HOME`, threaded like the executor so a global script under `<home>/scripts` resolves.
+   * Never stored on the record: the frozen IR and every checkpoint stay unchanged.
+   */
+  readonly home?: string;
 }
 
 /**
@@ -801,7 +815,7 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   stepTask: options.stepTask,
                   scriptTask: options.scriptTask,
                   gateTask: options.gateTask,
-                  dispatch: (effect) => dispatchPlanFor(tick.record, effect),
+                  dispatch: (effect) => dispatchPlanFor(tick.record, effect, options.home),
                 },
                 tick.record,
                 tick.effects,
@@ -933,7 +947,7 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   stepTask: options.stepTask,
                   scriptTask: options.scriptTask,
                   gateTask: options.gateTask,
-                  dispatch: (effect) => dispatchPlanFor(record, effect),
+                  dispatch: (effect) => dispatchPlanFor(record, effect, options.home),
                 },
                 record,
                 effects,

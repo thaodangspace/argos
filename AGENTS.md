@@ -169,8 +169,15 @@ condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` 
 `hash.ts` (canonical JSON + sha256), `ir.ts` (the frozen JSON IR the rest of Argos consumes).
 
 - Discovery: `.argos/playbooks/*.yaml` then `.paseo/plugins/playbooks/*.yaml` (same fallback for
-  `roles/`, `defaults/main.yaml`, `scripts/`); playbook id = filename. `loadPlaybook(repoDir, id)`
-  returns a deep-frozen `PlaybookIR` with `hash`; it never writes.
+  `roles/`, `defaults/main.yaml`, `scripts/`); playbook id = filename. An optional `home`
+  (`loadPlaybook(repoDir, id, { home })`, and the same last argument on `discoverPlaybooks`,
+  `discoverRoles`, `discoverScripts`, `defaultsFile`) appends `<home>/playbooks`,
+  `<home>/roles`, `<home>/defaults/main.yaml`, and `<home>/scripts` **after** both repo roots; the
+  repo copy wins an id collision and the first existing defaults file wins whole-file (no per-field
+  merge). Omitting `home` keeps discovery repo-only. `POST /runs` passes the host home and
+  `argos validate` passes `--home` (else `ARGOS_HOME`, else `~/.argos`); a script step carries it as
+  `ScriptTaskInput.scriptHome` and still executes in the run cwd/worktree, never in the home.
+  `loadPlaybook(repoDir, id)` returns a deep-frozen `PlaybookIR` with `hash`; it never writes.
 - Aliases normalized: `poll_ms` | `pollMs` | `poll` → `pollMs` (D3 defaults 3000/2000/5000);
   `mode` | `mode_id` → `modeId`; `playbook: {name}` | `playbook: <id>` | `use: <id>` → sub-playbook;
   flat `gate`/`choices`/`script` and paseo block forms both load; `goto` accepts a bare id with

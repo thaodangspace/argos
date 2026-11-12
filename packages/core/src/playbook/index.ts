@@ -1,6 +1,10 @@
 export { canonicalJson, playbookHash, sha256Hex } from "./hash.js";
 export {
   DEFAULTS_FILES,
+  HOME_DEFAULTS_FILE,
+  HOME_PLAYBOOK_DIR,
+  HOME_ROLE_DIR,
+  HOME_SCRIPT_DIR,
   PLAYBOOK_DIRS,
   ROLE_DIRS,
   SCRIPT_DIRS,

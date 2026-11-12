@@ -21,9 +21,10 @@
  *
  * Resolution: `<script>` must be a bare file name (no `/`, no `..`, not absolute). It is looked up
  * in `.argos/scripts/` and then in the paseo-compatible `.paseo/plugins/playbooks/scripts/` of the
- * run's repository root, and it must be an executable regular file. Resolution uses the repository
- * root so an isolated run can still run a local, uncommitted helper; *execution* uses the
- * worktree, so the script sees the run's private checkout.
+ * run's repository root, and last in `<ARGOS_HOME>/scripts` when the host was opened with a home.
+ * It must be an executable regular file. Resolution uses the repository root so an isolated run can
+ * still run a local, uncommitted helper; *execution* uses the worktree, so the script sees the
+ * run's private checkout (a global script never runs inside `$ARGOS_HOME`).
  *
  * Outputs a script can expose, and only when the IR declares them: `stdout` and `stderr` (bounded
  * tails of the last run), `exitCode` / `exit_code` (number), and `runs` (number of executions, so
@@ -36,7 +37,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { defineTask } from "@earendil-works/pi-durable";
 
@@ -50,7 +51,7 @@ import {
   type SnapshotComparison,
 } from "../../git/snapshot.js";
 import { tail, type GitRunner } from "../../git/exec.js";
-import { SCRIPT_DIRS } from "../../playbook/load.js";
+import { HOME_SCRIPT_DIR, SCRIPT_DIRS } from "../../playbook/load.js";
 import type { Scalar } from "../../playbook/ir.js";
 import type { StepTaskResult } from "../context.js";
 
@@ -74,6 +75,8 @@ export interface ScriptTaskInput {
   readonly cwd: string;
   /** Repository root the `.argos/scripts` directory is resolved from. */
   readonly scriptRoot: string;
+  /** `$ARGOS_HOME`; `<home>/scripts` is the last place a script name is looked in. */
+  readonly scriptHome?: string;
   /** Script name from the frozen IR (`script: <name>`). */
   readonly script: string;
   /** Env keys the playbook declares in `env: [...]` (D10 allowlist). */
@@ -141,8 +144,10 @@ function appendTail(current: string, chunk: string): string {
 /**
  * Resolve `<name>` to an executable in the repository's script directories, or throw a
  * `step_failed` {@link ArgosError} explaining what was tried. Rejects any path escape.
+ * `scriptHome` adds `<home>/scripts` **after** the repository roots; the script still executes in
+ * the run cwd or worktree, never in the home.
  */
-export function resolveScriptPath(scriptRoot: string, name: string): string {
+export function resolveScriptPath(scriptRoot: string, name: string, scriptHome?: string): string {
   const rejected = (reason: string): ArgosError =>
     new ArgosError("step_failed", `script ${JSON.stringify(name)}: ${reason}`);
   if (name === "") throw rejected("the script name is empty");
@@ -153,8 +158,10 @@ export function resolveScriptPath(scriptRoot: string, name: string): string {
   if (name === "." || name === "..") throw rejected("path traversal is not allowed");
 
   const tried: string[] = [];
-  for (const directory of SCRIPT_DIRS) {
-    const candidate = join(scriptRoot, directory, name);
+  const directories = SCRIPT_DIRS.map((directory) => join(scriptRoot, directory));
+  if (scriptHome !== undefined) directories.push(join(resolve(scriptHome), HOME_SCRIPT_DIR));
+  for (const directory of directories) {
+    const candidate = join(directory, name);
     tried.push(candidate);
     let stats;
     try {
@@ -365,7 +372,11 @@ export function createScriptTaskDefinition(options: ScriptTaskOptions = {}) {
 
         let scriptPath: string;
         try {
-          scriptPath = resolveScriptPath(task.input.scriptRoot, task.input.script);
+          scriptPath = resolveScriptPath(
+            task.input.scriptRoot,
+            task.input.script,
+            task.input.scriptHome,
+          );
         } catch (error) {
           await runtime.commit(
             () => ({ status: "running", checkpoint: fail(messageOf(error)) }),

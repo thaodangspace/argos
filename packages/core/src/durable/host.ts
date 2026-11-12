@@ -307,6 +307,12 @@ export class ArgosHost {
     const context = BACKGROUND_CONTEXT;
     const models = options.models ?? createStubModels();
 
+    // `$ARGOS_HOME` is known before any task exists: the run task threads it to script children,
+    // so a global script under `<home>/scripts` resolves without touching the run record.
+    const home =
+      options.storage !== undefined ? options.home : (options.home ?? argosHome());
+    let ownsPid = false;
+
     const stepTask = createStepTaskDefinition({
       executor: options.executor,
       ...(options.git === undefined ? {} : { git: options.git }),
@@ -315,7 +321,12 @@ export class ArgosHost {
     const scriptTask = createScriptTaskDefinition({
       ...(options.git === undefined ? {} : { git: options.git }),
     });
-    const runTask = createRunTaskDefinition({ stepTask, scriptTask, gateTask });
+    const runTask = createRunTaskDefinition({
+      stepTask,
+      scriptTask,
+      gateTask,
+      ...(home === undefined ? {} : { home }),
+    });
     const registry = createRegistry();
     registry.install(
       defineExtension({
@@ -324,26 +335,24 @@ export class ArgosHost {
       }),
     );
 
-    let home: string | undefined;
-    let ownsPid = false;
     let storage: Storage;
 
     if (options.storage !== undefined) {
       storage = options.storage;
-      if (options.home !== undefined) {
-        home = options.home;
+      if (home !== undefined) {
         acquirePidFile(home);
         ownsPid = true;
       }
     } else {
-      home = options.home ?? argosHome();
-      acquirePidFile(home);
+      // No injected storage, so `home` was resolved above.
+      const ownedHome = home ?? argosHome();
+      acquirePidFile(ownedHome);
       ownsPid = true;
       try {
-        storage = await openNodeSqliteStorage(dbPath(home));
-        enforceStorageModes(home);
+        storage = await openNodeSqliteStorage(dbPath(ownedHome));
+        enforceStorageModes(ownedHome);
       } catch (error) {
-        if (ownsPid) releasePidFile(home);
+        if (ownsPid) releasePidFile(ownedHome);
         throw error;
       }
     }

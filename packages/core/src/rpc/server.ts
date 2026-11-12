@@ -611,8 +611,9 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         const body = StartRunRequestSchema.parse(await readJson(req, maxBodyBytes));
         const cwd = body.cwd ?? options.cwd ?? process.cwd();
         // The loader is read-only and runs before `startRun`, so an invalid playbook never
-        // creates a task (FR12).
-        const ir = loadPlaybook(cwd, body.playbookId);
+        // creates a task (FR12). The host's home is where `argos serve` was opened, so global
+        // playbooks under `<home>/playbooks` resolve even when `--home` differs from `ARGOS_HOME`.
+        const ir = loadPlaybook(cwd, body.playbookId, { home });
         const inputs = prepareInputs(ir, body.inputs ?? {});
         const started = await options.host.startRun({
           ir,

@@ -5,7 +5,7 @@
  * between fake-clock advances; nothing here touches the network or a Paseo daemon.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { MemoryStorage, type TaskInspection } from "@earendil-works/pi-durable";
@@ -490,6 +490,43 @@ describe("resolveScriptPath (FR22)", () => {
       repo.cleanup();
     }
   });
+
+  it("falls back to <home>/scripts, and the repository executable still wins", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    try {
+      const global = join(home, "scripts", "global.mjs");
+      mkdirSync(join(home, "scripts"), { recursive: true });
+      writeFileSync(global, "#!/usr/bin/env node\n", { mode: 0o755 });
+      chmodSync(global, 0o755);
+
+      expect(() => resolveScriptPath(repo.repo, "global.mjs")).toThrow(/not found/);
+      expect(resolveScriptPath(repo.repo, "global.mjs", home)).toBe(global);
+
+      const local = writeScript(repo.repo, "global.mjs", "#!/usr/bin/env node\n");
+      expect(resolveScriptPath(repo.repo, "global.mjs", home)).toBe(local);
+    } finally {
+      cleanup();
+      repo.cleanup();
+    }
+  });
+
+  it("keeps rejecting absolute and traversal names when a home is supplied", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    try {
+      mkdirSync(join(home, "scripts"), { recursive: true });
+      for (const name of ["/bin/sh", "../escape.sh", "sub/tool.mjs", "..", "."]) {
+        expect(() => resolveScriptPath(repo.repo, name, home), name).toThrow(/script/);
+      }
+      expect(() => resolveScriptPath(repo.repo, "absent.mjs", home)).toThrow(
+        join(home, "scripts", "absent.mjs"),
+      );
+    } finally {
+      cleanup();
+      repo.cleanup();
+    }
+  });
 });
 
 describe("script steps: resolution", () => {
@@ -518,6 +555,56 @@ describe("script steps: resolution", () => {
       const history = await host.getHistory(runId);
       expect(history?.events.some((event) => event.type === "dispatch")).toBe(true);
       expect(history?.events.some((event) => event.type === "finish")).toBe(true);
+    } finally {
+      await host.close();
+      cleanup();
+      repo.cleanup();
+    }
+  });
+});
+
+describe("script steps: global scripts in $ARGOS_HOME", () => {
+  it("runs a script that exists only under <home>/scripts, in the run cwd", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    const clock = new FakeClock();
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      home,
+      clock,
+      executor: new FakeExecutor(),
+    });
+    try {
+      mkdirSync(join(home, "scripts"), { recursive: true });
+      const script = join(home, "scripts", "global.mjs");
+      writeFileSync(
+        script,
+        [
+          "#!/usr/bin/env node",
+          "process.stdout.write(`cwd=${process.cwd()}\\n`);",
+          "process.exit(0);",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      chmodSync(script, 0o755);
+
+      const { runId } = await host.startRun({
+        ir: scriptPlaybook({
+          script: "global.mjs",
+          outputs: { stdout: { type: "string" }, exitCode: { type: "number" } },
+        }),
+        inputs: {},
+        cwd: repo.repo,
+        id: "run-script-global",
+      });
+      await waitForReal(async () => (await host.getRun(runId))?.record.status === "completed");
+      const record = (await host.getRun(runId))?.record;
+      expect(record?.status).toBe("completed");
+      const stdout = String(record?.steps["run"]?.outputs["stdout"] ?? "");
+      // The executable comes from the home; it still executes in the project, never in the home.
+      expect(stdout).toContain(`cwd=${realpathSync(repo.repo)}`);
+      expect(stdout).not.toContain(`cwd=${realpathSync(home)}`);
     } finally {
       await host.close();
       cleanup();

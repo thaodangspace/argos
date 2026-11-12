@@ -2,7 +2,8 @@
  * `argos validate [path]` (FR25, FR12) — loader only: no server, no SQLite, no side effects.
  *
  * With no argument it validates every playbook discovered under the current directory (the same
- * `.argos/playbooks` / `.paseo/plugins/playbooks` roots the engine uses). A file argument is
+ * `.argos/playbooks` / `.paseo/plugins/playbooks` roots the engine uses) plus the global library in
+ * `$ARGOS_HOME/playbooks` (`--home`, else `ARGOS_HOME`, else `~/.argos`). A file argument is
  * validated as that exact file, with the repository root inferred from the standard directory
  * layout; a directory argument is treated as a repository root, unless it is itself a playbooks
  * directory or a loose folder of YAML files. Every error keeps its file and step id, and the
@@ -12,7 +13,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 
-import { errorLocation, isArgosError } from "argos-core";
+import { argosHome, errorLocation, isArgosError } from "argos-core";
 import {
   discoverPlaybooks,
   loadPlaybook,
@@ -21,7 +22,7 @@ import {
 import type { ValidateError, ValidatePlaybook, ValidateReport } from "argos-core/rpc";
 
 import type { ParsedArgs } from "../args.js";
-import { rejectUnknownFlags } from "../args.js";
+import { flag, rejectUnknownFlags } from "../args.js";
 import {
   EXIT_OK,
   EXIT_RUNTIME,
@@ -69,7 +70,10 @@ function yamlFiles(directory: string): string[] {
     .sort();
 }
 
-function candidatesFor(target: string): { repoDir: string; candidates: Candidate[] } {
+function candidatesFor(
+  target: string,
+  home: string,
+): { repoDir: string; candidates: Candidate[] } {
   const absolute = resolve(target);
   if (!existsSync(absolute)) {
     throw new Error(`path not found: ${target}`);
@@ -85,7 +89,7 @@ function candidatesFor(target: string): { repoDir: string; candidates: Candidate
   if (!info.isDirectory()) {
     throw new Error(`not a file or directory: ${target}`);
   }
-  const discovered = discoverPlaybooks(absolute);
+  const discovered = discoverPlaybooks(absolute, home);
   if (discovered.length > 0) {
     return {
       repoDir: absolute,
@@ -109,15 +113,19 @@ function displayPath(repoDir: string, file: string): string {
 export function validatePlaybooks(
   pathArg: string | undefined,
   cwd: string = process.cwd(),
+  home: string = argosHome(),
 ): ValidationResult {
   const root = resolve(cwd);
   const { repoDir, candidates } =
     pathArg === undefined
       ? {
           repoDir: root,
-          candidates: discoverPlaybooks(root).map((entry) => ({ entry, explicit: false })),
+          candidates: discoverPlaybooks(root, home).map((entry) => ({
+            entry,
+            explicit: false,
+          })),
         }
-      : candidatesFor(resolve(root, pathArg));
+      : candidatesFor(resolve(root, pathArg), home);
 
   const playbooks: ValidatePlaybook[] = [];
   const errors: ValidateError[] = [];
@@ -126,7 +134,7 @@ export function validatePlaybooks(
       const ir = loadPlaybook(
         repoDir,
         candidate.entry.id,
-        candidate.explicit ? { file: candidate.entry.file } : {},
+        candidate.explicit ? { file: candidate.entry.file, home } : { home },
       );
       playbooks.push({
         id: ir.id,
@@ -154,7 +162,7 @@ export function validatePlaybooks(
 }
 
 export function validateCommand(args: ParsedArgs, io: CliIo): number {
-  const unknown = rejectUnknownFlags(args, []);
+  const unknown = rejectUnknownFlags(args, ["home"]);
   if (unknown !== undefined) {
     io.stderr(`argos: ${unknown}\n`);
     return EXIT_RUNTIME;
@@ -163,9 +171,13 @@ export function validateCommand(args: ParsedArgs, io: CliIo): number {
     io.stderr("argos: validate takes at most one path\n");
     return EXIT_RUNTIME;
   }
+  // Same precedence as `argos serve`: `--home`, else `ARGOS_HOME`, else `~/.argos`, so a local
+  // check and a running server agree on the global playbook library.
+  const homeFlag = flag(args, "home");
+  const home = resolve(homeFlag ?? argosHome());
   let result: ValidationResult;
   try {
-    result = validatePlaybooks(args.positionals[0], process.cwd());
+    result = validatePlaybooks(args.positionals[0], process.cwd(), home);
   } catch (error) {
     io.stderr(`argos: ${error instanceof Error ? error.message : String(error)}\n`);
     return EXIT_RUNTIME;

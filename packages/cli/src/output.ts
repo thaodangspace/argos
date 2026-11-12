@@ -104,7 +104,7 @@ export function classifyFailure(error: unknown): {
 export const USAGE = `argos — durable YAML playbooks for Paseo agents
 
 Usage:
-  argos validate [path] [--json]
+  argos validate [path] [--home dir] [--json]
   argos run <playbook> [--input k=v ...] [--cwd dir] [--isolation none|worktree] [--json]
   argos ls [--json]
   argos status <runId> [--json]
