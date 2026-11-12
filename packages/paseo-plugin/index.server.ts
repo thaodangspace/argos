@@ -8,7 +8,7 @@
 
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
-import { createArgosContribution } from "./src/plugin.js";
+import { createArgosContribution } from "./server/plugin";
 
 export {
   AGENT_OPEN_HOOK,
@@ -17,13 +17,13 @@ export {
   withArgosTools,
   type ArgosContributionOptions,
   type ArgosRuntime,
-} from "./src/plugin.js";
+} from "./server/plugin";
 export {
   ARGOS_TOOL_NAMES,
   appendArgosTools,
   argosTools,
   type ArgosToolName,
-} from "./src/tools.js";
+} from "./server/tools";
 export {
   ARGOS_NOT_RUNNING_MESSAGE,
   ARGOS_SERVER_CLOSED,
@@ -31,7 +31,7 @@ export {
   createArgosClient,
   PluginRpcError,
   type ArgosRpc,
-} from "./src/rpc-client.js";
+} from "./shared/rpc-client";
 
 const contribute = createArgosContribution();
 

@@ -22,9 +22,9 @@ import type {
 import type { ArgosHostOptions } from "argos-core/rpc/server";
 import { ArgosHost, createRpcServer, type RpcServer } from "argos-core/rpc/server";
 
-import { createArgosContribution } from "../src/plugin.js";
-import { createArgosClient, type ArgosRpc } from "../src/rpc-client.js";
-import { createPanel, type PanelStore } from "../src/panel.js";
+import { createArgosContribution } from "../server/plugin";
+import { createArgosClient, type ArgosRpc } from "../shared/rpc-client";
+import { createPanel, type PanelStore } from "../shared/panel";
 import { fakePluginServer, sessionOpenRequest } from "./support.js";
 
 const PLAYBOOK = `title: Plugin reload
@@ -123,7 +123,7 @@ interface PluginInstance {
 
 /** One plugin lifetime: a fresh HTTP client, a panel, and the contribution's teardown. */
 async function createPlugin(harness: Harness): Promise<PluginInstance> {
-  const client = createArgosClient({ home: harness.home, url: harness.server.url, token: harness.server.token });
+  const client = createArgosClient({ url: harness.server.url, token: harness.server.token });
   const panel = createPanel({ client });
   const fake = fakePluginServer();
   const cleanup = createArgosContribution({ createClient: () => client })(

@@ -1,13 +1,13 @@
 /**
  * Import-graph guard (FR28, plan Phase 9 verification): the plugin is a thin RPC client.
  *
- * No file under `src/` or either entry point may reach storage, git, the Paseo adapter, the durable
+ * No file under `server/` or `shared/` (nor either entry point) may reach storage, git, the Paseo adapter, the durable
  * host, the RPC *server*, SQLite, or the filesystem API. The only `argos-core` subpath allowed is
  * `argos-core/rpc` (contracts + client), which itself imports no durable code.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -25,7 +25,9 @@ function sourceFiles(directory: string): string[] {
 }
 
 const pluginSources = [
-  ...sourceFiles(join(pluginRoot, "src")),
+  ...sourceFiles(join(pluginRoot, "server")),
+  ...sourceFiles(join(pluginRoot, "shared")),
+  ...sourceFiles(join(pluginRoot, "client")),
   join(pluginRoot, "index.server.ts"),
   join(pluginRoot, "index.client.tsx"),
 ];
@@ -56,13 +58,16 @@ describe("plugin import graph", () => {
       /^argos-core$/,
       /^@earendil-works\//,
       /^node:sqlite$/,
-      /^node:fs/,
       /^node:child_process$/,
     ];
     const offenders: string[] = [];
     for (const file of pluginSources) {
+      // Only the server half may touch the filesystem (it reads `$ARGOS_HOME/token`); the shared
+      // and client bundles run inside Paseo and must stay portable.
+      const serverOnly = file.includes(`${pluginRoot}server${sep}`);
       for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
         if (specifier.startsWith(".")) continue;
+        if (serverOnly && /^node:fs/.test(specifier)) continue;
         for (const pattern of forbidden) {
           if (pattern.test(specifier)) offenders.push(`${file}: ${specifier}`);
         }
@@ -76,7 +81,9 @@ describe("plugin import graph", () => {
     for (const file of pluginSources) {
       for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
         if (!specifier.startsWith("argos-core")) continue;
-        if (specifier !== "argos-core/rpc") offenders.push(`${file}: ${specifier}`);
+        if (!/^argos-core\/rpc(\/contracts)?$/.test(specifier)) {
+          offenders.push(`${file}: ${specifier}`);
+        }
       }
     }
     expect(offenders).toEqual([]);
@@ -84,7 +91,7 @@ describe("plugin import graph", () => {
 
   it("keeps its non-relative imports to the Paseo SDK, React, zod, and the RPC contract", () => {
     const allowed = [
-      /^argos-core\/rpc$/,
+      /^argos-core\/rpc(\/contracts)?$/,
       /^@getpaseo\//,
       /^react$/,
       /^zod$/,

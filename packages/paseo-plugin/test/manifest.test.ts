@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { PLUGIN_ID, REQUIRED_PASEO_VERSION } from "../src/index.js";
+import { PLUGIN_ID, REQUIRED_PASEO_VERSION } from "../shared/identity";
 import contribute from "../index.server.js";
 
 /** The manifest fields the loader reads. `version` is ours (Paseo ignores it). */

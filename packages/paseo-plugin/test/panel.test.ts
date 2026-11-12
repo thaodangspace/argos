@@ -18,12 +18,12 @@ import {
   sortRuns,
   subscribeRuns,
   type PanelModel,
-} from "../src/panel.js";
+} from "../shared/panel";
 import {
   ARGOS_SERVER_UNREACHABLE,
   PluginRpcError,
   type SseHandlers,
-} from "../src/rpc-client.js";
+} from "../shared/rpc-client";
 import { fakeRpc, fakeStream, makeGate, makeRun, makeStep } from "./support.js";
 
 function pendingRun(): ReturnType<typeof makeRun> {

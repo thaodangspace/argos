@@ -7,8 +7,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentToolDefinition } from "@getpaseo/plugin/server";
 
-import { ARGOS_TOOL_NAMES, argosTools, appendArgosTools } from "../src/tools.js";
-import { ARGOS_SERVER_UNREACHABLE, PluginRpcError } from "../src/rpc-client.js";
+import { ARGOS_TOOL_NAMES, argosTools, appendArgosTools } from "../server/tools";
+import { ARGOS_SERVER_UNREACHABLE, PluginRpcError } from "../shared/rpc-client";
 import { fakeRpc, makeGate, makeRun, makeRunDetail, makeStep } from "./support.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

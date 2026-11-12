@@ -1,11 +1,11 @@
 /**
  * The plugin's HTTP client for `argos serve` (FR28, D2).
  *
- * This is the **only** module that opens a connection, and it opens exactly one kind: HTTP to the
- * loopback RPC server. It never imports `argos-core/durable`, `argos-core/git`, `argos-core/paseo`,
- * `@earendil-works/*`, `node:sqlite`, or `node:fs` (the token is read by `argos-core/rpc`, which
- * owns the `$ARGOS_HOME/token` convention). That is what lets a plugin reload leave a run alive:
- * the plugin has no durable state to lose.
+ * This module is deliberately **portable**: it runs in the daemon (server tools) and in the Paseo
+ * client (panel), so it imports no Node builtins and reads no files. The caller supplies the base
+ * URL and bearer token: `server/connection.ts` resolves them from the environment/token file, and
+ * `index.client.tsx` asks the plugin's own server RPC for them. The plugin never opens SQLite and
+ * keeps no run state, which is what lets a reload leave a run alive (FR29).
  *
  * Two behaviours are load-bearing:
  *
@@ -16,19 +16,16 @@
  *    to; `close()` aborts it. The server is the source of truth; the plugin keeps no state machine.
  */
 
-import {
-  createRpcClient,
-  readTokenFile,
-  RpcClientError,
-  type CancelRunResponse,
-  type DecideGateRequest,
-  type GateDecisionResponse,
-  type GateSummary,
-  type RunDetail,
-  type RunSummary,
-  type StartRunRequest,
-  type StartRunResponse,
-} from "argos-core/rpc";
+import type {
+  CancelRunResponse,
+  DecideGateRequest,
+  GateDecisionResponse,
+  GateSummary,
+  RunDetail,
+  RunSummary,
+  StartRunRequest,
+  StartRunResponse,
+} from "argos-core/rpc/contracts";
 
 /** Connection refused / no server listening: rendered as "Argos server not running". */
 export const ARGOS_SERVER_UNREACHABLE = "argos_server_unreachable";
@@ -60,15 +57,9 @@ export class PluginRpcError extends Error {
     return this.code === ARGOS_SERVER_UNREACHABLE || this.code === ARGOS_SERVER_CLOSED;
   }
 
-  /** Normalize anything thrown by the contract client into one typed plugin error. */
+  /** Normalize anything thrown by this client into one typed plugin error. */
   static from(error: unknown): PluginRpcError {
     if (error instanceof PluginRpcError) return error;
-    if (error instanceof RpcClientError) {
-      if (error.unreachable) {
-        return new PluginRpcError(ARGOS_SERVER_UNREACHABLE, ARGOS_NOT_RUNNING_MESSAGE, 0);
-      }
-      return new PluginRpcError(error.code, error.message, error.status);
-    }
     const message = error instanceof Error ? error.message : String(error);
     return new PluginRpcError("internal_error", message, 0);
   }
@@ -116,12 +107,11 @@ export function parseSseBlock(block: string): SseFrame | undefined {
 // ------------------------------------------------------------------ surface
 
 /**
- * The whole RPC surface the plugin uses (FR28). Deliberately smaller than `RpcClient`: no retry,
- * no info/doctor, no raw request. `listGates` is the pending-gate projection of `listRuns`.
+ * The whole RPC surface the plugin uses (FR28). Deliberately smaller than the CLI client: no
+ * retry, no info/doctor, no raw request. `listGates` is the pending-gate projection of `listRuns`.
  */
 export interface ArgosRpc {
   readonly url: string;
-  readonly home: string;
   readonly closed: boolean;
   listRuns(): Promise<RunSummary[]>;
   getRun(runId: string): Promise<RunDetail>;
@@ -145,38 +135,44 @@ export type PanelRpc = Pick<ArgosRpc, "listRuns" | "decideGate" | "openEvents"> 
 };
 
 export interface CreateArgosClientOptions {
-  /** `$ARGOS_HOME` override (the token lives here); default `ARGOS_HOME` / `~/.argos`. */
-  readonly home?: string;
-  /** `ARGOS_PORT` override; default 7676 (D2). */
-  readonly port?: number;
-  /** Full base URL; wins over `port`. */
-  readonly url?: string;
-  /** Bearer token override; default `$ARGOS_HOME/token`. */
-  readonly token?: string;
+  /** Base URL of `argos serve`, e.g. `http://127.0.0.1:7676`. */
+  readonly url: string;
+  /** Bearer token from `$ARGOS_HOME/token`. */
+  readonly token: string;
   /** Injectable fetch (tests). */
   readonly fetch?: typeof globalThis.fetch;
+  /** Per-request timeout; default 30 s. */
+  readonly timeoutMs?: number;
 }
 
-function tokenMessage(home: string): string {
-  return `no Argos token at ${home}/token; start the server with \`argos serve\``;
+interface ErrorEnvelope {
+  readonly error?: { readonly code?: unknown; readonly message?: unknown };
+}
+
+function errorFrom(status: number, body: unknown): PluginRpcError {
+  const envelope = body as ErrorEnvelope | undefined;
+  const code =
+    typeof envelope?.error?.code === "string"
+      ? envelope.error.code
+      : status === 401
+        ? "unauthorized"
+        : "internal_error";
+  const message =
+    typeof envelope?.error?.message === "string"
+      ? envelope.error.message
+      : `the Argos server answered HTTP ${status}`;
+  return new PluginRpcError(code, message, status);
 }
 
 /**
- * Create the plugin's RPC client. `ARGOS_PORT` and the token file are resolved once, when the
- * plugin is loaded: a reload is a new client (D2 — there is no discovery protocol in v1).
+ * Create the plugin's RPC client. The caller resolves the URL and token once, when the plugin is
+ * loaded: a reload is a new client (D2 — there is no discovery protocol in v1).
  */
-export function createArgosClient(options: CreateArgosClientOptions = {}): ArgosRpc {
-  const rpc = createRpcClient({
-    ...(options.home === undefined ? {} : { home: options.home }),
-    ...(options.port === undefined ? {} : { port: options.port }),
-    ...(options.url === undefined ? {} : { url: options.url }),
-    ...(options.token === undefined ? {} : { token: options.token }),
-    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-  });
-  const url = rpc.baseUrl;
-  const home = rpc.home;
-  const token = options.token ?? readTokenFile(home);
+export function createArgosClient(options: CreateArgosClientOptions): ArgosRpc {
+  const url = options.url.replace(/\/+$/, "");
+  const token = options.token;
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? 30_000;
   const streams = new Set<{ readonly controller: AbortController }>();
   let closed = false;
 
@@ -186,11 +182,55 @@ export function createArgosClient(options: CreateArgosClientOptions = {}): Argos
     }
   };
 
+  const request = async <T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> => {
+    assertOpen();
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+    timer.unref?.();
+    try {
+      const headers: Record<string, string> = {
+        accept: "application/json",
+        authorization: `Bearer ${token}`,
+      };
+      if (body !== undefined) headers["content-type"] = "application/json";
+      const response = await fetchImpl(`${url}${path}`, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      let parsed: unknown;
+      try {
+        parsed = text === "" ? undefined : JSON.parse(text);
+      } catch {
+        parsed = undefined;
+      }
+      if (!response.ok) throw errorFrom(response.status, parsed);
+      return parsed as T;
+    } catch (error) {
+      if (error instanceof PluginRpcError) throw error;
+      if (controller.signal.aborted && !closed) {
+        throw new PluginRpcError(ARGOS_SERVER_UNREACHABLE, ARGOS_NOT_RUNNING_MESSAGE, 0);
+      }
+      throw new PluginRpcError(
+        closed ? ARGOS_SERVER_CLOSED : ARGOS_SERVER_UNREACHABLE,
+        closed ? "the Argos client is closed" : ARGOS_NOT_RUNNING_MESSAGE,
+        0,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const openEvents: OpenEvents = (handlers) => {
     assertOpen();
-    if (token === undefined) {
-      throw new PluginRpcError("unauthorized", tokenMessage(home), 401);
-    }
     const controller = new AbortController();
     const entry = { controller };
     streams.add(entry);
@@ -266,28 +306,26 @@ export function createArgosClient(options: CreateArgosClientOptions = {}): Argos
     };
   };
 
-  const call = async <T>(run: () => Promise<T>): Promise<T> => {
-    assertOpen();
-    try {
-      return await run();
-    } catch (error) {
-      throw PluginRpcError.from(error);
-    }
-  };
-
   return {
     url,
-    home,
     get closed(): boolean {
       return closed;
     },
-    listRuns: () => call(async () => (await rpc.listRuns()).runs),
-    getRun: (runId) => call(() => rpc.getRun(runId)),
-    listGates: () =>
-      call(async () => (await rpc.listPendingGates()).gates),
-    decideGate: (runId, gateId, body) => call(() => rpc.decideGate(runId, gateId, body)),
-    startRun: (body) => call(() => rpc.startRun(body)),
-    cancelRun: (runId) => call(() => rpc.cancelRun(runId)),
+    listRuns: async () => (await request<{ runs: RunSummary[] }>("GET", "/runs")).runs,
+    getRun: (runId) => request<RunDetail>("GET", `/runs/${encodeURIComponent(runId)}`),
+    listGates: async () => {
+      const { runs } = await request<{ runs: RunSummary[] }>("GET", "/runs");
+      return runs.flatMap((run) => run.gates.filter((gate) => gate.status === "pending"));
+    },
+    decideGate: (runId, gateId, body) =>
+      request<GateDecisionResponse>(
+        "POST",
+        `/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}`,
+        body,
+      ),
+    startRun: (body) => request<StartRunResponse>("POST", "/runs", body),
+    cancelRun: (runId) =>
+      request<CancelRunResponse>("POST", `/runs/${encodeURIComponent(runId)}/cancel`, {}),
     openEvents,
     close: () => {
       closed = true;

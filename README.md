@@ -104,8 +104,21 @@ Every command supports `--json` with a stable shape. Exit codes: `0` success, `1
 `packages/paseo-plugin` is a thin HTTP client of `argos serve` (manifest `id: argos`, requires
 Paseo `>=0.15.3`). It adds a sidebar row/panel for runs, step statuses, and pending gates, plus the
 chat tools `argos_start_playbook`, `argos_run_status`, `argos_decide_gate`, and
-`argos_cancel_run`. Install the `packages/paseo-plugin` directory through Paseo's plugin install
-flow (it contains `paseo-plugin.json`). Because the engine lives in `argos serve`, reloading the
+`argos_cancel_run`.
+
+Install it from the directory (Paseo bundles the TypeScript source itself):
+
+```sh
+argos serve                                      # first: creates $ARGOS_HOME/token
+paseo plugin install /path/to/argos/packages/paseo-plugin
+paseo plugin ls                                  # argos should be "running"
+paseo plugin logs argos                          # load errors, if any
+paseo plugin reload argos                        # after changing plugin source
+```
+
+The Paseo daemon and `argos serve` must agree on `ARGOS_HOME`/`ARGOS_PORT`; the plugin's server half
+reads the token, and the panel gets `{url, token}` through the plugin's `argos.connection` RPC
+(the client bundle cannot read files). Because the engine lives in `argos serve`, reloading the
 plugin cannot kill a run; it reconnects to the same server and re-renders.
 
 ## Isolation and read-only roles

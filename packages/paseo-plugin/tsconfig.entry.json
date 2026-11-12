@@ -8,6 +8,6 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["index.server.ts", "src/**/*.ts"],
+  "include": ["index.server.ts", "server/**/*.ts", "shared/**/*.ts"],
   "exclude": []
 }

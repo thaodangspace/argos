@@ -23,7 +23,7 @@ import {
   type RunSummary,
   type StepKind,
   type StepStatus,
-} from "argos-core/rpc";
+} from "argos-core/rpc/contracts";
 
 import {
   PluginRpcError,
@@ -31,7 +31,7 @@ import {
   type OpenEvents,
   type PanelRpc,
   type SseFrame,
-} from "./rpc-client.js";
+} from "./rpc-client";
 
 /** Tone names the client maps onto `theme.colors` (`statusSuccess`, `statusDanger`, …). */
 export type StatusTone = "neutral" | "accent" | "success" | "warning" | "danger";

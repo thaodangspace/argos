@@ -6,13 +6,15 @@
   "description": "Paseo plugin surface for Argos runs and gates",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/shared/identity.d.ts",
+      "import": "./dist/shared/identity.js"
     }
   },
   "files": [
     "dist",
-    "src",
+    "server",
+    "shared",
+    "client",
     "index.server.ts",
     "index.client.tsx",
     "paseo-plugin.json"

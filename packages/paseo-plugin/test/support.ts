@@ -21,7 +21,7 @@ import {
   type OpenEvents,
   type SseFrame,
   type SseHandlers,
-} from "../src/rpc-client.js";
+} from "../shared/rpc-client";
 
 // ------------------------------------------------------------------ builders
 
@@ -217,12 +217,15 @@ export interface FakePluginServer {
   readonly calls: string[];
   /** Calls the hook handler the plugin registered (the last still-registered one). */
   runOpen(request: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** Calls a registered plugin RPC handler by contract name. */
+  runHandler(name: string, input?: unknown): Promise<unknown>;
   readonly removeCount: () => number;
 }
 
 /** Minimal `PluginServerContext`: only `addHook` is real; every other member records its name. */
 export function fakePluginServer(): FakePluginServer {
   const hooks: { name: string; handler: HookHandler; removed: boolean }[] = [];
+  const handlers = new Map<string, (input: unknown) => unknown>();
   const calls: string[] = [];
   let removals = 0;
   const server = {
@@ -235,9 +238,9 @@ export function fakePluginServer(): FakePluginServer {
         entry.removed = true;
       };
     },
-    handle() {
-      calls.push("handle");
-      throw new Error("the Argos plugin registers no RPC handlers");
+    handle(contract: { readonly name: string }, handler: (input: unknown) => unknown) {
+      calls.push(`handle:${contract.name}`);
+      handlers.set(contract.name, handler);
     },
     registerSettings() {
       calls.push("registerSettings");
@@ -267,6 +270,11 @@ export function fakePluginServer(): FakePluginServer {
       const entry = [...hooks].reverse().find((hook) => !hook.removed);
       if (entry === undefined) throw new Error("no registered agent.open.before hook");
       return (await entry.handler({ request } as never)) as Record<string, unknown>;
+    },
+    runHandler: async (name, input) => {
+      const handler = handlers.get(name);
+      if (handler === undefined) throw new Error(`no registered handler for ${name}`);
+      return await handler(input);
     },
   } as FakePluginServer;
 }

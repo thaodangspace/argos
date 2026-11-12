@@ -37,6 +37,10 @@
       "types": "./dist/rpc/index.d.ts",
       "import": "./dist/rpc/index.js"
     },
+    "./rpc/contracts": {
+      "types": "./dist/rpc/contracts.d.ts",
+      "import": "./dist/rpc/contracts.js"
+    },
     "./rpc/server": {
       "types": "./dist/rpc/server.d.ts",
       "import": "./dist/rpc/server.js"

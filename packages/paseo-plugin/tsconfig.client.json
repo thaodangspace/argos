@@ -11,6 +11,6 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["node", "react"]
   },
-  "include": ["index.client.tsx", "src/**/*.ts"],
+  "include": ["index.client.tsx", "client/**/*.ts", "client/**/*.tsx", "shared/**/*.ts"],
   "exclude": []
 }

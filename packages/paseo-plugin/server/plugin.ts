@@ -14,8 +14,10 @@ import type {
 } from "@getpaseo/plugin/server";
 import type { PluginCleanup } from "@getpaseo/plugin";
 
-import { createArgosClient, type ArgosRpc } from "./rpc-client.js";
-import { appendArgosTools, argosTools } from "./tools.js";
+import type { ArgosRpc } from "../shared/rpc-client";
+import { ConnectionRpc } from "../shared/connection";
+import { createServerArgosClient, resolveArgosConnection } from "./connection";
+import { appendArgosTools, argosTools } from "./tools";
 
 /** Name of the one hook the plugin registers. */
 export const AGENT_OPEN_HOOK = "agent.open.before" as const;
@@ -29,7 +31,7 @@ export interface ArgosRuntime {
 
 /** One plugin instance: its client, its tools, and nothing else. */
 export function createArgosRuntime(options: { readonly client?: ArgosRpc } = {}): ArgosRuntime {
-  const client = options.client ?? createArgosClient();
+  const client = options.client ?? createServerArgosClient();
   const tools = argosTools(client);
   let closed = false;
   return {
@@ -74,6 +76,9 @@ export function createArgosContribution(
     const removeHook = server.addHook(AGENT_OPEN_HOOK, async ({ request }) =>
       withArgosTools(request, runtime.tools),
     );
+    // The panel runs in the Paseo client bundle, which cannot read `$ARGOS_HOME/token`; this one
+    // handler hands it the loopback URL + token. The chat tools call `argos serve` directly.
+    server.handle(ConnectionRpc, () => resolveArgosConnection());
     let disposed = false;
     return async () => {
       if (disposed) return;

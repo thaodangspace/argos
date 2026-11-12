@@ -3,7 +3,7 @@
  *
  * Two contributions only: a sidebar row that shows the compact status (running runs + pending
  * gates) and a screen that lists runs with their steps and pending-gate buttons. All logic lives in
- * `src/panel.ts`; this file is rendering plus theme tokens from `@getpaseo/plugin/client` props.
+ * `shared/panel.ts`; this file is rendering plus theme tokens from `@getpaseo/plugin/client` props.
  *
  * The panel is a read/project view of `argos serve`: a decision button calls the store exactly
  * once, the button disables while the call is in flight, and a failure shows the stable error code.
@@ -18,15 +18,16 @@ import type {
 import type { PluginCleanup, PluginTheme } from "@getpaseo/plugin";
 
 import {
-  createPanel,
   panelView,
   type GateView,
   type PanelModel,
   type PanelStore,
   type PanelView,
   type StatusTone,
-} from "./src/panel.js";
-import { createArgosClient } from "./src/rpc-client.js";
+} from "./shared/panel";
+import { useRpc } from "@getpaseo/plugin/client";
+import { ConnectionRpc } from "./shared/connection";
+import { acquirePanel, disposeAllPanels } from "./shared/panel-hub";
 
 export const ARGOS_SCREEN_ID = "argos";
 export const ARGOS_SIDEBAR_ITEM_ID = "argos";
@@ -51,6 +52,52 @@ function usePanel(panel: PanelStore): PanelModel {
   const [model, setModel] = useState<PanelModel>(() => panel.getModel());
   useEffect(() => panel.subscribe(setModel), [panel]);
   return model;
+}
+
+/**
+ * Resolve the Argos connection through the plugin's own server RPC, then lease the shared panel.
+ * The Paseo client bundle cannot read `$ARGOS_HOME/token`; the plugin server can, so this keeps
+ * the token out of the client bundle and still lets the panel talk HTTP/SSE to `argos serve`.
+ */
+function useArgosPanel(): { readonly panel: PanelStore | null; readonly error: string | null } {
+  const fetchConnection = useRpc(ConnectionRpc);
+  const [state, setState] = useState<{
+    readonly panel: PanelStore | null;
+    readonly error: string | null;
+  }>({ panel: null, error: null });
+
+  useEffect(() => {
+    let active = true;
+    let release: (() => void) | undefined;
+    void fetchConnection({})
+      .then((connection) => {
+        if (!active) return;
+        const lease = acquirePanel(connection);
+        release = lease.release;
+        setState({ panel: lease.panel, error: null });
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setState({
+          panel: null,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return () => {
+      active = false;
+      release?.();
+    };
+  }, [fetchConnection]);
+
+  return state;
+}
+
+function LoadingPanel({ theme, error }: { theme: PluginTheme; error: string | null }) {
+  return (
+    <div style={{ color: theme.colors.foregroundMuted, padding: 12, fontSize: 12 }}>
+      {error ?? "Connecting to Argos…"}
+    </div>
+  );
 }
 
 function Pill({
@@ -147,7 +194,7 @@ function GateCard({
   );
 }
 
-function ArgosScreen({ theme, panel }: { theme: PluginTheme; panel: PanelStore }) {
+function ArgosScreenView({ theme, panel }: { theme: PluginTheme; panel: PanelStore }) {
   const model = usePanel(panel);
   const view: PanelView = panelView(model);
   return (
@@ -282,7 +329,7 @@ function ArgosScreen({ theme, panel }: { theme: PluginTheme; panel: PanelStore }
   );
 }
 
-function ArgosSidebar({
+function ArgosSidebarView({
   theme,
   panel,
   openScreen,
@@ -323,18 +370,54 @@ function ArgosSidebar({
   );
 }
 
+function ArgosScreen({ theme }: PluginScreenProps) {
+  const { panel, error } = useArgosPanel();
+  if (panel === null) return <LoadingPanel theme={theme} error={error} />;
+  return <ArgosScreenView theme={theme} panel={panel} />;
+}
+
+function ArgosSidebar({ theme, openScreen }: PluginSidebarItemProps) {
+  const { panel, error } = useArgosPanel();
+  if (panel === null) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          openScreen({ screenId: ARGOS_SCREEN_ID });
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          background: "transparent",
+          color: theme.colors.foreground,
+          border: "none",
+          padding: "4px 6px",
+          cursor: "pointer",
+          fontSize: 12,
+        }}
+      >
+        <span>Argos</span>
+        <Pill
+          theme={theme}
+          label={error === null ? "connecting" : "server not running"}
+          tone={error === null ? "neutral" : "danger"}
+        />
+      </button>
+    );
+  }
+  return <ArgosSidebarView theme={theme} panel={panel} openScreen={openScreen} />;
+}
+
 /** Install the sidebar row and the screen; both are removed (and the client closed) on cleanup. */
 export default function contribute(client: PluginClientContext): PluginCleanup {
-  const panel = createPanel({ client: createArgosClient() });
-  panel.start();
-  void panel.load();
-
-  function Sidebar(props: PluginSidebarItemProps) {
-    return <ArgosSidebar theme={props.theme} panel={panel} openScreen={props.openScreen} />;
+  function Screen(props: PluginScreenProps) {
+    return <ArgosScreen {...props} />;
   }
 
-  function Screen(props: PluginScreenProps) {
-    return <ArgosScreen theme={props.theme} panel={panel} />;
+  function Sidebar(props: PluginSidebarItemProps) {
+    return <ArgosSidebar {...props} />;
   }
 
   const removeScreen = client.addScreen({
@@ -351,6 +434,6 @@ export default function contribute(client: PluginClientContext): PluginCleanup {
   return () => {
     removeItem();
     removeScreen();
-    panel.dispose();
+    disposeAllPanels();
   };
 }

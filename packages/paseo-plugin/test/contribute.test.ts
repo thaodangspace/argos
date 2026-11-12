@@ -4,20 +4,24 @@
  * second contribution, and tears down by removing the hook and closing **only** the HTTP client.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
 import {
   AGENT_OPEN_HOOK,
   createArgosContribution,
-} from "../src/plugin.js";
-import { ARGOS_TOOL_NAMES } from "../src/tools.js";
+} from "../server/plugin";
+import { ARGOS_TOOL_NAMES } from "../server/tools";
 import {
   ARGOS_SERVER_CLOSED,
   ARGOS_SERVER_UNREACHABLE,
   PluginRpcError,
   createArgosClient,
-} from "../src/rpc-client.js";
+} from "../shared/rpc-client";
 import { fakePluginServer, fakeRpc, sessionOpenRequest } from "./support.js";
 
 const EXPECTED_TOOLS = [
@@ -52,6 +56,34 @@ describe("contribute (server half)", () => {
     expect(toolNames(opened)).toEqual(["read_file", ...EXPECTED_TOOLS]);
 
     await cleanup();
+  });
+
+  it("hands the panel its loopback URL and token through argos.connection", async () => {
+    const home = mkdtempSync(join(tmpdir(), "argos-plugin-home-"));
+    const previousHome = process.env["ARGOS_HOME"];
+    const previousPort = process.env["ARGOS_PORT"];
+    try {
+      writeFileSync(join(home, "token"), "secret-token\n", { mode: 0o600 });
+      process.env["ARGOS_HOME"] = home;
+      process.env["ARGOS_PORT"] = "7811";
+      const server = fakePluginServer();
+      const cleanup = createArgosContribution({ createClient: () => fakeRpc() })(
+        asServer(server),
+      );
+
+      await expect(server.runHandler("argos.connection", {})).resolves.toEqual({
+        url: "http://127.0.0.1:7811",
+        token: "secret-token",
+      });
+
+      await cleanup();
+    } finally {
+      if (previousHome === undefined) delete process.env["ARGOS_HOME"];
+      else process.env["ARGOS_HOME"] = previousHome;
+      if (previousPort === undefined) delete process.env["ARGOS_PORT"];
+      else process.env["ARGOS_PORT"] = previousPort;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("replaces a stale Argos tool instead of duplicating it", async () => {
@@ -94,16 +126,22 @@ describe("contribute (server half)", () => {
     const client = fakeRpc();
     const cleanup = createArgosContribution({ createClient: () => client })(asServer(server));
 
-    // Registration is the only server interaction: no settings, no RPC handler, no provider.
-    expect(server.calls).toEqual([`addHook:${AGENT_OPEN_HOOK}`]);
+    // One hook for the chat tools and one RPC handler that hands the panel its connection.
+    expect(server.calls).toEqual([
+      `addHook:${AGENT_OPEN_HOOK}`,
+      "handle:argos.connection",
+    ]);
 
     await cleanup();
 
     expect(server.removeCount()).toBe(1);
     expect(server.hooks.every((hook) => hook.removed)).toBe(true);
     expect(client.close).toHaveBeenCalledTimes(1);
-    // Teardown touched nothing else on the server (no storage, no handlers).
-    expect(server.calls).toEqual([`addHook:${AGENT_OPEN_HOOK}`]);
+    // Teardown touched nothing else on the server (no storage, no settings).
+    expect(server.calls).toEqual([
+      `addHook:${AGENT_OPEN_HOOK}`,
+      "handle:argos.connection",
+    ]);
 
     // Idempotent: a second teardown neither re-removes the hook nor re-closes the client.
     await cleanup();

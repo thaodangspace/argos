@@ -1,12 +1,14 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "rootDir": ".",
     "outDir": "dist",
     "composite": true,
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"],
+  "include": ["server/**/*.ts", "shared/**/*.ts"],
+  "exclude": ["server/**/*.test.ts", "shared/**/*.test.ts"],
   "references": [{ "path": "../core" }]
 }

@@ -19,11 +19,11 @@ import {
   type RunDetail,
   type RunSummary,
   type StepSummary,
-} from "argos-core/rpc";
+} from "argos-core/rpc/contracts";
 import { z } from "zod";
 
-import { PluginRpcError, type ArgosRpc } from "./rpc-client.js";
-import { RUN_STATUS_LABELS, STEP_STATUS_LABELS } from "./panel.js";
+import { PluginRpcError, type ArgosRpc } from "../shared/rpc-client";
+import { RUN_STATUS_LABELS, STEP_STATUS_LABELS } from "../shared/panel";
 
 /** The exact tool names (FR28). Order is the registration order. */
 export const ARGOS_TOOL_NAMES = [

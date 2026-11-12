@@ -524,30 +524,45 @@ run (the engine lives in `argos serve`).
 | File | Role |
 |---|---|
 | `paseo-plugin.json` | manifest: `id: argos`, `requirements.paseo: ">=0.15.3"` |
-| `index.server.ts` | default-exports `contribute(server)`; `agent.open.before`; teardown removes the hook and closes the client |
+| `index.server.ts` | default-exports `contribute(server)`; `agent.open.before` + `argos.connection`; teardown removes the hook and closes the client |
 | `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), theme tokens |
-| `src/rpc-client.ts` | `createArgosClient()`; `PluginRpcError`, SSE parser/opener |
-| `src/panel.ts` | pure panel model, `loadPanel`, `decideGateOnce`, `subscribeRuns`, `runView` |
-| `src/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
-| `src/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` |
+| `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools`; registers the connection RPC |
+| `server/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
+| `server/connection.ts` | Node-only: resolves `ARGOS_HOME`/`ARGOS_PORT` + token, builds the tools client |
+| `shared/rpc-client.ts` | portable `createArgosClient({url, token})`; `PluginRpcError`, SSE parser/opener |
+| `shared/panel.ts` | pure panel model, `loadPanel`, `decideGateOnce`, `subscribeRuns`, `runView` |
+| `shared/panel-hub.ts` | one ref-counted panel per connection (sidebar + screen share one SSE stream) |
+| `shared/connection.ts` | `argos.connection` plugin RPC contract (`{url, token}`) |
+| `shared/identity.ts` | `PLUGIN_ID`, `REQUIRED_PASEO_VERSION` |
 
 Tool names (exact): `argos_start_playbook` (`POST /runs`; playbook errors render as
 `playbook_invalid`), `argos_run_status` (`GET /runs/:id`; never prompts), `argos_decide_gate`,
 `argos_cancel_run`. Tools never throw; failures become `{error:{code,message}}`. A start call
 generates a `clientRequestId` unless supplied.
 
-`createArgosContribution({createClient?})` is the test seam. One call creates one runtime and
-registers exactly one `agent.open.before` hook that appends the tools; teardown removes that hook
-and closes the client (aborting streams). No settings screen: `ARGOS_PORT`/`ARGOS_HOME` are read
-once per client. The panel publishes an in-flight model before deciding (buttons disable), calls
-`decideGate` exactly once, treats an already-decided gate as refresh-without-retry, and reconnects
-SSE with capped exponential backoff (1 s doubling to 8 s).
+`createArgosContribution({createClient?})` is the test seam. One call creates one runtime,
+registers exactly one `agent.open.before` hook that appends the tools, and registers the
+`argos.connection` RPC. Teardown removes that hook and closes the client (aborting streams). No
+settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token` once
+per plugin instance; the **client** panel cannot read files, so it calls `argos.connection` through
+`useRpc()` and receives `{url, token}`. That keeps the server's bearer auth intact (FR27) without a
+Node builtin in the client bundle. The panel publishes an in-flight model before deciding (buttons
+disable), calls `decideGate` exactly once, treats an already-decided gate as refresh-without-retry,
+and reconnects SSE with capped exponential backoff (1 s doubling to 8 s).
 
-Import-graph rule (`test/import-graph.test.ts`): no file under `packages/paseo-plugin/src/` or
-either entry may import `argos-core/durable`, `argos-core/git`, `argos-core/paseo`,
-`argos-core/engine`, `argos-core/playbook`, `argos-core/rpc/server`, the `argos-core` root,
-`@earendil-works/*`, `node:sqlite`, `node:fs`, or `node:child_process`. The only `argos-core`
-subpath is `argos-core/rpc`; other imports are limited to `@getpaseo/*`, `react`, and `zod`.
+**Install (Paseo 0.15.4):** start `argos serve` first (it creates `$ARGOS_HOME/token`), then
+`paseo plugin install /Users/dt/code/github.com/argos/packages/paseo-plugin`. Paseo bundles the
+TypeScript **source** itself, so `npm run build` is not required for the plugin, and every module
+must live in `server/`, `client/`, or `shared/` (Paseo rejects `src/`). Reload with
+`paseo plugin reload argos`; check `paseo plugin ls` / `paseo plugin logs argos`.
+
+Import-graph rule (`test/import-graph.test.ts`): no file under `packages/paseo-plugin/server/`,
+`shared/`, `client/`, or either entry may import `argos-core/durable`, `argos-core/git`,
+`argos-core/paseo`, `argos-core/engine`, `argos-core/playbook`, `argos-core/rpc/server`, the
+`argos-core` root, `@earendil-works/*`, `node:sqlite`, or `node:child_process`. Only `server/` may
+import `node:fs` (it reads the token); `shared/` and the client entry must stay portable. The only
+`argos-core` subpaths are `argos-core/rpc` and `argos-core/rpc/contracts` (the latter is
+Node-free); other imports are limited to `@getpaseo/*`, `react`, and `zod`.
 `react`/`@types/react` are exact dev dependencies for the `.tsx` typecheck. Typecheck is split
 (`tsconfig.json`, `tsconfig.test.json`, `tsconfig.entry.json`, `tsconfig.client.json`) so JSX never
 leaks into the server graph.
