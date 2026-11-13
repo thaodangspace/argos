@@ -1,5 +1,5 @@
 /**
- * The git port (`argos-core` internal, D9).
+ * The git port (`@thaodangspace/argos-core` internal, D9).
  *
  * `src/git/` is the only directory (besides `src/durable/tasks/script.ts`) allowed to import
  * `node:child_process`; that is what keeps "no shell" and "no git library" true. It is not

@@ -1,4 +1,4 @@
-export const PACKAGE_NAME = "argos-core";
+export const PACKAGE_NAME = "@thaodangspace/argos-core";
 
 export {
   ARGOS_ERROR_CODES,

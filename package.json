@@ -1,21 +1,32 @@
 {
   "name": "argos",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Durable YAML playbook engine for Paseo agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thaodangspace/argos.git"
+  },
+  "homepage": "https://github.com/thaodangspace/argos#readme",
+  "bugs": {
+    "url": "https://github.com/thaodangspace/argos/issues"
+  },
   "workspaces": [
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13"
   },
   "scripts": {
     "build": "tsc -b",
     "postbuild": "node packages/cli/scripts/make-bin-executable.mjs",
     "test": "npm run build && vitest run",
     "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
-    "typecheck": "tsc -b && npm run typecheck:tests --workspaces --if-present"
+    "typecheck": "tsc -b && npm run typecheck:tests --workspaces --if-present",
+    "version:check": "node scripts/check-version.mjs",
+    "release:publish": "npm publish -w @thaodangspace/argos-core && npm publish -w @thaodangspace/argos"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

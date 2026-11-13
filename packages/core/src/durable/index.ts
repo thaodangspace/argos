@@ -1,5 +1,5 @@
 /**
- * Durable host surface (`argos-core/durable`).
+ * Durable host surface (`@thaodangspace/argos-core/durable`).
  *
  * This subpath is deliberately separate from the package root: importing it is the only way to
  * pull `@earendil-works/*` and the SQLite writer into a process. The CLI and Paseo plugin talk

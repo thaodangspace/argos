@@ -10,7 +10,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { argosHome } from "argos-core";
+import { argosHome } from "@thaodangspace/argos-core";
 
 import { runCli } from "./main.js";
 

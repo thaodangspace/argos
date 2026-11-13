@@ -30,7 +30,7 @@ import {
   buildStepOutputSchema,
   createPaseoPort,
   parseStepResult,
-} from "argos-core/paseo";
+} from "@thaodangspace/argos-core/paseo";
 
 const DEFAULT_PROVIDERS = ["claude", "codex", "opencode", "pi"] as const;
 

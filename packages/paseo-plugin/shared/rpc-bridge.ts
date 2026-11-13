@@ -17,7 +17,7 @@ import {
   type RunSummary,
   type StartRunRequest,
   type StartRunResponse,
-} from "argos-core/rpc/contracts";
+} from "@thaodangspace/argos-core/rpc/contracts";
 
 import type { PluginResult } from "./rpc-api";
 import {

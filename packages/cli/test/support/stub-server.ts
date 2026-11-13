@@ -7,7 +7,13 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import type { DecideGateRequest, RunSummary, ScheduleCreateRequest, ScheduleSummary } from "argos-core/rpc";
+import type {
+  DecideGateRequest,
+  RunDetail,
+  RunSummary,
+  ScheduleCreateRequest,
+  ScheduleSummary,
+} from "@thaodangspace/argos-core/rpc";
 
 import {
   DECIDED_AT,

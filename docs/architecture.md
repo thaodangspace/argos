@@ -98,7 +98,7 @@ the child task the effect asks for.
 | Argos concept | pi-durable primitive |
 |---|---|
 | Run | task `argos.run` v1; checkpoint = `RunRecord` |
-| Step | child task `argos.step` v1 (or `argos.script` v1), owned by the run task |
+| Step | child task `argos.step` v1 (or `argos.script` / `argos.delay` v1), owned by the run task |
 | Parallel steps | `waiting { on: [ids], policy: "allSettled" }` |
 | Human gate | child task `argos.gate` v1 + decision document |
 | Retry/backoff | checkpoint attempt + `sleeping { until }` |
@@ -113,6 +113,7 @@ Task phases are **static** so the task definition never depends on playbook cont
 argos.run    v1: "select" | "await" | "settle" | "gate" | "done"
 argos.step   v1: "locate" | "launch" | "await" | "collect"
 argos.script v1: "prepare" | "run" | "collect"
+argos.delay  v1: "arm" | "wait"
 argos.gate   v1: "await" | "decided"
 ```
 
@@ -288,6 +289,12 @@ A script step is a real child process (`shell: false`), looked up under `.argos/
 paseo fallback, run in the worktree when isolation is on. Exit `75` parks and re-runs; any other
 non-zero exit fails the step; the step timeout bounds an endless exit-75 loop. The environment is
 filtered (D10) and stdout/stderr are kept as bounded tails.
+
+A delay step (`delay: 30m`) runs no process: `argos.delay` commits one absolute wake time and parks
+in `sleeping` slices of at most 60 s (a Node timer stalls while the machine sleeps, so each wake
+re-reads the wall clock), and a restart resumes the same instant. Use it, not a `sleep` script, for
+the pause in a loop: a restart kills a script and the respawn starts its sleep over against the
+original deadline (`script_timeout`). Delay steps have no step timeout.
 
 Worktree isolation is created by `git` through `execFile` (no shell). It fetches `origin`, picks a
 base, refuses a dirty checkout before any agent exists, and stores `{path, branch, baseSha}` in

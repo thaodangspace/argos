@@ -167,7 +167,7 @@ export const RawStepSchema = z.strictObject({
   id: z.string().min(1),
   title: z.string().min(1).optional(),
   short_title: z.string().min(1).optional(),
-  kind: z.enum(["agent", "gate", "script", "branch"]).optional(),
+  kind: z.enum(["agent", "gate", "script", "branch", "delay"]).optional(),
   role: z.union([z.string().min(1), RawRoleStepSchema]).optional(),
   needs: z.array(z.string().min(1)).optional(),
   prompt: z.string().optional(),
@@ -180,6 +180,8 @@ export const RawStepSchema = z.strictObject({
   gate: z.union([z.string().min(1), RawGateStepSchema]).optional(),
   choices: RawChoicesSchema.optional(),
   script: z.union([z.string().min(1), RawScriptStepSchema]).optional(),
+  /** `kind: delay` — a durable pause (`"30m"`, ms, or `"{{ inputs.x }}"`) that survives restarts. */
+  delay: DurationSchema.optional(),
   pollMs: z.number().int().positive().optional(),
   poll_ms: z.number().int().positive().optional(),
   poll: z.string().min(1).optional(),

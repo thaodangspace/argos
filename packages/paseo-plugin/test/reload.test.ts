@@ -19,8 +19,8 @@ import type {
   PluginServerContext,
 } from "@getpaseo/plugin/server";
 
-import type { ArgosHostOptions } from "argos-core/rpc/server";
-import { ArgosHost, createRpcServer, type RpcServer } from "argos-core/rpc/server";
+import type { ArgosHostOptions } from "@thaodangspace/argos-core/rpc/server";
+import { ArgosHost, createRpcServer, type RpcServer } from "@thaodangspace/argos-core/rpc/server";
 
 import { createArgosContribution } from "../server/plugin";
 import { createArgosClient, type ArgosRpc } from "../shared/rpc-client";

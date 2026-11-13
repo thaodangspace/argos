@@ -13,6 +13,10 @@
  * the run id is derived from the fire time, so a process that dies before the fire time cannot
  * lose it, and a process that starts after it cannot start that fire twice.
  *
+ * Scenario D kills `argos serve` halfway through a `kind: delay` step: the wake time is committed
+ * once, so the restarted process finishes the step at the original instant instead of restarting
+ * the pause (the `sleep`-script failure mode).
+ *
  * These tests spawn real processes and are deliberately **not** part of `npm test`; run them
  * with `npm run test:e2e` (which builds first).
  */
@@ -31,7 +35,7 @@ import type {
   RunDetail,
   RunSummary,
   ScheduleDetail,
-} from "argos-core/rpc";
+} from "@thaodangspace/argos-core/rpc";
 
 const cliRoot = fileURLToPath(new URL("../../../cli", import.meta.url));
 const distIndex = join(cliRoot, "dist", "index.js");
@@ -732,5 +736,62 @@ describe("durability across a real SIGKILL (D17)", () => {
       );
     },
     180_000,
+  );
+
+  it(
+    "keeps a delay step's wake time across a kill mid-delay (no reset, no timeout)",
+    async () => {
+      expect(existsSync(distIndex), "run `npm run build` before the E2E suite").toBe(true);
+
+      // The loop shape that used to fail with `script_timeout` when serve restarted mid-pause:
+      // a `sleep` script restarted from zero against its original deadline. 6 s stands in for 30 m.
+      const DELAY_MS = 6_000;
+      const home = tempDir("argos-e2e-delay-home-");
+      const repo = tempDir("argos-e2e-delay-repo-");
+      writePlaybook(
+        repo,
+        "paused",
+        ["title: Delay restart", "steps:", "  - id: wait", `    delay: ${DELAY_MS}`, ""].join("\n"),
+      );
+
+      const first = await startServe(home);
+      const started = await cliJson<{ runId: string }>(
+        ["run", "paused", "--cwd", repo],
+        clientEnv(home, first.port),
+      );
+      const runId = started.runId;
+      const running = await waitForStatus(
+        home,
+        first.port,
+        runId,
+        (detail) => detail.steps.find((step) => step.id === "wait")?.status === "running",
+        "the delay step to start",
+      );
+      const startedAt = running.steps.find((step) => step.id === "wait")?.attempts[0]?.startedAt;
+      expect(startedAt).toBeTypeOf("number");
+
+      // Kill halfway through the delay and come back while it is still pending.
+      await waitFor(() => Date.now() >= (startedAt as number) + DELAY_MS / 2, 10_000, "half the delay");
+      await killServe(first);
+      const second = await startServe(home);
+
+      const done = await waitForStatus(
+        home,
+        second.port,
+        runId,
+        (detail) => detail.status !== "running",
+        "the delayed run to finish",
+      );
+      expect(done.status).toBe("completed");
+      const wait = done.steps.find((step) => step.id === "wait");
+      expect(wait?.status).toBe("completed");
+      expect(wait?.attempts).toHaveLength(1);
+      const elapsed = (wait?.attempts[0]?.endedAt as number) - (startedAt as number);
+      // Restarting the delay would end at >= 1.5 x DELAY_MS; the committed wake time ends at 1 x.
+      expect(elapsed).toBeGreaterThanOrEqual(DELAY_MS);
+      expect(elapsed).toBeLessThan(DELAY_MS * 1.4);
+      console.info(`[e2e] D delay of ${DELAY_MS} ms finished ${elapsed} ms after it started, across a SIGKILL`);
+    },
+    120_000,
   );
 });

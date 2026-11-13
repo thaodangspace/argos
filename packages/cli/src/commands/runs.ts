@@ -3,7 +3,7 @@
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";
 import { withRpc } from "../rpc-command.js";
-import type { GateSummary, RunDetail, RunSummary } from "argos-core/rpc";
+import type { GateSummary, RunDetail, RunSummary } from "@thaodangspace/argos-core/rpc";
 
 function when(at: number | undefined): string {
   return at === undefined ? "-" : new Date(at).toISOString();

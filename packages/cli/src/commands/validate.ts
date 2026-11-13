@@ -13,19 +13,19 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 
-import { argosHome, errorLocation, isArgosError } from "argos-core";
+import { argosHome, errorLocation, isArgosError } from "@thaodangspace/argos-core";
 import {
   discoverPlaybooks,
   loadPlaybook,
   type LoadWarning,
   type PlaybookEntry,
-} from "argos-core/playbook";
+} from "@thaodangspace/argos-core/playbook";
 import type {
   ValidateError,
   ValidatePlaybook,
   ValidateReport,
   ValidateWarning,
-} from "argos-core/rpc";
+} from "@thaodangspace/argos-core/rpc";
 
 import type { ParsedArgs } from "../args.js";
 import { flag, rejectUnknownFlags } from "../args.js";

@@ -1,9 +1,32 @@
 {
-  "name": "argos-cli",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@thaodangspace/argos",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Argos command-line client",
+  "description": "Durable YAML playbook engine CLI for Paseo agents",
+  "license": "MIT",
+  "keywords": [
+    "argos",
+    "paseo",
+    "playbook",
+    "workflow",
+    "orchestration",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thaodangspace/argos.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/thaodangspace/argos#readme",
+  "bugs": {
+    "url": "https://github.com/thaodangspace/argos/issues"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,16 +37,18 @@
     "argos": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/.tsbuildinfo"
   ],
   "scripts": {
     "build": "tsc -b",
-    "postbuild": "chmod +x dist/index.js",
+    "postbuild": "node scripts/make-bin-executable.mjs",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc -b",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "argos-core": "0.0.0"
+    "@thaodangspace/argos-core": "0.1.0"
   }
 }

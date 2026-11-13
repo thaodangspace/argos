@@ -116,7 +116,7 @@ export interface CommitRunOptions {
  * so a crash cannot leave a run without its fire marker (or the other way round).
  *
  * Internal on purpose: it is reachable through `ArgosHost.startPort` and is never exported from
- * `argos-core/durable`.
+ * `@thaodangspace/argos-core/durable`.
  */
 export interface RunStartPort {
   /** Model check, idempotency fast path, run id, script pins, worktree, record. Never commits. */

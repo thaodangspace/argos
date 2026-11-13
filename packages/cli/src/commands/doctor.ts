@@ -10,7 +10,7 @@
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { argosHome, dbPath } from "argos-core";
+import { argosHome, dbPath } from "@thaodangspace/argos-core";
 import {
   ARGOS_SCHEMA_VERSION,
   DEFAULT_ARGOS_PORT,
@@ -20,7 +20,7 @@ import {
   type DoctorReport,
   type ScheduleSummary,
   type ServerInfo,
-} from "argos-core/rpc";
+} from "@thaodangspace/argos-core/rpc";
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import {

@@ -49,6 +49,7 @@ export const DEFAULT_POLL_MS: Readonly<Record<StepKind, number>> = {
   gate: 2000,
   script: 5000,
   branch: 0,
+  delay: 0,
 };
 
 /** paseo's implicit gate buttons. */
@@ -592,16 +593,76 @@ function resolveBranch(raw: RawStep["branch"]): { readonly cases: readonly Branc
 
 // ------------------------------------------------------------------ steps
 
+/** Whole-value input template, the same shape `engine/timeouts.ts` resolves at use time. */
+const INPUT_TEMPLATE = /^\s*\{\{\s*(?:playbook\.)?inputs\.([A-Za-z_][\w-]*)\s*\}\}\s*$/;
+
+/** Fields that mean nothing on a delay step; setting one is an error, never silently dropped. */
+const DELAY_REJECTS = [
+  "prompt",
+  "role",
+  "agent",
+  "script",
+  "gate",
+  "choices",
+  "env",
+  "inputs",
+  "outputs",
+  "timeout",
+  "retries",
+  "pollMs",
+  "poll_ms",
+  "poll",
+  "use",
+  "playbook",
+] as const satisfies readonly (keyof RawStep)[];
+
+/**
+ * `kind: delay`: the duration must be a positive literal (ms or `"30m"`) or a whole-value
+ * `{{ inputs.x }}` template naming a declared input. A delay step never fails on its own, so
+ * `timeout`/`retries` (and every agent/script field) are refused rather than ignored.
+ */
+function checkDelayStep(
+  raw: RawStep,
+  location: Location,
+  inputs: Readonly<Record<string, InputDefIR>>,
+): void {
+  for (const field of DELAY_REJECTS) {
+    if (raw[field] !== undefined) {
+      invalid(location, `a delay step does not take \`${field}\` (it only waits \`delay\`, then succeeds)`);
+    }
+  }
+  const value = raw.delay;
+  if (value === undefined) invalid(location, "a delay step needs `delay: <duration>`");
+  if (typeof value === "number") {
+    if (!(value > 0)) invalid(location, "`delay` must be a positive duration");
+    return;
+  }
+  const template = INPUT_TEMPLATE.exec(value);
+  if (template !== null) {
+    const name = template[1] ?? "";
+    if (inputs[name] === undefined) {
+      invalid(location, `\`delay\` reads undeclared input "${name}"`);
+    }
+    return;
+  }
+  const ms = durationToMs(value);
+  if (ms === undefined || ms <= 0) {
+    invalid(location, `\`delay\` must be a positive duration like "30m" or "90s" (got "${value}")`);
+  }
+}
+
 function stepKind(raw: RawStep, location: Location): StepKind {
   const hasUse = raw.use !== undefined || raw.playbook !== undefined;
   const inferred: StepKind =
     raw.branch !== undefined
       ? "branch"
-      : raw.script !== undefined
-        ? "script"
-        : raw.gate !== undefined || raw.choices !== undefined
-          ? "gate"
-          : "agent";
+      : raw.delay !== undefined
+        ? "delay"
+        : raw.script !== undefined
+          ? "script"
+          : raw.gate !== undefined || raw.choices !== undefined
+            ? "gate"
+            : "agent";
   if (hasUse && raw.kind !== undefined && raw.kind !== "agent") {
     invalid(location, `a sub-playbook step has kind "${raw.kind}"; \`use\` steps are expanded as agent steps`);
   }
@@ -750,6 +811,8 @@ function resolveStep(
     script = { run, env };
   }
 
+  if (kind === "delay") checkDelayStep(raw, location, playbook.inputs);
+
   const pollMs =
     raw.pollMs ??
     raw.poll_ms ??
@@ -782,6 +845,7 @@ function resolveStep(
     gate,
     choices,
     script,
+    delay: raw.delay,
     pollMs,
     timeout: raw.timeout,
     retries: raw.retries ?? 0,

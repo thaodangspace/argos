@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { DoctorReport, RunDetail } from "argos-core/rpc";
+import type { DoctorReport, RunDetail } from "@thaodangspace/argos-core/rpc";
 
 const cliRoot = fileURLToPath(new URL("..", import.meta.url));
 const distIndex = join(cliRoot, "dist", "index.js");

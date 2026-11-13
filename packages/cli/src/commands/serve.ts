@@ -10,12 +10,12 @@
 
 import { resolve } from "node:path";
 
-import { argosHome, isArgosError } from "argos-core";
+import { argosHome, isArgosError } from "@thaodangspace/argos-core";
 import {
   ArgosHost,
   createRpcServer,
   type ArgosHostOptions,
-} from "argos-core/rpc/server";
+} from "@thaodangspace/argos-core/rpc/server";
 import {
   ModelCatalog,
   createAgentStepExecutor,
@@ -23,8 +23,8 @@ import {
   createPaseoPort,
   fakeProviderCatalog,
   type PaseoClientPort,
-} from "argos-core/paseo";
-import type { PaseoProbe } from "argos-core/rpc/server";
+} from "@thaodangspace/argos-core/paseo";
+import type { PaseoProbe } from "@thaodangspace/argos-core/rpc/server";
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import {
@@ -36,7 +36,7 @@ import {
 
 /**
  * FR10.4: one fire outcome, as `ArgosHost.observeScheduleFires` announces it. Derived from the host
- * method so the CLI never imports `argos-core/durable` (the import-graph guard forbids it).
+ * method so the CLI never imports `@thaodangspace/argos-core/durable` (the import-graph guard forbids it).
  */
 type ScheduleFireListener = Parameters<ArgosHost["observeScheduleFires"]>[0];
 export type ScheduleFireEvent = Parameters<ScheduleFireListener>[0];

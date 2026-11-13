@@ -1,7 +1,7 @@
 {
   "node": {
     "version": "<node>",
-    "required": ">=22.5",
+    "required": ">=22.13",
     "ok": true
   },
   "home": "<home>",
@@ -68,7 +68,7 @@
     {
       "name": "node",
       "ok": true,
-      "detail": "v<node> (requires >=22.5)"
+      "detail": "v<node> (requires >=22.13)"
     },
     {
       "name": "storage",

@@ -19,7 +19,7 @@ import {
   type RunDetail,
   type RunSummary,
   type StepSummary,
-} from "argos-core/rpc/contracts";
+} from "@thaodangspace/argos-core/rpc/contracts";
 import { z } from "zod";
 
 import { PluginRpcError, type ArgosRpc } from "../shared/rpc-client";

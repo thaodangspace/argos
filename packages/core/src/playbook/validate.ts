@@ -107,6 +107,10 @@ function checkStep(scope: Scope, step: StepIR): void {
     invalid(scope.file, step.id, "a script step needs a `script`");
   }
 
+  if (step.kind === "delay" && step.delay === undefined) {
+    invalid(scope.file, step.id, "a delay step needs a `delay`");
+  }
+
   if (step.kind === "branch") {
     const cases = step.branch?.cases ?? [];
     if (cases.length === 0) invalid(scope.file, step.id, "a branch step needs at least one case");

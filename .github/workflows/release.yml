@@ -1,0 +1,41 @@
+name: release
+
+# Publishing happens on a tag, never on a branch: `v0.1.0` must match every workspace version
+# (scripts/check-version.mjs). Core is published before the CLI because the CLI pins the exact core
+# version it ships with. Provenance requires a public repository and an `NPM_TOKEN` secret with
+# write access to the @thaodangspace scope.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: version guard
+        run: node scripts/check-version.mjs "$GITHUB_REF_NAME"
+      - run: npm test
+      - run: npm run typecheck
+      - name: publish @thaodangspace/argos-core
+        run: npm publish -w @thaodangspace/argos-core --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: publish @thaodangspace/argos
+        run: npm publish -w @thaodangspace/argos --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,9 +1,9 @@
 /**
  * Import-graph guard (FR2/FR3): the CLI is an HTTP client. Only `commands/serve.ts` may reach the
- * one-storage-owner module (`argos-core/rpc/server`), and no CLI source may import the durable host,
+ * one-storage-owner module (`@thaodangspace\/argos-core/rpc/server`), and no CLI source may import the durable host,
  * the git port, the SQLite driver, or a `@earendil-works/*` package.
  *
- * The core `argos-core/rpc` barrel is checked too: it must stay importable by the CLI/plugin without
+ * The core `@thaodangspace\/argos-core/rpc` barrel is checked too: it must stay importable by the CLI/plugin without
  * pulling durable code.
  */
 
@@ -33,8 +33,8 @@ describe("CLI import graph", () => {
     for (const file of sourceFiles(cliSource)) {
       const text = readFileSync(file, "utf8");
       const forbidden = [
-        /from\s+["']argos-core\/durable/,
-        /from\s+["']argos-core\/git/,
+        /from\s+["']@thaodangspace\/argos-core\/durable/,
+        /from\s+["']@thaodangspace\/argos-core\/git/,
         /["']node:sqlite["']/,
         /from\s+["']@earendil-works\//,
       ];
@@ -45,18 +45,18 @@ describe("CLI import graph", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("reaches argos-core/rpc/server only from commands/serve.ts", () => {
+  it("reaches @thaodangspace\/argos-core/rpc/server only from commands/serve.ts", () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(cliSource)) {
       if (file.endsWith(join("commands", "serve.ts"))) continue;
-      if (/from\s+["']argos-core\/rpc\/server["']/.test(readFileSync(file, "utf8"))) {
+      if (/from\s+["']@thaodangspace\/argos-core\/rpc\/server["']/.test(readFileSync(file, "utf8"))) {
         offenders.push(file);
       }
     }
     expect(offenders).toEqual([]);
   });
 
-  it("keeps the argos-core/rpc barrel free of durable imports", () => {
+  it("keeps the @thaodangspace\/argos-core/rpc barrel free of durable imports", () => {
     for (const name of ["index.ts", "contracts.ts", "client.ts"]) {
       const text = readFileSync(join(coreRpc, name), "utf8");
       expect(text, name).not.toMatch(/from\s+["']\.\.\/durable\//);

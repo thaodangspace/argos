@@ -5,7 +5,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { RunDetail, StepDetailSummary } from "argos-core/rpc/contracts";
+import type { RunDetail, StepDetailSummary } from "@thaodangspace/argos-core/rpc/contracts";
 
 import {
   buildRunLog,

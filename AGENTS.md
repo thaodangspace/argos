@@ -15,14 +15,15 @@ path; YAML playbooks/DAG/gates/loops replace the orchestrator loop).
 
 | Workspace | Package | Role |
 |---|---|---|
-| `packages/core` | `argos-core` | loader, engine, durable host, git helpers, RPC server, Paseo adapter |
-| `packages/cli` | `argos-cli` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite |
+| `packages/core` | `@thaodangspace/argos-core` | loader, engine, durable host, git helpers, RPC server, Paseo adapter |
+| `packages/cli` | `@thaodangspace/argos` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite |
 | `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel + chat tools; HTTP client, never opens SQLite |
 
 No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResolution`
-`NodeNext` (relative imports need `.js` extensions), Node `>=22.5`.
+`NodeNext` (relative imports need `.js` extensions), Node `>=22.13` (`node:sqlite` is unflagged
+from 22.13).
 `packages/core/src/git/` is the only directory (with `durable/tasks/script.ts`) allowed to import
-`node:child_process`, and it is exported on the `argos-core/git` subpath, never the root.
+`node:child_process`, and it is exported on the `@thaodangspace/argos-core/git` subpath, never the root.
 `packages/core/src/schedule/` holds the two scheduler primitives: `next.ts` is the **only**
 `croner` user (built paused, with no callback, so it is a calculator and never arms a timer) and
 `model.ts` is the zod-only schedule model (ids, bounds, fire entries, `catchUp`/`keep`
@@ -52,7 +53,8 @@ npm test          # builds workspaces (tsc -b) then vitest over all projects; ex
 npm run typecheck # tsc -b for src, then tsc --noEmit for every test/entry graph
 npm run test:e2e  # builds, then the real-process SIGKILL/restart suite
 npm run build     # tsc -b (emits dist/ for every workspace)
-node -e "import('argos-core')"   # workspace-link check; requires a build first
+node -e "import('@thaodangspace/argos-core')"   # workspace-link check; requires a build first
+npm run version:check -- v0.1.0                 # release guard: tag must match every manifest
 ```
 
 `npm test` stays fast and process-free. The E2E suite is deliberately a separate project
@@ -69,6 +71,40 @@ npx vitest run --config vitest.e2e.config.ts
 ```
 
 Package `exports` point at `dist/`, so anything importing a sibling workspace needs a build.
+
+## Publishing (npm)
+
+Two workspaces are public on npm and one is not:
+
+| Package | npm | Notes |
+|---|---|---|
+| `@thaodangspace/argos-core` | yes | the library; published first |
+| `@thaodangspace/argos` | yes | the CLI, `bin: {"argos": "dist/index.js"}` |
+| `argos-paseo-plugin` | no (`private`) | Paseo bundles its TypeScript source; installed with `paseo plugin install <path>` |
+
+The bare names `argos` and `argos-cli` are taken on npm by unrelated projects, which is why both
+packages live under the `@thaodangspace` scope. `argos` remains the command name.
+
+- **Lockstep versions.** The root (private), the two published packages, and the plugin share one
+  version; the CLI pins `@thaodangspace/argos-core` to exactly that version and the plugin pins it
+  too, because npm resolves a workspace by specifier + version.
+- **Release guard.** `scripts/check-version.mjs` (`npm run version:check [-- vX.Y.Z]`) fails when a
+  workspace drifts, when a published package is still `private` or `0.0.0`, when
+  `publishConfig.access`/`engines.node`/`files`/`repository` is missing, or when the tag does not
+  match. CI runs it on every push; the release workflow runs it again with the tag.
+- **Release workflow.** Pushing a `v*` tag runs `.github/workflows/release.yml`: install, version
+  guard, `npm test`, `npm run typecheck`, then `npm publish -w @thaodangspace/argos-core` and
+  `npm publish -w @thaodangspace/argos` (in that order, `--provenance`, `NODE_AUTH_TOKEN` from the
+  `NPM_TOKEN` secret). `npm run release:publish` is the same two publishes by hand.
+- **What a tarball contains.** `files: ["dist", "!dist/.tsbuildinfo"]` plus `package.json`, the
+  package's own `README.md`, and its own `LICENSE` (a copy of the repository licence — npm only
+  packs what is inside the package directory; `packages/cli/test/publish.test.ts` keeps the copies
+  byte-identical and the manifests publishable). `prepublishOnly: npm run build` builds that
+  workspace, and `postbuild` chmods the bin entry from the script's own location, so it behaves the
+  same from the root or from the workspace.
+- **Node floor.** `engines.node` is `>=22.13`: `node:sqlite` exists from 22.5 but is only unflagged
+  from 22.13, and `argos serve` is the one process that opens SQLite. The doctor check reports the
+  same string.
 
 ## Storage layout and permissions
 
@@ -94,6 +130,7 @@ idempotent and removes the pid file only when it still names this process. A `st
 | `argos.run` | 1 | `select → await → settle → gate → done` |
 | `argos.step` | 1 | `locate → launch → await → collect` |
 | `argos.script` | 1 | `prepare → run → collect` |
+| `argos.delay` | 1 | `arm → wait` |
 | `argos.gate` | 1 | `await → decided` |
 
 Checkpoints are discriminated unions of per-phase shapes (pi-durable narrows each handler with
@@ -238,7 +275,7 @@ condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` 
 
 `packages/core/src/engine/` is the pure decision layer: no I/O, no timers, no durable or Paseo
 imports. `purity.test.ts` enforces the import graph. Consumers use the barrel
-(`import { next, createRunRecord, hydrateRunRecord } from "argos-core/engine"`).
+(`import { next, createRunRecord, hydrateRunRecord } from "@thaodangspace/argos-core/engine"`).
 
 ```ts
 next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: readonly Effect[] }
@@ -299,7 +336,7 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
 ## Durable host
 
 `packages/core/src/durable/` is the only importer of `@earendil-works/*` (and `src/git/`). The
-public surface is the `argos-core/durable` subpath; it is deliberately **not** re-exported from
+public surface is the `@thaodangspace/argos-core/durable` subpath; it is deliberately **not** re-exported from
 the package root so the CLI and plugin cannot open SQLite by accident.
 
 `ArgosHost` (`host.ts`) owns one SQLite file. `startRun({ ir, inputs, cwd, worktree?, deadline?,
@@ -354,6 +391,9 @@ argos.script v1: "prepare" | "run" | "collect"
   { phase, attempt, runs, deadlineAt, scriptPath?, exitCode?, signal?,
     stdout?, stderr?, lastRunAt?, detail?, errorCode?,
     snapshotBefore?, readonlyViolation? }
+
+argos.delay v1: "arm" | "wait"
+  { phase, attempt } | { phase: "wait", attempt, armedAt, until }
 
 argos.gate v1: "await" | "decided"
   { phase, gateId, runId, stepId, kind, edge?, question, choices, seenAt,
@@ -489,7 +529,7 @@ run omits the key entirely, so old records and goldens are unchanged. An after-t
 
 ## Paseo adapter
 
-`packages/core/src/paseo/` is exposed on `argos-core/paseo`, never from the package root.
+`packages/core/src/paseo/` is exposed on `@thaodangspace/argos-core/paseo`, never from the package root.
 `client.ts` is the **only** file allowed to import `@getpaseo/*`; every test uses
 `test/fakes/paseo.ts` or the deterministic fake, so no test opens a socket.
 
@@ -609,6 +649,19 @@ every other non-gate step keeps the agent executor.
   the playbook did not grant. Output keys are sorted for byte-stable checkpoints/logs. The same
   pattern redacts secrets from git error messages (FR2.6).
 
+A delay step (`delay: 30m`, kind inferred, or `kind: delay`) gets an `argos.delay` child through
+the same `dispatchStep`/`stepSettled` path. `run-plan.ts` resolves the duration against the run
+inputs at dispatch (`resolveTimeoutValue`: ms, `"30m"`, or a whole-value `{{ inputs.x }}`); `arm`
+commits the absolute `until`, and `wait` settles the outcome (`success`, or the first declared
+one) once `now >= until`. Each park is `sleeping` for at most `DELAY_SLICE_MS` (60 s) because a
+Node timer does not advance while macOS sleeps; every wake re-reads the wall clock. Nothing
+recomputes `until`, so a host restart resumes the same instant, and a host that comes back late
+settles on its first turn. `timedOutAttempts` skips delay steps (no step timeout); the loader refuses `timeout`,
+`retries`, `prompt`, `role`, `agent`, `script`, `gate`, `choices`, `env`, `inputs`, `outputs`,
+`poll*`, and `use` on them, a non-positive literal, and a template naming an undeclared input. An
+unresolvable template at dispatch settles `step_failed`. A step without `delay` adds no IR key,
+so existing playbook hashes are unchanged.
+
 `retryStep` re-pins (FR3.4): when the record has `scripts`, every script step in the reset
 `downstreamClosure` is resolved and hashed again — a missing one refuses the retry
 (`playbook_invalid`) before any task exists — and each changed digest appends a `script_repinned`
@@ -646,12 +699,12 @@ does not change), and ignored paths are invisible.
 
 ## RPC + CLI
 
-`packages/core/src/rpc/` has two subpaths: `argos-core/rpc` (`contracts.ts` + `client.ts`; no
-durable imports, safe for CLI/plugin) and `argos-core/rpc/server` (`server.ts`; imports the
+`packages/core/src/rpc/` has two subpaths: `@thaodangspace/argos-core/rpc` (`contracts.ts` + `client.ts`; no
+durable imports, safe for CLI/plugin) and `@thaodangspace/argos-core/rpc/server` (`server.ts`; imports the
 durable host and is imported only by `argos serve`). `rpc/summary.ts` projects mirrored documents
-to the public read model. The CLI source never imports `argos-core/durable`, `argos-core/git`,
+to the public read model. The CLI source never imports `@thaodangspace/argos-core/durable`, `@thaodangspace/argos-core/git`,
 `node:sqlite`, or `@earendil-works/*`; only `commands/serve.ts` may import
-`argos-core/rpc/server` (`packages/cli/test/import-graph.test.ts`).
+`@thaodangspace/argos-core/rpc/server` (`packages/cli/test/import-graph.test.ts`).
 
 Contract highlights: `StartRunRequest`, `DecideGateRequest`, `RunSummary`, `RunDetail`,
 `ServerInfo`, `DoctorReport`, and the schedule shapes (`ScheduleCreateRequest`,
@@ -832,11 +885,11 @@ must live in `server/`, `client/`, or `shared/` (Paseo rejects `src/`). Reload w
 `paseo plugin reload argos`; check `paseo plugin ls` / `paseo plugin logs argos`.
 
 Import-graph rule (`test/import-graph.test.ts`): no file under `packages/paseo-plugin/server/`,
-`shared/`, `client/`, or either entry may import `argos-core/durable`, `argos-core/git`,
-`argos-core/paseo`, `argos-core/engine`, `argos-core/playbook`, `argos-core/rpc/server`, the
-`argos-core` root, `@earendil-works/*`, `node:sqlite`, or `node:child_process`. Only `server/` may
+`shared/`, `client/`, or either entry may import `@thaodangspace/argos-core/durable`, `@thaodangspace/argos-core/git`,
+`@thaodangspace/argos-core/paseo`, `@thaodangspace/argos-core/engine`, `@thaodangspace/argos-core/playbook`, `@thaodangspace/argos-core/rpc/server`, the
+`@thaodangspace/argos-core` root, `@earendil-works/*`, `node:sqlite`, or `node:child_process`. Only `server/` may
 import `node:fs` (it reads the token); `shared/` and the client entry must stay portable. The only
-`argos-core` subpaths are `argos-core/rpc` and `argos-core/rpc/contracts` (the latter is
+`@thaodangspace/argos-core` subpaths are `@thaodangspace/argos-core/rpc` and `@thaodangspace/argos-core/rpc/contracts` (the latter is
 Node-free); other imports are limited to `@getpaseo/*`, `react`, and `zod`.
 `react`/`@types/react` are exact dev dependencies for the `.tsx` typecheck. Typecheck is split
 (`tsconfig.json`, `tsconfig.test.json`, `tsconfig.entry.json`, `tsconfig.client.json`) so JSX never
@@ -881,7 +934,10 @@ manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload su
 CI-style grouping/filters/step log and the one-fetch detail sync (`test/detail.test.ts`), and the
 import graph. The CLI suite covers validate exit codes, golden JSON shapes (including
 `ls-schedule` and every `schedule-*` command), the no-storage import graph, the fire-line
-formatter, and a real-serve sentinel.
+formatter, a real-serve sentinel, and the npm channel (`test/publish.test.ts`: manifest metadata
+and lockstep versions, byte-identical `LICENSE` copies, the release workflow order, and
+`scripts/check-version.mjs` accepting a matching tag, refusing a mismatched one, and passing on a
+branch).
 
 **E2E (`packages/core/test/e2e/kill-restart.test.ts`, `npm run test:e2e`).** Spawns the built CLI
 with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:

@@ -25,7 +25,7 @@
  * - `ARGOS_FAKE_PASEO_RELEASE_FILE=<path>` — the file whose appearance releases the blocked step
  *   (checked on every status poll; the E2E playbook polls every 50 ms).
  *
- * It is intentionally shipped on `argos-core/paseo` (no SDK import) so both the CLI and the
+ * It is intentionally shipped on `@thaodangspace/argos-core/paseo` (no SDK import) so both the CLI and the
  * Phase 10 E2E can share one fake instead of growing two divergent ones.
  */
 

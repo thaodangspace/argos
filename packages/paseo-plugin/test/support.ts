@@ -12,7 +12,7 @@ import type {
   RunDetail,
   RunSummary,
   StepSummary,
-} from "argos-core/rpc";
+} from "@thaodangspace/argos-core/rpc";
 
 import {
   PluginRpcError,

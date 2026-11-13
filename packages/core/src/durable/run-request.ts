@@ -8,7 +8,7 @@
  *
  * The helpers moved here **verbatim** from `rpc/server.ts` (same codes, same messages) so an HTTP
  * request and a fire cannot drift apart. This module is imported by `rpc/server.ts` (serve-only) and
- * by `durable/`; it is deliberately not exported from `durable/index.ts`, so `argos-core/durable`
+ * by `durable/`; it is deliberately not exported from `durable/index.ts`, so `@thaodangspace/argos-core/durable`
  * keeps exactly the surface it had.
  */
 

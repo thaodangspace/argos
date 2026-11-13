@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { DoctorReport, GateListResponse, RunDetail, RunListResponse } from "argos-core/rpc";
+import type { DoctorReport, GateListResponse, RunDetail, RunListResponse } from "@thaodangspace/argos-core/rpc";
 
 import { runCli } from "../src/main.js";
 import { capture, makeTempHome, scrubVolatile, withEnv, type TempHome } from "./support/cli.js";

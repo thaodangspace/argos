@@ -6,12 +6,12 @@ afterEach(() => {
   delete process.env["ARGOS_HOME"];
 });
 
-describe("argos-cli", () => {
+describe("@thaodangspace/argos", () => {
   it("identifies itself", () => {
     expect(CLI_NAME).toBe("argos");
   });
 
-  it("reads its home directory from argos-core", () => {
+  it("reads its home directory from @thaodangspace/argos-core", () => {
     process.env["ARGOS_HOME"] = "/tmp/argos-cli-test-home";
     expect(describeEnvironment()).toBe("argos home: /tmp/argos-cli-test-home");
   });

@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { PACKAGE_NAME, argosHome } from "./index.js";
 
-describe("argos-core", () => {
+describe("@thaodangspace/argos-core", () => {
   it("exposes its package name", () => {
-    expect(PACKAGE_NAME).toBe("argos-core");
+    expect(PACKAGE_NAME).toBe("@thaodangspace/argos-core");
   });
 
   it("returns a non-empty home directory", () => {

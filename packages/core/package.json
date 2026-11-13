@@ -1,9 +1,31 @@
 {
-  "name": "argos-core",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@thaodangspace/argos-core",
+  "version": "0.1.0",
   "type": "module",
   "description": "Argos playbook loader, engine, RPC server, and Paseo adapter",
+  "license": "MIT",
+  "keywords": [
+    "argos",
+    "paseo",
+    "playbook",
+    "workflow",
+    "orchestration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thaodangspace/argos.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/thaodangspace/argos#readme",
+  "bugs": {
+    "url": "https://github.com/thaodangspace/argos/issues"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -47,10 +69,12 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/.tsbuildinfo"
   ],
   "scripts": {
     "build": "tsc -b",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc -b",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"

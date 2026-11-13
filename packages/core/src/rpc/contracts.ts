@@ -13,7 +13,7 @@
  *    tests match on `code`, never on the message. {@link RPC_ERROR_STATUS} is the one mapping from
  *    a code to an HTTP status.
  *
- * This module imports no durable code: `argos-core/rpc` is safe for the CLI and the plugin.
+ * This module imports no durable code: `@thaodangspace/argos-core/rpc` is safe for the CLI and the plugin.
  */
 
 import { z } from "zod";
@@ -46,8 +46,9 @@ export const ARGOS_RPC_VERSION = 1;
  */
 export const ARGOS_SCHEMA_VERSION = 1;
 
-/** Minimum Node runtime (spec: built-in SQLite needs `>=22.5`). */
-export const REQUIRED_NODE_VERSION = "22.5";
+/** Minimum Node runtime: `node:sqlite` exists from 22.5 but needs no `--experimental-sqlite`
+ * only from 22.13, so that is the floor for `argos serve`. */
+export const REQUIRED_NODE_VERSION = "22.13";
 
 /** D3 defaults surfaced by `argos doctor` and the server info. */
 export const DEFAULT_ARGOS_PORT = 7676;
@@ -69,7 +70,7 @@ export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const StepStatusSchema = z.enum(STEP_STATUSES);
 export type StepStatus = z.infer<typeof StepStatusSchema>;
 
-export const StepKindSchema = z.enum(["agent", "gate", "script", "branch"]);
+export const StepKindSchema = z.enum(["agent", "gate", "script", "branch", "delay"]);
 export type StepKind = z.infer<typeof StepKindSchema>;
 
 export const IsolationSchema = z.strictObject({

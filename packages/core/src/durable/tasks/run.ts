@@ -42,6 +42,7 @@ import {
   RunDocFamily,
 } from "../mirror.js";
 import { createAfterRunTask, plannedAfterTasks } from "./after.js";
+import type { DelayTaskDefinition } from "./delay.js";
 import type { GateTaskDefinition } from "./gate.js";
 import type {
   GateSettlement,
@@ -60,6 +61,7 @@ import type { StepTaskDefinition } from "./step.js";
 export interface RunTaskOptions {
   readonly stepTask: StepTaskDefinition;
   readonly scriptTask: ScriptTaskDefinition;
+  readonly delayTask: DelayTaskDefinition;
   readonly gateTask: GateTaskDefinition;
   /**
    * `$ARGOS_HOME`, threaded like the executor so a global script under `<home>/scripts` resolves.
@@ -105,6 +107,7 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   checkpoint,
                   stepTask: options.stepTask,
                   scriptTask: options.scriptTask,
+                  delayTask: options.delayTask,
                   gateTask: options.gateTask,
                   dispatch: (effect) => dispatchPlanFor(tick.record, effect, options.home),
                 },
@@ -237,6 +240,7 @@ export function createRunTaskDefinition(options: RunTaskOptions) {
                   checkpoint: { ...checkpoint, settles: [], gateSettles: [] },
                   stepTask: options.stepTask,
                   scriptTask: options.scriptTask,
+                  delayTask: options.delayTask,
                   gateTask: options.gateTask,
                   dispatch: (effect) => dispatchPlanFor(record, effect, options.home),
                 },
@@ -428,7 +432,7 @@ export type RunTask = ReturnType<typeof createRunTaskDefinition>;
 // ------------------------------------------------------------------ re-exports
 
 // The split is a pure move: everything this module exported before is still exported here, by
-// name (never `export *`), so `argos-core/durable` keeps exactly the same surface.
+// name (never `export *`), so `@thaodangspace/argos-core/durable` keeps exactly the same surface.
 export {
   IDLE_POLL_MS,
   InvalidRunCheckpointError,

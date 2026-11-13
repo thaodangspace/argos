@@ -26,7 +26,7 @@ import type {
   RunSummary,
   StartRunRequest,
   StartRunResponse,
-} from "argos-core/rpc/contracts";
+} from "@thaodangspace/argos-core/rpc/contracts";
 
 /** Connection refused / no server listening: rendered as "Argos server not running". */
 export const ARGOS_SERVER_UNREACHABLE = "argos_server_unreachable";

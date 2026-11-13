@@ -140,7 +140,7 @@ export interface IsolationIR {
   readonly base?: string;
 }
 
-export type StepKind = "agent" | "gate" | "script" | "branch";
+export type StepKind = "agent" | "gate" | "script" | "branch" | "delay";
 
 /** Provenance for a step that came from a sub-playbook (FR10). */
 export interface UseProvenanceIR {
@@ -163,6 +163,11 @@ export interface StepIR {
   readonly gate?: GateIR;
   readonly choices?: Readonly<Record<string, GateChoiceIR>>;
   readonly script?: ScriptIR;
+  /**
+   * `kind: delay` only: how long the step waits, as written (ms, a duration string, or a whole-value
+   * `{{ inputs.x }}` template resolved at dispatch). The wake time is absolute and durable.
+   */
+  readonly delay?: string | number;
   readonly pollMs: number;
   readonly timeout?: string | number;
   readonly retries: number;
@@ -253,7 +258,13 @@ export interface PlaybookIR {
 export type UnhashedPlaybookIR = Omit<PlaybookIR, "hash">;
 
 export function isStepKind(value: string): value is StepKind {
-  return value === "agent" || value === "gate" || value === "script" || value === "branch";
+  return (
+    value === "agent" ||
+    value === "gate" ||
+    value === "script" ||
+    value === "branch" ||
+    value === "delay"
+  );
 }
 
 /** Deep-freeze plain JSON so later phases cannot mutate the contract by accident. */

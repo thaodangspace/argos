@@ -66,12 +66,16 @@ export interface TimedOutAttempt {
  * Attempts whose per-step deadline has passed. An attempt is in flight when it has `startedAt`
  * and no `endedAt`; the deadline is `startedAt + stepTimeoutMs(step, inputs)`.
  *
+ * A `delay` step has no step timeout: its child task ends when the delay elapses, and a
+ * restarted host must not fail a long delay just because wall time passed while it was down.
+ *
  * The global run deadline is intentionally separate (`runDeadlineReached`): it fails the whole
  * run and does not honor step retries.
  */
 export function timedOutAttempts(record: RunRecord, now: number): readonly TimedOutAttempt[] {
   const result: TimedOutAttempt[] = [];
   for (const step of record.ir.steps) {
+    if (step.kind === "delay") continue;
     const state = record.steps[step.id];
     if (state === undefined || state.status !== "running") continue;
     const inFlight = lastInFlightAttempt(state);

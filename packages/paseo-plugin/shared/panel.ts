@@ -30,7 +30,7 @@ import {
   type StepKind,
   type StepStatus,
   type StepSummary,
-} from "argos-core/rpc/contracts";
+} from "@thaodangspace/argos-core/rpc/contracts";
 
 import {
   PluginRpcError,
@@ -79,6 +79,7 @@ export const STEP_KIND_LABELS: Readonly<Record<StepKind, string>> = {
   gate: "gate",
   script: "script",
   branch: "branch",
+  delay: "delay",
 };
 
 export function runStatusTone(status: RunStatus): StatusTone {

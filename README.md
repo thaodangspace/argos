@@ -12,12 +12,25 @@ decides control flow** — models only do the work inside a step.
 
 ## Requirements
 
-- Node `>=22.5` (Argos uses the built-in `node:sqlite`).
+- Node `>=22.13` (Argos uses the built-in `node:sqlite`, which needs no flag from 22.13 on).
 - A running Paseo daemon (`ws://127.0.0.1:6767/ws` by default) with at least one provider ready.
 - `git` for worktree isolation and the read-only guard.
 - Paseo `>=0.15.3` for the panel/chat-tool plugin.
 
-## Install and build
+## Install
+
+```sh
+npm i -g @thaodangspace/argos     # provides the `argos` command
+# or, without installing:
+npx @thaodangspace/argos --help
+```
+
+Both published packages are public on npm: `@thaodangspace/argos` (the CLI) and
+`@thaodangspace/argos-core` (the library: loader, engine, durable host, RPC server, Paseo
+adapter). The Paseo plugin is installed from a checkout, not through npm (see
+[Paseo plugin](#paseo-plugin)).
+
+## Build from source
 
 ```sh
 npm ci
@@ -35,6 +48,21 @@ or link it once:
 ```sh
 npm link ./packages/cli   # then `argos ...`
 ```
+
+## Release (maintainers)
+
+Versions are kept in lockstep: the root, `@thaodangspace/argos-core`, `@thaodangspace/argos`, and
+the private plugin all share one version, and the CLI pins the core version it ships with.
+
+```sh
+npm run version:check -- v0.1.0        # tag must match every manifest
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which re-runs the version guard, the unit
+suite and the typecheck, then publishes core first and the CLI second with npm provenance
+(`NPM_TOKEN` repository secret). To publish by hand, use
+`npm publish -w @thaodangspace/argos-core && npm publish -w @thaodangspace/argos`.
 
 ## Run the server
 
@@ -99,6 +127,26 @@ argos rm <runId>                      # delete a finished run (its worktree is k
 
 Every command supports `--json` with a stable shape. Exit codes: `0` success, `1` usage/runtime,
 `2` playbook validation failure, `3` unauthorized/unreachable server.
+
+### Pausing inside a loop
+
+A `delay` step waits a fixed time and then succeeds. Use it for "work, wait, repeat" loops instead
+of a `sleep` script:
+
+```yaml
+steps:
+  - id: tick
+    prompt: "Do one round of work."
+  - id: wait
+    needs: [tick]
+    delay: 30m            # ms, a duration (90s, 30m, 2h), or "{{ inputs.interval }}"
+    on:
+      success: { goto: tick, max_loops: 96 }
+```
+
+The wake time is computed once and stored durably, so restarting `argos serve` neither restarts
+nor shortens the pause (a `sleep` script is killed by a restart and starts over). A delay step
+has no step timeout and takes no `timeout`, `retries`, `prompt`, `script`, or `outputs`.
 
 ## Schedules
 
@@ -199,9 +247,9 @@ needed.
 
 | Workspace | Package | Contents |
 |---|---|---|
-| `packages/core` | `argos-core` | loader/IR, pure engine, durable host, RPC server, Paseo adapter |
-| `packages/cli` | `argos-cli` | `argos` CLI (HTTP client of `argos serve`) |
-| `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel and chat tools (HTTP client) |
+| `packages/core` | `@thaodangspace/argos-core` | loader/IR, pure engine, durable host, RPC server, Paseo adapter (npm) |
+| `packages/cli` | `@thaodangspace/argos` | `argos` CLI (HTTP client of `argos serve`; npm, `bin: argos`) |
+| `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel and chat tools (HTTP client; private, installed by path) |
 
 More: [AGENTS.md](AGENTS.md) for the implementation contract, storage layout, task kinds, error
 codes, and test commands.

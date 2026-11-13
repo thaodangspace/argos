@@ -1,6 +1,6 @@
 /** Shared RPC command plumbing: one client per command, one place for error mapping. */
 
-import { RpcClient, RpcClientError } from "argos-core/rpc";
+import { RpcClient, RpcClientError } from "@thaodangspace/argos-core/rpc";
 
 import {
   EXIT_OK,

@@ -2,7 +2,7 @@
 
 import { resolve } from "node:path";
 
-import type { Scalar, StartRunRequest } from "argos-core/rpc";
+import type { Scalar, StartRunRequest } from "@thaodangspace/argos-core/rpc";
 
 import { flag, flagValues, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";

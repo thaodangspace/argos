@@ -2,8 +2,8 @@
  * Import-graph guard (FR28, plan Phase 9 verification): the plugin is a thin RPC client.
  *
  * No file under `server/` or `shared/` (nor either entry point) may reach storage, git, the Paseo adapter, the durable
- * host, the RPC *server*, SQLite, or the filesystem API. The only `argos-core` subpath allowed is
- * `argos-core/rpc` (contracts + client), which itself imports no durable code.
+ * host, the RPC *server*, SQLite, or the filesystem API. The only `@thaodangspace\/argos-core` subpath allowed is
+ * `@thaodangspace\/argos-core/rpc` (contracts + client), which itself imports no durable code.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -49,13 +49,13 @@ describe("plugin import graph", () => {
 
   it("never imports storage, git, the Paseo adapter, the durable host, or the RPC server", () => {
     const forbidden = [
-      /^argos-core\/durable/,
-      /^argos-core\/git/,
-      /^argos-core\/paseo/,
-      /^argos-core\/engine/,
-      /^argos-core\/playbook/,
-      /^argos-core\/rpc\/server/,
-      /^argos-core$/,
+      /^@thaodangspace\/argos-core\/durable/,
+      /^@thaodangspace\/argos-core\/git/,
+      /^@thaodangspace\/argos-core\/paseo/,
+      /^@thaodangspace\/argos-core\/engine/,
+      /^@thaodangspace\/argos-core\/playbook/,
+      /^@thaodangspace\/argos-core\/rpc\/server/,
+      /^@thaodangspace\/argos-core$/,
       /^@earendil-works\//,
       /^node:sqlite$/,
       /^node:child_process$/,
@@ -76,12 +76,12 @@ describe("plugin import graph", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("only uses the shared RPC subpath for argos-core", () => {
+  it("only uses the shared RPC subpath for @thaodangspace\/argos-core", () => {
     const offenders: string[] = [];
     for (const file of pluginSources) {
       for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
-        if (!specifier.startsWith("argos-core")) continue;
-        if (!/^argos-core\/rpc(\/contracts)?$/.test(specifier)) {
+        if (!specifier.startsWith("@thaodangspace/argos-core")) continue;
+        if (!/^@thaodangspace\/argos-core\/rpc(\/contracts)?$/.test(specifier)) {
           offenders.push(`${file}: ${specifier}`);
         }
       }
@@ -91,7 +91,7 @@ describe("plugin import graph", () => {
 
   it("keeps its non-relative imports to the Paseo SDK, React, zod, and the RPC contract", () => {
     const allowed = [
-      /^argos-core\/rpc(\/contracts)?$/,
+      /^@thaodangspace\/argos-core\/rpc(\/contracts)?$/,
       /^@getpaseo\//,
       /^react$/,
       /^zod$/,
@@ -108,12 +108,15 @@ describe("plugin import graph", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("declares argos-core as a workspace dependency and no storage dependency", () => {
+  it("declares @thaodangspace\/argos-core as a workspace dependency and no storage dependency", () => {
     const manifest = JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };
-    expect(manifest.dependencies?.["argos-core"]).toBe("0.0.0");
+    const core = JSON.parse(readFileSync(join(pluginRoot, "..", "core", "package.json"), "utf8")) as {
+      version: string;
+    };
+    expect(manifest.dependencies?.["@thaodangspace\/argos-core"]).toBe(core.version);
     const all = { ...manifest.dependencies, ...manifest.devDependencies };
     expect(Object.keys(all)).not.toContain("@earendil-works/pi-durable");
     expect(Object.keys(all)).not.toContain("@earendil-works/chord");

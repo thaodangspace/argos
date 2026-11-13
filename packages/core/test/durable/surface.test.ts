@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import * as durableSurface from "../../src/durable/index.js";
 import * as packageSurface from "../../src/index.js";
 
-/** `argos-core/durable` runtime exports before the split, sorted. */
+/** `@thaodangspace/argos-core/durable` runtime exports before the split, sorted. */
 const DURABLE_SURFACE = [
   "AFTER_STATUS_RANK",
   "ARGOS_EXTENSION_NAME",
@@ -74,7 +74,7 @@ const DURABLE_SURFACE = [
   "writeRunState",
 ];
 
-/** `argos-core` (package root) runtime exports before the split, sorted. */
+/** `@thaodangspace/argos-core` (package root) runtime exports before the split, sorted. */
 const PACKAGE_SURFACE = [
   "ARGOS_ERROR_CODES",
   "ARGOS_HOME_MODE",
@@ -165,11 +165,11 @@ const PACKAGE_SURFACE = [
 ];
 
 describe("public export surface", () => {
-  it("argos-core/durable exports exactly the base-commit names", () => {
+  it("@thaodangspace/argos-core/durable exports exactly the base-commit names", () => {
     expect(Object.keys(durableSurface).sort()).toEqual(DURABLE_SURFACE);
   });
 
-  it("argos-core exports exactly the base-commit names", () => {
+  it("@thaodangspace/argos-core exports exactly the base-commit names", () => {
     expect(Object.keys(packageSurface).sort()).toEqual(PACKAGE_SURFACE);
   });
 });

@@ -4,8 +4,8 @@
  * `planNext` is the only place that turns an effect list into child tasks, mirror/history writes,
  * and the next durable state. It runs inside `runtime.commit()`, so the checkpoint, the run
  * document, and the history line always land in one transaction. Everything else here builds the
- * child input for one dispatch effect (`argos.step` vs `argos.script`) — the run task never needs
- * to know how a step does its work.
+ * child input for one dispatch effect (`argos.step`, `argos.script`, or `argos.delay`) — the run
+ * task never needs to know how a step does its work.
  */
 
 import type { TaskId, Tx } from "@earendil-works/pi-durable";
@@ -19,6 +19,7 @@ import {
   type GateRecord,
   type RunRecord,
 } from "../../engine/index.js";
+import { resolveTimeoutValue } from "../../engine/timeouts.js";
 import type { ProvidersIR } from "../../playbook/ir.js";
 import {
   appendRunHistory,
@@ -28,6 +29,7 @@ import {
   type NewHistoryEvent,
 } from "../mirror.js";
 
+import type { DelayTaskDefinition, DelayTaskInput } from "./delay.js";
 import type { GateTaskDefinition, GateTaskInput } from "./gate.js";
 import type {
   GateSettlement,
@@ -57,18 +59,20 @@ export function gateInputFor(record: RunRecord, gate: GateRecord): GateTaskInput
 
 /**
  * One dispatch decision: which child task kind a step needs and the input it is created with. A
- * `script` step gets an `argos.script` child (FR22); every other non-gate step keeps the Phase 6
- * `argos.step` executor path.
+ * `script` step gets an `argos.script` child (FR22), a `delay` step an `argos.delay` child; every
+ * other non-gate step keeps the Phase 6 `argos.step` executor path.
  */
 export type DispatchPlan =
   | { readonly kind: "step"; readonly input: StepTaskInput }
-  | { readonly kind: "script"; readonly input: ScriptTaskInput };
+  | { readonly kind: "script"; readonly input: ScriptTaskInput }
+  | { readonly kind: "delay"; readonly input: DelayTaskInput };
 
 interface PlanContext {
   readonly runTaskId: TaskId;
   readonly checkpoint: RunCheckpoint;
   readonly stepTask: StepTaskDefinition;
   readonly scriptTask: ScriptTaskDefinition;
+  readonly delayTask: DelayTaskDefinition;
   readonly gateTask: GateTaskDefinition;
   readonly dispatch: (effect: Extract<Effect, { type: "dispatchStep" }>) => DispatchPlan | undefined;
 }
@@ -127,14 +131,13 @@ export async function planNext(
           });
           break;
         }
+        const ownership = { kind: "task", taskId: plan.runTaskId } as const;
         const childId =
           planned.kind === "script"
-            ? await tx.createTask(plan.scriptTask, planned.input, {
-                ownership: { kind: "task", taskId: plan.runTaskId },
-              })
-            : await tx.createTask(plan.stepTask, planned.input, {
-                ownership: { kind: "task", taskId: plan.runTaskId },
-              });
+            ? await tx.createTask(plan.scriptTask, planned.input, { ownership })
+            : planned.kind === "delay"
+              ? await tx.createTask(plan.delayTask, planned.input, { ownership })
+              : await tx.createTask(plan.stepTask, planned.input, { ownership });
         childTasks[effect.stepId] = childId;
         dispatched[String(childId)] = effect.stepId;
         waiting.add(childId);
@@ -353,7 +356,29 @@ function scriptInputFor(
   };
 }
 
-/** Choose the child task kind for one dispatch effect (`script` steps never reach the executor). */
+/**
+ * Build the `argos.delay` child input. The duration is resolved here, against the run inputs, so a
+ * `{{ inputs.x }}` delay is fixed at dispatch; the task turns it into an absolute wake time once.
+ */
+function delayInputFor(
+  record: RunRecord,
+  effect: Extract<Effect, { type: "dispatchStep" }>,
+): DelayTaskInput | undefined {
+  const definition = stepDefinition(record, effect.stepId);
+  if (definition?.delay === undefined) return undefined;
+  const delayMs = resolveTimeoutValue(definition.delay, record.inputs);
+  return {
+    runId: record.id,
+    stepId: definition.id,
+    attempt: effect.attempt,
+    requestId: effect.requestId,
+    delay: definition.delay,
+    ...(delayMs === undefined ? {} : { delayMs }),
+    outcomes: definition.outcomes,
+  };
+}
+
+/** Choose the child task kind for one dispatch effect (`script`/`delay` never reach the executor). */
 export function dispatchPlanFor(
   record: RunRecord,
   effect: Extract<Effect, { type: "dispatchStep" }>,
@@ -364,6 +389,10 @@ export function dispatchPlanFor(
   if (definition.kind === "script") {
     const input = scriptInputFor(record, effect, home);
     return input === undefined ? undefined : { kind: "script", input };
+  }
+  if (definition.kind === "delay") {
+    const input = delayInputFor(record, effect);
+    return input === undefined ? undefined : { kind: "delay", input };
   }
   const input = stepInputFor(record, effect);
   return input === undefined ? undefined : { kind: "step", input };

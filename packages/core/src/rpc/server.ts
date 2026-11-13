@@ -12,8 +12,8 @@
  *   frame per changed run, pushed from `ArgosHost.observeRuns` (a commit observer). There is no
  *   database polling; only a `: ping` heartbeat runs on a timer.
  *
- * `rpc/index.ts` deliberately does not import this module: `argos-core/rpc` stays free of durable
- * imports for the CLI/plugin, while `argos-core/rpc/server` is the serve-only subpath.
+ * `rpc/index.ts` deliberately does not import this module: `@thaodangspace/argos-core/rpc` stays free of durable
+ * imports for the CLI/plugin, while `@thaodangspace/argos-core/rpc/server` is the serve-only subpath.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -79,8 +79,8 @@ import {
   type GateDocumentView,
 } from "./summary.js";
 
-// `argos-core/rpc/server` re-exports the one storage owner so the CLI's `serve` command can open it
-// without importing `argos-core/durable` anywhere in the CLI source (Phase 8 import-graph rule).
+// `@thaodangspace/argos-core/rpc/server` re-exports the one storage owner so the CLI's `serve` command can open it
+// without importing `@thaodangspace/argos-core/durable` anywhere in the CLI source (Phase 8 import-graph rule).
 export { ArgosHost };
 export type { ArgosHostOptions };
 

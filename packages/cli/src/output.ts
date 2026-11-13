@@ -8,8 +8,8 @@
  *   3  unauthorized or unreachable server
  */
 
-import { isArgosError } from "argos-core";
-import { RpcClientError } from "argos-core/rpc";
+import { isArgosError } from "@thaodangspace/argos-core";
+import { RpcClientError } from "@thaodangspace/argos-core/rpc";
 
 export interface CliIo {
   stdout(text: string): void;
@@ -30,13 +30,13 @@ export const EXIT_RUNTIME = 1;
 export const EXIT_VALIDATION = 2;
 export const EXIT_UNREACHABLE = 3;
 
-/** Minimum Node for the built-in SQLite the durable host uses (spec `>=22.5`). */
-export const REQUIRED_NODE_VERSION = ">=22.5";
+/** Minimum Node for the built-in SQLite the durable host uses: unflagged from 22.13. */
+export const REQUIRED_NODE_VERSION = ">=22.13";
 
 export function nodeVersionOk(version: string = process.versions.node): boolean {
   const [major, minor] = version.split(".").map((part) => Number.parseInt(part, 10));
   if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
-  return (major as number) > 22 || ((major as number) === 22 && (minor as number) >= 5);
+  return (major as number) > 22 || ((major as number) === 22 && (minor as number) >= 13);
 }
 
 export function printJson(io: CliIo, value: unknown): void {

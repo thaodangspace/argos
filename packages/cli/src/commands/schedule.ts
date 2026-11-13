@@ -7,7 +7,7 @@
  * execution — the target must not depend on how `argos serve` was started, nor on the zone of
  * whichever machine happens to notice the fire (FR2.5).
  *
- * Only `argos-core/rpc` is imported here (the import-graph guard depends on it).
+ * Only `@thaodangspace/argos-core/rpc` is imported here (the import-graph guard depends on it).
  */
 
 import { resolve } from "node:path";
@@ -20,7 +20,7 @@ import type {
   ScheduleEditRequest,
   ScheduleFire,
   ScheduleSummary,
-} from "argos-core/rpc";
+} from "@thaodangspace/argos-core/rpc";
 
 import { flag, flagValues, hasFlag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";

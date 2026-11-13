@@ -1,7 +1,7 @@
 /**
- * Paseo adapter surface (`argos-core/paseo`).
+ * Paseo adapter surface (`@thaodangspace/argos-core/paseo`).
  *
- * Like `argos-core/durable`, this is a separate subpath so a process opts in explicitly. The
+ * Like `@thaodangspace/argos-core/durable`, this is a separate subpath so a process opts in explicitly. The
  * pure pieces (port types, output schema, catalog, executor) have no SDK dependency; only
  * `client.ts` imports `@getpaseo/client`.
  */

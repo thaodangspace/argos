@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { ValidateReport } from "argos-core/rpc";
+import type { ValidateReport } from "@thaodangspace/argos-core/rpc";
 
 import { runCli } from "../src/main.js";
 import { capture, withEnv } from "./support/cli.js";

@@ -8,7 +8,7 @@ import type {
   ScheduleFire,
   ScheduleSummary,
   ServerInfo,
-} from "argos-core/rpc";
+} from "@thaodangspace/argos-core/rpc";
 
 export const RUN_ID = "run-1";
 export const TASK_ID = "11";

@@ -6,7 +6,7 @@
  * - enforce the single-writer rule through `$ARGOS_HOME/serve.pid`, refusing a second live owner
  *   with `storage_locked` and replacing a stale pid file left by a dead process;
  * - install one `argos` extension containing the `argos.run` / `argos.step` / `argos.script` /
- *   `argos.gate` tasks in a fresh registry, with a **stub** `models` (D6) that throws on any use,
+ *   `argos.delay` / `argos.gate` tasks in a fresh registry, with a **stub** `models` (D6) that throws on any use,
  *   because the engine never consults a model for control flow;
  * - create the run's private worktree when `isolation.mode: worktree` asks for one (FR23, D9),
  *   refusing a dirty source checkout *before* any task exists;
@@ -111,6 +111,7 @@ import {
   type WorktreeRemovalResult,
 } from "./worktrees.js";
 import { planAfterRun } from "./tasks/after.js";
+import { createDelayTaskDefinition } from "./tasks/delay.js";
 import { createGateTaskDefinition } from "./tasks/gate.js";
 import { createAfterRunTask, createRunTaskDefinition, type RunCheckpoint } from "./tasks/run.js";
 import { pinRunScripts, pinScript, type ScriptPins } from "./tasks/script-pin.js";
@@ -224,9 +225,11 @@ export class ArgosHost {
     const scriptTask = createScriptTaskDefinition({
       ...(options.git === undefined ? {} : { git: options.git }),
     });
+    const delayTask = createDelayTaskDefinition();
     const runTask = createRunTaskDefinition({
       stepTask,
       scriptTask,
+      delayTask,
       gateTask,
       ...(home === undefined ? {} : { home }),
     });
@@ -234,7 +237,7 @@ export class ArgosHost {
     registry.install(
       defineExtension({
         name: ARGOS_EXTENSION_NAME,
-        tasks: [runTask, stepTask, scriptTask, gateTask],
+        tasks: [runTask, stepTask, scriptTask, delayTask, gateTask],
       }),
     );
 
@@ -344,7 +347,7 @@ export class ArgosHost {
    * The start path's two halves, for the scheduler only (`durable/schedules.ts`).
    *
    * Internal: `schedules.ts` prepares outside its commit, then calls `commitInTx` inside the commit
-   * that also writes the schedule document. Nothing here is exported from `argos-core/durable`.
+   * that also writes the schedule document. Nothing here is exported from `@thaodangspace/argos-core/durable`.
    */
   get startPort(): RunStartPort {
     return this.#startPort;
@@ -1229,7 +1232,7 @@ export class ArgosHost {
 // ------------------------------------------------------------------ re-exports
 
 // FR5.2 is a pure move: the D6 stub and the public option/result types still come from this
-// module, by name, so `argos-core/durable` keeps exactly the same surface.
+// module, by name, so `@thaodangspace/argos-core/durable` keeps exactly the same surface.
 export { createStubModels };
 export type {
   AddScheduleInput,

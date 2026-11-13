@@ -22,7 +22,7 @@ import {
   RunSummarySchema,
   StartRunRequestSchema,
   StartRunResponseSchema,
-} from "argos-core/rpc/contracts";
+} from "@thaodangspace/argos-core/rpc/contracts";
 
 export const PluginErrorSchema = z.strictObject({
   code: z.string(),
