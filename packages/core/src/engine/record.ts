@@ -190,6 +190,22 @@ export interface RunTrigger {
   readonly reason: RunTriggerReason;
 }
 
+/**
+ * Fork provenance (`argos fork`). A fork is a **new run**, so its document still contains exactly
+ * the IR it runs; this edge is how the discontinuity is recorded instead of implied.
+ *
+ * `fromHash` is the hash of the definition the parent ran, `toHash` this run's `playbookHash`.
+ * Same-definition forks (nothing edited, or an edit that resolved identically) record both equal.
+ */
+export interface ForkedFrom {
+  /** The parent run id. It may be retired later (`argos rm`); the reference is not resolved. */
+  readonly runId: string;
+  /** The step the fork resumed at. Its closure was reset; nothing upstream re-ran. */
+  readonly stepId: string;
+  readonly fromHash: string;
+  readonly toHash: string;
+}
+
 export interface RunRecord {
   readonly id: string;
   readonly playbookId: string;
@@ -205,6 +221,13 @@ export interface RunRecord {
    * record written before provenance existed — hydration of old records is unchanged.
    */
   readonly trigger?: RunTrigger;
+  /**
+   * Fork provenance: the run this one branched from and the definition hashes on both sides
+   * (`fromHash` = the parent's, `toHash` = this run's `playbookHash`). Absent on a run started
+   * normally, and absent on a record written before fork existed — hydration of old records is
+   * unchanged.
+   */
+  readonly forkedFrom?: ForkedFrom;
   /**
    * FR3: one pin per script name (`<name> → {path, sha256}`), covering the main steps and every
    * after-step. Absent when the run has no script step, and absent on a record written before
@@ -305,6 +328,14 @@ const ScriptPinSchema = z.strictObject({
   sha256: z.string().regex(/^[0-9a-f]{64}$/, "expected a lowercase sha256 hex digest"),
 });
 
+/** Fork provenance: strict, so a hand-edited record cannot add a key or blank a field. */
+export const ForkedFromSchema = z.strictObject({
+  runId: z.string().min(1),
+  stepId: z.string().min(1),
+  fromHash: z.string().min(1),
+  toHash: z.string().min(1),
+});
+
 /**
  * The IR is validated by the loader (Phase 2) and frozen into the run. The checkpoint only
  * checks the identity fields the engine relies on; the rest is opaque so IR additions do not
@@ -331,6 +362,7 @@ export const RunRecordSchema = z.strictObject({
   cwd: z.string().min(1),
   worktree: WorktreeSchema.optional(),
   trigger: RunTriggerSchema.optional(),
+  forkedFrom: ForkedFromSchema.optional(),
   scripts: z.record(z.string().min(1), ScriptPinSchema).optional(),
   deadline: z.number().optional(),
   outcome: z.string().min(1).optional(),
@@ -373,6 +405,8 @@ export interface CreateRunRecordInput {
   readonly worktree?: WorktreeRecord;
   /** FR8.1: the schedule fire this run belongs to. Only the scheduler sets it. */
   readonly trigger?: RunTrigger;
+  /** Fork provenance. Only `ArgosHost.forkRun` sets it. */
+  readonly forkedFrom?: ForkedFrom;
   /** FR3: script pins resolved by the host before the run task exists. */
   readonly scripts?: Readonly<Record<string, ScriptPinRecord>>;
   readonly deadline?: number;
@@ -421,6 +455,16 @@ export function createRunRecord(input: CreateRunRecordInput): RunRecord {
     record["scripts"] = scripts;
   }
   if (input.deadline !== undefined) record["deadline"] = input.deadline;
+  // Fork provenance: field by field, so the record holds no alias into the caller's object and a
+  // normal run's JSON stays byte-identical (the key is simply absent).
+  if (input.forkedFrom !== undefined) {
+    record["forkedFrom"] = {
+      runId: input.forkedFrom.runId,
+      stepId: input.forkedFrom.stepId,
+      fromHash: input.forkedFrom.fromHash,
+      toHash: input.forkedFrom.toHash,
+    };
+  }
   Object.assign(record, {
     steps,
     loops: {},

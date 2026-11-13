@@ -46,6 +46,7 @@ import {
   DecideGateRequestSchema,
   DEFAULT_ARGOS_PORT,
   GateDecisionResponseSchema,
+  ForkRequestSchema,
   RetryRequestSchema,
   RunDetailSchema,
   RunListResponseSchema,
@@ -825,6 +826,19 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         }
         const body = RetryRequestSchema.parse(await readJson(req, maxBodyBytes));
         const started = await options.host.retryStep(runId, body.stepId);
+        sendJson(res, 201, StartRunResponseSchema.parse(started), extra);
+        return;
+      }
+
+      // POST /runs/:id/fork (S-FR1): a new run from one step, with the definition reloaded.
+      if (segments.length === 3 && segments[2] === "fork") {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+          return;
+        }
+        const body = ForkRequestSchema.parse(await readJson(req, maxBodyBytes));
+        // Same discovery root a start uses, so the reload finds the same playbook family.
+        const started = await options.host.forkRun(runId, body.stepId, { home });
         sendJson(res, 201, StartRunResponseSchema.parse(started), extra);
         return;
       }

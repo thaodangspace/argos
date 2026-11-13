@@ -15,8 +15,14 @@ function lsHuman(runs: readonly RunSummary[]): string {
   for (const run of runs) {
     // FR8.4: a scheduled run says so; a manual run's line stays byte-identical.
     const schedule = run.trigger === undefined ? "" : `  [schedule ${run.trigger.scheduleId}]`;
+    // S-FR12: a forked run names its parent and fork point, after the schedule marker (a run can
+    // be both).
+    const fork =
+      run.forkedFrom === undefined
+        ? ""
+        : `  [fork ${run.forkedFrom.runId.slice(0, 8)}@${run.forkedFrom.stepId}]`;
     lines.push(
-      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${schedule}`,
+      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${schedule}${fork}`,
     );
   }
   return lines.join("\n");
@@ -45,6 +51,13 @@ function statusHuman(run: RunDetail): string {
   ];
   if (run.worktree !== undefined) {
     lines.push(`  worktree  ${run.worktree.path} [${run.worktree.branch}]`);
+  }
+  // S-FR12: both hashes, so the discontinuity is visible without `--json`.
+  if (run.forkedFrom !== undefined) {
+    lines.push(
+      `  forked    from ${run.forkedFrom.runId} at ${run.forkedFrom.stepId} ` +
+        `(${run.forkedFrom.fromHash.slice(0, 12)} -> ${run.forkedFrom.toHash.slice(0, 12)})`,
+    );
   }
   lines.push("steps:");
   for (const step of run.steps) lines.push(stepLine(step));

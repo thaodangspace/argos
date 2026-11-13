@@ -19,7 +19,7 @@
 import { z } from "zod";
 
 import { ARGOS_ERROR_CODES } from "../errors.js";
-import { RUN_STATUSES, RunTriggerSchema, STEP_STATUSES } from "../engine/record.js";
+import { ForkedFromSchema, RUN_STATUSES, RunTriggerSchema, STEP_STATUSES } from "../engine/record.js";
 import { HISTORY_EVENT_TYPES } from "../history.js";
 /**
  * The schedule vocabulary, shared with the scheduler itself (FR1.4, FR3.5, FR5.1, FR9.1).
@@ -131,6 +131,8 @@ export const RPC_ERROR_STATUS: Readonly<Record<string, number>> = {
   loop_limit: 409,
   // FR4: a worktree operation named a run that has not finished yet.
   run_active: 409,
+  // Fork: the edited definition cannot be applied at the fork point.
+  definition_conflict: 409,
   // FR1.6/FR1.7: the schedule registry.
   schedule_unknown: 404,
   schedule_exists: 409,
@@ -198,6 +200,16 @@ export const RetryRequestSchema = z.strictObject({
   stepId: z.string().min(1),
 });
 export type RetryRequest = z.infer<typeof RetryRequestSchema>;
+
+/**
+ * `POST /runs/:id/fork`: branch a terminal run at one step, reloading the definition from the
+ * run's `cwd`. The response is the same `{runId, taskId}` as a start (a fork **is** a new run),
+ * so it reuses {@link StartRunResponseSchema}.
+ */
+export const ForkRequestSchema = z.strictObject({
+  stepId: z.string().min(1),
+});
+export type ForkRequest = z.infer<typeof ForkRequestSchema>;
 
 export const CancelRunResponseSchema = z.strictObject({
   runId: z.string().min(1),
@@ -362,6 +374,8 @@ export const RunSummarySchema = z.strictObject({
   worktree: WorktreeSchema.optional(),
   /** FR8.2: the schedule fire that started the run. Absent on a manual run, so goldens hold. */
   trigger: RunTriggerSchema.optional(),
+  /** Fork provenance: present only on a run started by `argos fork`. */
+  forkedFrom: ForkedFromSchema.optional(),
   steps: z.array(StepSummarySchema),
   /** Every gate of the run, pending and decided; the CLI/panel filters pending ones. */
   gates: z.array(GateSummarySchema),

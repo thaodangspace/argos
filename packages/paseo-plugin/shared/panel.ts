@@ -1044,6 +1044,7 @@ function historyTone(type: HistoryEvent["type"]): StatusTone {
     case "dispatch":
     case "retry":
     case "script_repinned":
+    case "forked_from":
       return "accent";
     case "finish":
     case "after_start":
@@ -1084,6 +1085,8 @@ export function historyText(event: HistoryEvent): string {
       return `Retried${suffix}`;
     case "script_repinned":
       return `Script repinned${suffix}`;
+    case "forked_from":
+      return `Forked${suffix}`;
   }
 }
 

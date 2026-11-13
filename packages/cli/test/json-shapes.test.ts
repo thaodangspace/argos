@@ -17,6 +17,8 @@ import type { DoctorReport, GateListResponse, RunDetail, RunListResponse } from 
 import { runCli } from "../src/main.js";
 import { capture, makeTempHome, scrubVolatile, withEnv, type TempHome } from "./support/cli.js";
 import {
+  FORKED_RUN_DETAIL,
+  FORKED_RUN_SUMMARY,
   REFUSED_SCHEDULE_SUMMARY,
   SCHEDULE_ID,
   SCHEDULED_RUN_SUMMARY,
@@ -208,6 +210,26 @@ describe("write commands", () => {
     const result = await invoke(["retry", "run-1", "draft", "--json"]);
     expect(result.code).toBe(0);
     expectGolden("retry.json", result.json);
+  });
+
+  it("argos fork --json posts the step and returns a new run id (S-FR1)", async () => {
+    const result = await invoke(["fork", "run-1", "review", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("fork.json", result.json);
+    expect((result.json as { runId: string }).runId).toBe("run-2");
+    const request = current().stub.requests.find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/runs/run-1/fork",
+    );
+    expect(request?.body).toEqual({ stepId: "review" });
+
+    const human = capture();
+    expect(await runCli(["fork", "run-1", "review"], human.io)).toBe(0);
+    expect(human.stdout()).toBe("forked run-1 at review → run run-2 (task 13)\n");
+  });
+
+  it("argos fork needs two positionals and no flags", async () => {
+    expect(await runCli(["fork", "run-1"], capture().io)).toBe(1);
+    expect(await runCli(["fork", "run-1", "review", "--nope"], capture().io)).toBe(1);
   });
 });
 
@@ -583,6 +605,32 @@ describe("argos schedule (FR10.2)", () => {
     expect(await runCli(["ls"], captured.io)).toBe(0);
     expect(captured.stdout()).not.toContain("[schedule");
     expect(await runCli(["ls", "--schedule", SCHEDULE_ID, "--json"], capture().io)).toBe(0);
+  });
+
+  it("renders the fork edge in the human ls line and the status block (S-FR12)", async () => {
+    const alternate = await startStubServer(undefined, {
+      runs: [FORKED_RUN_SUMMARY],
+      detail: FORKED_RUN_DETAIL,
+    });
+    const restore = withEnv({
+      ARGOS_HOME: current().home.home,
+      ARGOS_PORT: String(alternate.port),
+    });
+    try {
+      const list = capture();
+      expect(await runCli(["ls"], list.io)).toBe(0);
+      expect(list.stdout()).toContain("[fork run-1@review]");
+      // A scheduled fork keeps both markers.
+      expect(list.stdout()).toContain(`[schedule ${SCHEDULE_ID}]`);
+
+      const status = capture();
+      expect(await runCli(["status", "run-1"], status.io)).toBe(0);
+      expect(status.stdout()).toContain("forked    from run-1 at review");
+      expect(status.stdout()).toContain("0123456789ab -> fedcba987654");
+    } finally {
+      restore();
+      await alternate.close();
+    }
   });
 
   it("renders concise human lines", async () => {

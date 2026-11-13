@@ -114,4 +114,23 @@ describe("toRunDetail (step logs)", () => {
     expect(pick["outputs"]).toBeUndefined();
     expect(pick["outcome"]).toBeUndefined();
   });
+
+  it("projects fork provenance only when the record has it (S-FR5)", () => {
+    const plain = toRunSummary({ taskId: "42", record: settledRecord() });
+    expect(Object.keys(plain)).not.toContain("forkedFrom");
+
+    const forkedFrom = {
+      runId: "run-parent",
+      stepId: "pick",
+      fromHash: "c".repeat(64),
+      toHash: "d".repeat(64),
+    } as const;
+    const forked = toRunSummary({
+      taskId: "43",
+      record: { ...settledRecord(), forkedFrom },
+    });
+    expect(forked.forkedFrom).toEqual(forkedFrom);
+    // The public schema accepts the projection as-is (strict, so a stray key fails here).
+    expect(RunDetailSchema.safeParse(toRunDetail({ taskId: "43", record: { ...settledRecord(), forkedFrom } }, { events: [] })).success).toBe(true);
+  });
 });

@@ -73,6 +73,18 @@ export interface StartedRun {
   readonly taskId: string;
 }
 
+/**
+ * `ArgosHost.forkRun` options.
+ *
+ * `home` is the same discovery root a start uses (`<home>/playbooks`, `<home>/roles`, …): a fork
+ * re-loads the definition, and it must re-load it from the same family the parent came from.
+ * `id` exists for tests and for a caller that needs a deterministic fork id.
+ */
+export interface ForkRunOptions {
+  readonly id?: string;
+  readonly home?: string;
+}
+
 // ------------------------------------------------------------------ start path (FR4.1)
 
 /**

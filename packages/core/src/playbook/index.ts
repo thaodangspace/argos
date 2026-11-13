@@ -35,6 +35,7 @@ export {
 } from "./resolve.js";
 export { expandPlaybook, type ExpandOptions } from "./expand.js";
 export { validatePlaybook } from "./validate.js";
+export { diffPlaybookIr, type IrDiff, type PlaybookSurface } from "./diff.js";
 export {
   RawAfterSchema,
   RawAgentSchema,

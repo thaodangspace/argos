@@ -138,6 +138,54 @@ describe("argos.run checkpoint (D4/D16)", () => {
     expect(() => hydrateRunRecord(JSON.stringify(withBadReason))).toThrow(InvalidRunRecordError);
   });
 
+  it("round-trips fork provenance and refuses a malformed one (S-FR5)", () => {
+    const ir = singleStepPlaybook();
+    const now = 1_767_225_600_000;
+    const forkedFrom = {
+      runId: "run-parent",
+      stepId: "only",
+      fromHash: "a".repeat(64),
+      toHash: "b".repeat(64),
+    } as const;
+
+    // A normally started record keeps the key out of its JSON entirely, so old records and
+    // existing goldens serialize identically.
+    const manual = createRunRecord({ id: "run-manual", ir, inputs: {}, cwd: "/tmp/argos-fork", now });
+    expect(Object.keys(manual)).not.toContain("forkedFrom");
+
+    const forked = createRunRecord({
+      id: "run-fork",
+      ir,
+      inputs: {},
+      cwd: "/tmp/argos-fork",
+      now,
+      forkedFrom,
+    });
+    // Insertion order matches the schema's declared order, so hydration is byte-identical.
+    expect(Object.keys(forked).slice(0, 8)).toEqual([
+      "id",
+      "playbookId",
+      "playbookHash",
+      "ir",
+      "inputs",
+      "status",
+      "cwd",
+      "forkedFrom",
+    ]);
+    expect(forked.forkedFrom).toEqual(forkedFrom);
+    const json = JSON.stringify(forked);
+    expect(JSON.stringify(hydrateRunRecord(json))).toBe(json);
+
+    // Strict and non-empty: a hand-edited record cannot blank a field or add a key.
+    const blank = JSON.parse(json) as { forkedFrom: Record<string, unknown> };
+    blank.forkedFrom["runId"] = "";
+    expect(() => hydrateRunRecord(JSON.stringify(blank))).toThrow(InvalidRunRecordError);
+
+    const extra = JSON.parse(json) as { forkedFrom: Record<string, unknown> };
+    extra.forkedFrom["surprise"] = true;
+    expect(() => hydrateRunRecord(JSON.stringify(extra))).toThrow(InvalidRunRecordError);
+  });
+
   it("keeps the newest 500 history events", () => {
     const events: HistoryEvent[] = [];
     for (let index = 0; index < HISTORY_LIMIT + 25; index += 1) {

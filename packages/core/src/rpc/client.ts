@@ -193,6 +193,13 @@ export class RpcClient {
     });
   }
 
+  /** `POST /runs/:id/fork`: a new run from one step, with the definition reloaded from disk. */
+  async forkRun(runId: string, stepId: string): Promise<StartRunResponse> {
+    return this.request<StartRunResponse>("POST", `/runs/${encodeURIComponent(runId)}/fork`, {
+      stepId,
+    });
+  }
+
   /** `POST /runs/:id/gates/:gateId`. */
   async decideGate(
     runId: string,

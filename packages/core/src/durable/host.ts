@@ -35,24 +35,28 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
-import { ArgosError } from "../errors.js";
+import { ArgosError, type ArgosIssue } from "../errors.js";
 import type { GitRunner } from "../git/exec.js";
-import { createRunWorktree, assertRunBaseClean, reattachRunWorktree } from "../git/worktree.js";
+import { createRunWorktree, assertRunBaseClean, reattachRunWorktree, runWorktreeBranch } from "../git/worktree.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
+import { loadPlaybook } from "../playbook/index.js";
 import type { IsolationIR, PlaybookIR } from "../playbook/ir.js";
+import { diffPlaybookIr, type PlaybookSurface } from "../playbook/diff.js";
 import { argosHome, dbPath } from "../paths.js";
 import {
   createRunRecord,
   decideGate,
   isTerminalRunStatus,
+  type ForkedFrom,
   type GateRecord,
   type RunRecord,
   type WorktreeRecord,
 } from "../engine/index.js";
-import { cloneRecord, downstreamClosure, hydrateRunRecord } from "../engine/index.js";
+import { cloneRecord, downstreamClosure, hydrateRunRecord, type DraftRecord } from "../engine/index.js";
 import type { Clock, StepExecutor } from "./context.js";
 import { systemClock } from "./context.js";
 import { createStubModels } from "./host-models.js";
+import { validateRunCwd } from "./run-request.js";
 import type {
   AddScheduleInput,
   ArgosHostOptions,
@@ -60,6 +64,7 @@ import type {
   CommitRunOptions,
   DecideGateOptions,
   EditScheduleInput,
+  ForkRunOptions,
   GateDecisionReceipt,
   PreparedRun,
   PrepareRunOutcome,
@@ -1076,8 +1081,8 @@ export class ArgosHost {
     await this.#reattachWorktreeIfMissing(record);
 
     const now = this.#clock.now();
-    const draft = cloneRecord(record);
     const closure = downstreamClosure(record.ir, [stepId]);
+    const draft = this.#cloneWithReset(record, closure);
     // FR3.4/D2: a retry is the operator's re-pin. Every script step in the reset closure is hashed
     // again; a script that is gone refuses the retry before any task exists, and each changed
     // digest is reported as a `script_repinned` history event (old → new) in the retry commit.
@@ -1086,18 +1091,6 @@ export class ArgosHost {
         ? { pins: undefined as ScriptPins | undefined, events: [] as readonly RepinnedScript[] }
         : this.#repinClosure(record, closure);
     if (repinned.pins !== undefined) draft.scripts = repinned.pins;
-    for (const id of closure) {
-      const step = draft.steps[id];
-      if (step === undefined) continue;
-      step.status = "pending";
-      delete step.notBefore;
-      delete step.outcome;
-      delete step.errorCode;
-      delete step.feedback;
-    }
-    draft.status = "pending";
-    delete draft.outcome;
-    delete draft.errorCode;
     draft.updatedAt = Math.max(record.updatedAt, now);
     draft.seq = record.seq + 1;
     const retried = hydrateRunRecord(draft);
@@ -1127,6 +1120,239 @@ export class ArgosHost {
 
     this.#harness.resume();
     return { runId, taskId: String(taskId) };
+  }
+
+  /**
+   * Fork a terminal run at one step (`argos fork`, S-FR1–FR12).
+   *
+   * The fork is a **new run**: it re-loads the definition from the parent's `cwd`, inherits the
+   * parent's settled prefix, and records the discontinuity in `forkedFrom`. That is the whole
+   * point — the alternative (reload inside a retry, same `runId`) would leave one document whose
+   * `playbookHash` disagrees with the prefix that actually ran.
+   *
+   * Order is the same "refuse before anything exists" contract a start uses (S-FR10): the run,
+   * the step, the terminal state, the `cwd`, the loader, the model catalog, the applicability
+   * diff, the script pins — then the worktree, then one commit. Every refusal leaves no task, no
+   * index entry, and no checkout behind.
+   */
+  async forkRun(runId: string, stepId: string, options: ForkRunOptions = {}): Promise<StartedRun> {
+    this.#assertOpen();
+    const doc = await this.getRun(runId);
+    if (doc === undefined) {
+      throw new ArgosError("run_unknown", `unknown run "${runId}"`);
+    }
+    const parent = doc.record;
+    if (!isTerminalRunStatus(parent.status)) {
+      throw new ArgosError(
+        "run_terminal",
+        `run ${runId} is ${parent.status}; cancel it before forking a step`,
+      );
+    }
+    if (parent.ir.steps.every((step) => step.id !== stepId)) {
+      throw new ArgosError(
+        "step_unknown",
+        `run ${runId}: step "${stepId}" is not part of playbook ${parent.playbookId}`,
+      );
+    }
+    validateRunCwd(parent.cwd);
+    // S-FR3: reload from the parent's own discovery context, then keep the parent's resolved
+    // inputs verbatim — a fork continues the same work, and S-FR4.4 already refuses a definition
+    // whose input declarations changed.
+    const ir = loadPlaybook(
+      parent.cwd,
+      parent.playbookId,
+      options.home === undefined ? {} : { home: options.home },
+    );
+    if (this.#modelCatalog !== undefined) {
+      const missing = this.#modelCatalog.missingTargets(ir, parent.inputs);
+      if (missing.length > 0) {
+        throw new ArgosError(
+          "model_unavailable",
+          `playbook ${ir.id}: unknown provider/model target(s): ${missing.join(", ")}; check providers.snapshot()`,
+        );
+      }
+    }
+    const closure = downstreamClosure(parent.ir, [stepId]);
+    this.#assertForkApplicable(parent, ir, stepId, closure);
+
+    const now = this.#clock.now();
+    const forkRunId = options.id ?? ulid(now);
+    const draft = this.#cloneWithReset(parent, closure);
+    draft.id = forkRunId;
+    draft.playbookId = ir.id;
+    draft.playbookHash = ir.hash;
+    // `DraftRecord` types the IR slot as a deep-mutable mirror; every writer replaces it wholesale
+    // with the frozen IR, and `hydrateRunRecord` re-freezes the whole record.
+    (draft as { ir: PlaybookIR }).ir = ir;
+    // S-FR7: deliberately not inherited. Gates are the parent's decisions (new ids start at `:1`),
+    // loop counters would block a fresh attempt on the parent's `max_loops` wall, a schedule
+    // trigger would double-count one fire in `argos ls --schedule`, and an absolute deadline may
+    // already have passed.
+    draft.gates = [];
+    draft.loops = {};
+    draft.loopAllowance = {};
+    delete draft.trigger;
+    delete draft.deadline;
+    draft.createdAt = now;
+    draft.updatedAt = now;
+    draft.seq = 0;
+    draft.forkedFrom = {
+      runId: parent.id,
+      stepId,
+      fromHash: parent.playbookHash,
+      toHash: ir.hash,
+    } satisfies ForkedFrom;
+
+    // S-FR8: pins are resolved against the **new** definition, so a script added or renamed inside
+    // the closure is pinned too; a missing one refuses before any task exists.
+    const repinned = this.#pinForkScripts(draft, closure);
+
+    // S-FR11: the parent's own record decides whether this run is isolated (an `--isolation`
+    // override is not stored in the IR), and a fork always gets its own path and branch.
+    if (parent.worktree !== undefined) {
+      draft.worktree = await this.#forkWorktree(parent, ir, forkRunId);
+    }
+    const forked = hydrateRunRecord(draft);
+
+    const root = await this.#harness.root(this.#context);
+    const taskId = await this.#harness.commit(async (tx) => {
+      const id = await tx.createTask(
+        this.#runTask,
+        { runId: forkRunId, record: forked },
+        { ownership: { kind: "conversation" }, conversationId: root.id },
+      );
+      await writeRunState(tx, id, forked, {
+        type: "run_started",
+        detail: forked.playbookId,
+      });
+      await appendRunHistory(tx, forkRunId, forked, {
+        type: "forked_from",
+        stepId,
+        detail: `${parent.id}@${stepId}`,
+      });
+      for (const event of repinned) {
+        await appendRunHistory(tx, forkRunId, forked, {
+          type: "script_repinned",
+          stepId: event.stepId,
+          detail: event.detail,
+        });
+      }
+      await registerRun(tx, forkRunId);
+      return id;
+    }, this.#context);
+
+    this.#harness.resume();
+    return { runId: forkRunId, taskId: String(taskId) };
+  }
+
+  /**
+   * The shared tail of `retryStep` and `forkRun`: a deep clone with one step's closure reset to
+   * `pending` and every derived field cleared (`notBefore`, `outcome`, `errorCode`, `feedback`).
+   *
+   * It is a named helper rather than a flag on `retryStep` because the two callers disagree about
+   * almost everything else — id, gates, loops, trigger, deadline — and a boolean parameter would
+   * hide that policy at the call site. `updatedAt`/`seq` stay with the caller: a retry advances the
+   * same document, a fork starts a new one.
+   */
+  #cloneWithReset(record: RunRecord, closure: readonly string[]): DraftRecord {
+    const draft = cloneRecord(record);
+    for (const id of closure) {
+      const step = draft.steps[id];
+      if (step === undefined) continue;
+      step.status = "pending";
+      delete step.notBefore;
+      delete step.outcome;
+      delete step.errorCode;
+      delete step.feedback;
+    }
+    draft.status = "pending";
+    delete draft.outcome;
+    delete draft.errorCode;
+    return draft;
+  }
+
+  /**
+   * S-FR4: refuse a fork whose reloaded definition the parent's settled prefix cannot carry.
+   *
+   * The rule is one sentence — every differing step must be inside `closure` — because that is
+   * exactly the set the fork re-runs. Every issue is reported, not just the first, and messages
+   * name paths, step ids, and surfaces only: never a YAML value.
+   */
+  #assertForkApplicable(
+    parent: RunRecord,
+    ir: PlaybookIR,
+    stepId: string,
+    closure: readonly string[],
+  ): void {
+    const diff = diffPlaybookIr(parent.ir, ir);
+    const issues: ArgosIssue[] = [];
+    if (diff.stepOrder) {
+      issues.push({
+        path: "steps",
+        message: "the step set or its order changed; a fork can only re-run steps that already exist",
+      });
+    }
+    for (const surface of diff.playbook) {
+      issues.push({ path: surface, message: FORK_SURFACE_HINTS[surface] });
+    }
+    for (const name of diff.inputs) {
+      issues.push({
+        path: `inputs.${name}`,
+        message:
+          "the input declaration changed; the run's resolved inputs would no longer mean the same thing",
+      });
+    }
+    const inside = new Set(closure);
+    for (const id of diff.steps) {
+      if (inside.has(id)) continue;
+      issues.push({
+        path: `steps.${id}`,
+        stepId: id,
+        message: `step ${id} is upstream of fork point ${stepId}; a change there cannot be applied without re-running it`,
+      });
+    }
+    if (issues.length === 0) return;
+    throw new ArgosError(
+      "definition_conflict",
+      `playbook ${ir.id}: the definition changed outside fork point ${stepId}; only that step and its downstream steps may differ (${issues.length} issue(s))`,
+      { issues },
+    );
+  }
+
+  /**
+   * S-FR8: re-pin the scripts of the reset closure against the fork's definition. Returns the
+   * history events. A record that has no pins and no script in its closure keeps the key absent, so
+   * a script-free fork's JSON stays shaped exactly like a normal run's.
+   */
+  #pinForkScripts(draft: DraftRecord, closure: readonly string[]): readonly RepinnedScript[] {
+    const record = draft as unknown as RunRecord;
+    const closureHasScript = closure.some(
+      (id) => record.ir.steps.find((step) => step.id === id)?.script !== undefined,
+    );
+    if (record.scripts === undefined && !closureHasScript) return [];
+    const repinned = this.#repinClosure(record, closure);
+    if (Object.keys(repinned.pins).length === 0) {
+      delete draft.scripts;
+      return repinned.events;
+    }
+    draft.scripts = repinned.pins;
+    return repinned.events;
+  }
+
+  /** S-FR11: a fork's own checkout, cut from the parent run's branch (never shared). */
+  async #forkWorktree(
+    parent: RunRecord,
+    ir: PlaybookIR,
+    forkRunId: string,
+  ): Promise<WorktreeRecord> {
+    const home = this.#assertWorktreeHome(ir);
+    return createRunWorktree({
+      repo: parent.cwd,
+      home,
+      runId: forkRunId,
+      from: runWorktreeBranch(parent.id),
+      ...(this.#git === undefined ? {} : { git: this.#git }),
+    });
   }
 
   /**
@@ -1267,6 +1493,18 @@ interface RepinnedScript {
   readonly stepId: string;
   readonly detail: string;
 }
+
+/**
+ * Why each playbook-level surface refuses a fork (S-FR4.6). Split out so the message stays one
+ * line per issue and never grows into a paragraph at the call site.
+ */
+const FORK_SURFACE_HINTS: Readonly<Record<PlaybookSurface, string>> = {
+  id: "the playbook id changed; a fork continues the parent's playbook",
+  version: "the IR format version changed",
+  isolation:
+    "the isolation block changed; a fork continues in the parent run's execution context",
+  after: "the after-tasks changed; start a new run to change them",
+};
 
 /** `removeRun` refuses a run whose main graph or any after-task is still going. */
 function assertRemovable(runId: string, record: RunRecord): void {

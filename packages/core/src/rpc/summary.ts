@@ -185,6 +185,8 @@ export function toRunSummary(
     // FR8.2: only a scheduled run carries a trigger; a manual run omits the key entirely (the
     // summary schema is strict, and the CLI goldens must not change).
     ...(record.trigger === undefined ? {} : { trigger: record.trigger }),
+    // Fork provenance: same rule — a normally started run omits the key, so goldens hold.
+    ...(record.forkedFrom === undefined ? {} : { forkedFrom: record.forkedFrom }),
     steps: stepSummaries(record),
     gates: record.gates.map((gate) => toGateSummary(record.id, gate, gateDocuments?.get(gate.id))),
     after: afterSummaries(record),

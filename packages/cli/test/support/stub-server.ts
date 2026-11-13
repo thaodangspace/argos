@@ -49,6 +49,8 @@ export interface StubServer {
 export interface StubOptions {
   /** `GET /runs`; the default is exactly `[RUN_SUMMARY]`. */
   readonly runs?: readonly RunSummary[];
+  /** `GET /runs/:id`; the default is exactly `RUN_DETAIL`. */
+  readonly detail?: RunDetail;
   /** `GET /schedules`; the default is exactly `[SCHEDULE_SUMMARY]`. */
   readonly schedules?: readonly ScheduleSummary[];
   /** Answer every `/schedules` request with a 500, so `argos doctor` reports the failure. */
@@ -69,6 +71,7 @@ export async function startStubServer(
 ): Promise<StubServer> {
   const requests: StubRequest[] = [];
   const runs = options.runs ?? [RUN_SUMMARY];
+  const detail = options.detail ?? RUN_DETAIL;
   const schedules = options.schedules ?? [SCHEDULE_SUMMARY];
   let port = 0;
 
@@ -226,7 +229,7 @@ export async function startStubServer(
         return;
       }
       if (segments.length === 2 && req.method === "GET") {
-        send(200, RUN_DETAIL);
+        send(200, detail);
         return;
       }
       if (segments.length === 2 && req.method === "DELETE") {
@@ -239,6 +242,11 @@ export async function startStubServer(
       }
       if (segments.length === 3 && segments[2] === "retry") {
         send(201, { runId: RUN_ID, taskId: "12" });
+        return;
+      }
+      if (segments.length === 3 && segments[2] === "fork") {
+        // S-FR1: a fork is a new run id, unlike a retry.
+        send(201, { runId: "run-2", taskId: "13" });
         return;
       }
       if (segments.length === 4 && segments[2] === "worktree" && segments[3] === "remove") {

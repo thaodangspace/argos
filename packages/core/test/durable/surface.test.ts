@@ -119,6 +119,7 @@ const PACKAGE_SURFACE = [
   "decideGate",
   "deepFreeze",
   "defaultsFile",
+  "diffPlaybookIr",
   "discoverPlaybooks",
   "discoverRoles",
   "discoverScripts",

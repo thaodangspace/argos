@@ -147,6 +147,29 @@ export const SCHEDULED_RUN_SUMMARY: RunSummary = {
   trigger: { kind: "schedule", scheduleId: SCHEDULE_ID, fireAt: FIRE_AT, reason: "cron" },
 };
 
+/** `argos status` for a forked run: the detail plus the provenance edge (S-FR12). */
+export const FORKED_RUN_DETAIL: RunDetail = {
+  ...RUN_DETAIL,
+  forkedFrom: {
+    runId: RUN_ID,
+    stepId: "review",
+    fromHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    toHash: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  },
+};
+
+/** A run started by `argos fork`: same shape plus the provenance edge (S-FR5). */
+export const FORKED_RUN_SUMMARY: RunSummary = {
+  ...SCHEDULED_RUN_SUMMARY,
+  id: "run-2",
+  forkedFrom: {
+    runId: RUN_ID,
+    stepId: "review",
+    fromHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    toHash: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  },
+};
+
 /** A schedule whose last fire was refused; FR10.3 turns the doctor entry red for it. */
 export const REFUSED_SCHEDULE_SUMMARY: ScheduleSummary = {
   ...SCHEDULE_SUMMARY,

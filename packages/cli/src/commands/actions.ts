@@ -91,3 +91,27 @@ export async function retryCommand(args: ParsedArgs, io: CliIo): Promise<number>
     };
   });
 }
+
+/**
+ * `argos fork <runId> <stepId>` (S-FR1): branch a terminal run at one step, re-loading the
+ * definition from the run's `cwd`. Unlike `retry`, the result is a **new** run id.
+ */
+export async function forkCommand(args: ParsedArgs, io: CliIo): Promise<number> {
+  const unknown = rejectUnknownFlags(args, []);
+  if (unknown !== undefined) {
+    io.stderr(`argos: ${unknown}\n`);
+    return EXIT_RUNTIME;
+  }
+  const [runId, stepId] = args.positionals;
+  if (runId === undefined || stepId === undefined) {
+    io.stderr("argos: fork needs <runId> <stepId>\n");
+    return EXIT_RUNTIME;
+  }
+  return withRpc(io, args.json, async (client) => {
+    const started = await client.forkRun(runId, stepId);
+    return {
+      jsonValue: started,
+      human: `forked ${runId} at ${stepId} → run ${started.runId} (task ${started.taskId})`,
+    };
+  });
+}

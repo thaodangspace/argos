@@ -37,6 +37,9 @@ export const ARGOS_ERROR_CODES = [
   "schedule_unknown",
   // FR1.6: a new schedule id that already exists (HTTP 409).
   "schedule_exists",
+  // Fork: the reloaded definition differs outside the set the fork is about to re-run, or changes
+  // a surface a fork cannot survive (`inputs`, `isolation`, `after`, the step set). HTTP 409.
+  "definition_conflict",
 ] as const;
 
 export type ArgosErrorCode = (typeof ARGOS_ERROR_CODES)[number];

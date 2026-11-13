@@ -40,7 +40,10 @@ nor a timer.
   `Authorization: Bearer <token>`; tokens and secrets never reach the database or logs.
 - **Stable codes.** Callers match on `ArgosError.code`, never on message text.
 - **Same-commit mirrors.** Run/history documents are committed with the task checkpoint.
-- **Definition freeze.** A run stores the fully resolved IR + hash; it never reloads the playbook.
+- **Definition freeze.** A run stores the fully resolved IR + hash and never reloads it. An edited
+  definition continues through `argos fork`, which starts a **new** run carrying `forkedFrom`
+  provenance and the parent's settled prefix; one run document always contains exactly the IR it
+  ran, so a resume can never execute a definition the record does not hold.
 - **Durable schedules.** A schedule is a document, not a task: one in-process timer only wakes a
   tick, and the fire's single commit (guards + deterministic run id) is what makes a fire happen
   exactly once.
@@ -164,7 +167,11 @@ history, run-index entry **and** the schedule document (`lastFire`, `nextFireAt`
 The history event vocabulary lives in `src/history.ts` (`HISTORY_EVENT_TYPES`, shared with the
 read model's schema): `run_started`, `select`, `dispatch`, `settle`, `gate`, `gate_decided`,
 `finish`, `effect_skipped`, `task_error`, `after_queued`, `after_start`, `retry`, and
-`script_repinned` (FR3.4 — one line per re-pinned script, `detail` = `<name>: <from> -> <to>`).
+`script_repinned` (FR3.4 — one line per re-pinned script, `detail` = `<name>: <from> -> <to>`), and
+`forked_from` (the first event after `run_started` on a forked run; `stepId` is the fork point and
+`detail` = `<parentRunId>@<stepId>`; the hashes live in `RunRecord.forkedFrom`). Adding an event is
+two edits, not one: the list in `src/history.ts` and the plugin's exhaustive `historyText`/
+`historyTone` switches in `shared/panel.ts` (the compiler requires the second).
 
 ## Error codes
 
@@ -204,6 +211,7 @@ Every deliberate failure is an `ArgosError` with one of these codes. The HTTP co
 | `step_unknown` | `POST /runs/:id/retry` for an unknown step | 404 |
 | `schedule_unknown` | unknown schedule id (index read, show/edit/pause/resume/run/rm) | 404 |
 | `schedule_exists` | `POST /schedules` / `argos schedule add` for an id already in the index | 409 |
+| `definition_conflict` | a fork's reloaded definition differs outside the set the fork re-runs, or changes `inputs`/`isolation`/`after`/the step set; `issues` names the surfaces and step ids | 409 |
 
 Protocol-only responses (`not_found`, `method_not_allowed`, `internal_error`) are not
 `ArgosErrorCode`s; unknown codes map to HTTP 500.
@@ -229,7 +237,8 @@ success.
 `packages/core/src/playbook/` is the compatibility contract: `schema.ts` (zod raw YAML),
 `load.ts` (discovery + read-only pipeline), `resolve.ts` (agent precedence, input wiring,
 condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` (graph checks),
-`hash.ts` (canonical JSON + sha256), `ir.ts` (the frozen JSON IR the rest of Argos consumes).
+`hash.ts` (canonical JSON + sha256), `diff.ts` (the pure IR diff a fork's applicability guard uses),
+`ir.ts` (the frozen JSON IR the rest of Argos consumes).
 
 - Discovery: `.argos/playbooks/*.yaml` then `.paseo/plugins/playbooks/*.yaml` (same fallback for
   `roles/`, `defaults/main.yaml`, `scripts/`); playbook id = filename. An optional `home`
@@ -284,8 +293,10 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
 - `RunRecord` is the whole checkpoint: frozen IR + inputs + step/gate/loop state, plus the optional
   additive `scripts` map (`Record<name, { path, sha256 }>`, FR3 pinning; absent when the playbook
   has no script step and on a record written before pinning — hydration of old JSON is unchanged),
-  and the optional additive `trigger` (`{kind: "schedule", scheduleId, fireAt, reason}`, FR8.1;
-  absent on a manual run, so old records and JSON stay byte-identical).
+  the optional additive `trigger` (`{kind: "schedule", scheduleId, fireAt, reason}`, FR8.1;
+  absent on a manual run, so old records and JSON stay byte-identical), and the optional additive
+  `forkedFrom` (`{runId, stepId, fromHash, toHash}`; only `forkRun` sets it, so a normally started
+  run omits the key).
   `createRunRecord` starts every step `pending`; `hydrateRunRecord` validates strictly and returns
   the input untouched, so `JSON.stringify(hydrate(json)) === json`.
 - Run statuses: `pending | running | waiting | completed | failed | cancelled` (`waiting` = a gate
@@ -340,7 +351,10 @@ public surface is the `@thaodangspace/argos-core/durable` subpath; it is deliber
 the package root so the CLI and plugin cannot open SQLite by accident.
 
 `ArgosHost` (`host.ts`) owns one SQLite file. `startRun({ ir, inputs, cwd, worktree?, deadline?,
-id? })` returns `{ runId, taskId }` and is the public front of two halves: `#prepareRun` (the
+id? })` returns `{ runId, taskId }`, and `forkRun(runId, stepId, { home?, id? })` returns the same
+shape for a **new** run that re-loads the definition and inherits the parent's settled prefix
+(`definition_conflict` when the edit escapes `downstreamClosure(parentIr, [stepId])`). `startRun` is
+the public front of two halves: `#prepareRun` (the
 model check, the idempotency fast path, the run id, script pins, the worktree, the record — it
 never writes) and `#commitRun` (task + mirror + history + run index + idempotency receipt, inside
 the caller's commit). `runId` is a dependency-free ULID, unless a caller supplies one — a schedule
@@ -729,6 +743,7 @@ by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunId
 | `POST /worktrees/gc` | `host.gcWorktrees` (`argos worktree gc`): terminal runs whose `updatedAt < now - olderThan` (`<n>(s\|m\|h\|d)`), `dryRun`, per-run `skipped` reasons (`active`, `path_mismatch`, a stable code), and `orphans` under `<home>/worktrees` that no run claims (reported, never deleted) |
 | `POST /runs/:id/cancel` | engine `cancel`; `run_terminal` if finished |
 | `POST /runs/:id/retry` | clone a terminal run into a fresh task (same `runId`), reset the step + downstream; refuses non-terminal (`run_terminal`), unknown run/step |
+| `POST /runs/:id/fork` | **new** run from one step with the definition reloaded from the run's `cwd`: inherits the settled prefix, records `forkedFrom`, drops gates/loops/trigger/deadline, re-pins the closure's scripts; `definition_conflict` when the edit escapes the reset closure |
 | `POST /runs/:id/gates/:gateId` | first writer wins; `gate_unknown`/`gate_already_decided`/`run_terminal` |
 | `GET /schedules` | `{schedules: ScheduleSummary[]}` sorted by id, from the `argos.schedules` index (never a run scan) |
 | `POST /schedules` | 201 `ScheduleDetail`: `host.addSchedule` (id defaults to the playbook id, `tz` to the server's zone) runs the same dry start check as `POST /runs`; `schedule_exists`, `invalid_request` at 100 schedules |
@@ -779,6 +794,7 @@ commit that creates the run task, including after-task children and retry clones
 | `argos decide <runId> <gateId> <decision> [--comment]` | `GateDecisionResponse` | 0 |
 | `argos cancel <runId>` | `{runId, status}` | 0 |
 | `argos retry <runId> <stepId>` | `{runId, taskId}` | 0 |
+| `argos fork <runId> <stepId>` | `{runId, taskId}` (a new `runId`, with `forkedFrom`) | 0, 2 `model_unavailable`, 1 otherwise |
 | `argos rm <runId>` | `{runId, status, worktree?}` | 0 |
 | `argos worktree rm <runId> [--force] [--delete-branch]` | `{runId, path, removed, branchDeleted}` | 0 |
 | `argos worktree gc --older-than <dur> [--dry-run] [--force] [--delete-branch]` | `{removed: [{runId, path, branchDeleted}], skipped: [{runId, reason}], orphans: [path]}` | 0 |
@@ -917,7 +933,10 @@ checkpoint byte identity, diamond/reopen with one agent per step, crash inside `
 timeout + retry, gate open/sleeping, one-writer decisions, pending gate survival, loop-limit
 approve/reject, gate feedback, after-tasks, scripts (exit 75, timeout, kill, env, resolution),
 script pinning (pins at start, `script_changed` on edit/delete/resume, `script_repinned` on retry,
-after-task copy, pre-pinning records), worktrees, `readonly_violation`, and the scheduler:
+after-task copy, pre-pinning records), `fork` (new run id, edited prompt reaching the executor,
+prefix preserved and parent untouched, `forkedFrom` + `forked_from`, gates/loops/trigger/deadline
+dropped, `definition_conflict` inside/outside the closure, script re-pin, fork worktree from the
+parent branch), worktrees, `readonly_violation`, and the scheduler:
 `schedule-docs` (strict/hydrating documents, bounded `fires`/`runIds`, `scheduleRunId`),
 `schedules` (CRUD, duplicate/limit refusals, the dry check), `schedule-runner` (arm/disarm, tick
 order, cache), `schedule-fire` (one commit, guards, adopt-existing, run-now, refusal,
@@ -1013,6 +1032,19 @@ suite green.
   Argos' own configuration (`ARGOS_HOME`, `ARGOS_PORT`, `ARGOS_PASEO_PASSWORD`, …) is never passed
   even when the step names it. `env: ["*"]` restores the old inherit-everything-that-is-not-secret
   behavior (`argos validate` then warns `env_inherit_all`); see `docs/compat.md` rows 21 and 30.
+- **A fork cannot carry uncommitted worktree changes.** An isolated fork's checkout is cut from the
+  parent's committed branch head (`argos/<parentRunId>`), so a dirty parent worktree stays behind
+  for inspection instead of being copied. Nothing is fetched, and the source checkout's dirtiness
+  is deliberately not checked (a normal isolated start still refuses it with `worktree_base_dirty`).
+- **A fork needs a terminal parent and cannot change inputs.** Fork while a run is parked at a gate
+  is `run_terminal` (cancel first), `--input` overrides are not accepted (that is a new run), and
+  `after`-task edits are refused (`definition_conflict`) because a fork only rewrites the main
+  graph.
+- **A fork resets loop counters deliberately.** `retry` keeps them; a fork is a fresh attempt, so an
+  operator can bypass a `max_loops` gate by forking. The gate is a human checkpoint, not a security
+  control, and fork is an authenticated operator action.
+- **`forkedFrom` may dangle.** `argos rm <parent>` retires the parent document while a fork keeps
+  naming it; the reference is rendered as stored and never resolved.
 - **Worktrees are never cleaned up automatically**; a failed/violating step leaves its worktree
   for inspection, and cleanup is the manual `argos worktree rm` / `argos worktree gc` pair (FR4).
   gc only *reports* a directory under `<home>/worktrees` that no run index entry claims.

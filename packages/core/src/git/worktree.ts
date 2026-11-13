@@ -59,6 +59,13 @@ export interface CreateRunWorktreeInput {
   readonly runId: string;
   /** `isolation.base`; default: the repository's default branch (see the module comment). */
   readonly base?: string;
+  /**
+   * Fork base: an existing local branch (`argos/<parentRunId>`) to cut from instead of
+   * `origin/<base>`. When set, `base` is inapplicable, the source checkout's dirtiness is not
+   * checked (the base is a local commit, not a remote branch) and nothing is fetched — a fork is
+   * a local operation and must work offline.
+   */
+  readonly from?: string;
   readonly git?: GitRunner;
 }
 
@@ -272,6 +279,18 @@ async function resolveOriginCommit(context: Context, name: string): Promise<stri
   }
 }
 
+/** The commit a local branch points at (fork base, `argos/<parentRunId>`). */
+async function resolveLocalBranchCommit(context: Context, branch: string): Promise<string> {
+  const sha = await probe(context, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (sha === undefined || sha === "") {
+    throw new ArgosError(
+      "worktree_failed",
+      `${context.repo}: the fork base branch ${branch} does not exist; it was deleted (argos worktree rm --delete-branch), so the fork cannot be cut from it`,
+    );
+  }
+  return sha;
+}
+
 /** The base commit of an existing branch: its merge-base with the freshly fetched base. */
 async function baseShaFor(
   context: Context,
@@ -329,6 +348,9 @@ export async function assertRunBaseClean(input: {
  * Create (or re-adopt) the worktree of one run. Throws `worktree_base_dirty` when the source
  * checkout has uncommitted changes and `worktree_failed` for every other setup failure. Never
  * deletes anything.
+ *
+ * With `from` (a fork), the base is that local branch: no fetch, no source-dirtiness check, and
+ * `base` is ignored — a fork continues the parent run's work, it does not re-cut from `origin`.
  */
 export async function createRunWorktree(input: CreateRunWorktreeInput): Promise<RunWorktree> {
   const context: Context = { repo: input.repo, git: input.git ?? execFileGit };
@@ -336,26 +358,43 @@ export async function createRunWorktree(input: CreateRunWorktreeInput): Promise<
   const branch = runWorktreeBranch(input.runId);
   const branchRef = `refs/heads/${branch}`;
 
-  // 1. A dirty source checkout would silently not be part of the run: the worktree is cut from a
-  //    commit. Refuse before anything is created (FR23, spec edge case "Worktree creation fails").
-  await assertRunBaseClean({
-    repo: input.repo,
-    ...(input.git === undefined ? {} : { git: input.git }),
-  });
+  // 1. Resolve the base commit. Two shapes: a fork (a local branch, already known) or a normal run
+  //    (a fresh `origin/<base>`, after refusing a dirty source checkout).
+  let baseName: string | undefined;
+  let localBase: string | undefined;
+  let baseSha: string;
+  if (input.from === undefined) {
+    // 1a. A dirty source checkout would silently not be part of the run: the worktree is cut from
+    //     a commit. Refuse before anything is created (FR23, spec edge case "Worktree fails").
+    await assertRunBaseClean({
+      repo: input.repo,
+      ...(input.git === undefined ? {} : { git: input.git }),
+    });
 
-  // 2. Fresh base: fetch first, then resolve. `--prune` drops branches deleted on the remote.
-  await gitOr(context, ["fetch", "--prune", "--quiet", "origin"], "fetch origin");
-  const explicitBase = input.base === undefined || input.base === "" ? undefined : input.base;
-  if (explicitBase !== undefined && !isSafeRefName(explicitBase)) {
-    throw new ArgosError(
-      "worktree_failed",
-      `${input.repo}: isolation.base ${JSON.stringify(explicitBase)} is not a valid branch name`,
-    );
+    // 1b. Fresh base: fetch first, then resolve. `--prune` drops branches deleted on the remote.
+    await gitOr(context, ["fetch", "--prune", "--quiet", "origin"], "fetch origin");
+    const explicitBase = input.base === undefined || input.base === "" ? undefined : input.base;
+    if (explicitBase !== undefined && !isSafeRefName(explicitBase)) {
+      throw new ArgosError(
+        "worktree_failed",
+        `${input.repo}: isolation.base ${JSON.stringify(explicitBase)} is not a valid branch name`,
+      );
+    }
+    baseName = explicitBase ?? (await defaultBaseName(context));
+    baseSha = await resolveOriginCommit(context, baseName);
+  } else {
+    // 1c. Fork: the parent run's branch is the base. It must be a branch name, never an option.
+    if (!isSafeRefName(input.from)) {
+      throw new ArgosError(
+        "worktree_failed",
+        `${input.repo}: fork base ${JSON.stringify(input.from)} is not a valid branch name`,
+      );
+    }
+    localBase = input.from;
+    baseSha = await resolveLocalBranchCommit(context, localBase);
   }
-  const baseName = explicitBase ?? (await defaultBaseName(context));
-  const baseSha = await resolveOriginCommit(context, baseName);
 
-  // 3. Restart path: the same run id already has its worktree. Reuse it when it is clean; never
+  // 2. Restart path: the same run id already has its worktree. Reuse it when it is clean; never
   //    renumber or re-create it (the run record may already reference it).
   const canonicalPath = canonical(path);
   const existing = (await listRunWorktrees({ repo: input.repo, ...(input.git === undefined ? {} : { git: input.git }) })).find(
@@ -372,7 +411,8 @@ export async function createRunWorktree(input: CreateRunWorktreeInput): Promise<
     return {
       path,
       branch,
-      baseSha: await baseShaFor(context, branchRef, baseName, baseSha),
+      baseSha:
+        baseName === undefined ? baseSha : await baseShaFor(context, branchRef, baseName, baseSha),
     };
   }
 
@@ -382,6 +422,12 @@ export async function createRunWorktree(input: CreateRunWorktreeInput): Promise<
   if (branchExists) {
     // The branch survived a crash between `worktree add` steps: re-attach it instead of failing.
     await gitOr(context, ["worktree", "add", path, branch], `re-attach ${branchRef} at ${path}`);
+  } else if (localBase !== undefined) {
+    await gitOr(
+      context,
+      ["worktree", "add", "-b", branch, path, `refs/heads/${localBase}`],
+      `create fork worktree ${path} from refs/heads/${localBase}`,
+    );
   } else {
     await gitOr(
       context,

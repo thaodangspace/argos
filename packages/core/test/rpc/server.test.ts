@@ -804,6 +804,18 @@ describe("error code → status map (FR3.3)", () => {
     expect(statusForCode("schedule_unknown")).toBe(404);
     expect(statusForCode("schedule_exists")).toBe(409);
   });
+
+  it("maps definition_conflict to 409 and keeps it a stable Argos code", () => {
+    expect(ARGOS_ERROR_CODES).toContain("definition_conflict");
+    expect(RPC_ERROR_STATUS["definition_conflict"]).toBe(409);
+    expect(statusForCode("definition_conflict")).toBe(409);
+  });
+
+  it("maps every stable Argos code to one status", () => {
+    for (const code of ARGOS_ERROR_CODES) {
+      expect(RPC_ERROR_STATUS[code], code).toBeTypeOf("number");
+    }
+  });
 });
 
 // ------------------------------------------------------------------ helpers

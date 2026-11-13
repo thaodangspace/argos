@@ -65,8 +65,9 @@ The arrows only point down. The engine imports no I/O, no timers, no durable or 
 `loadPlaybook(repoDir, id)` discovers `.argos/playbooks/*.yaml` (then the paseo fallback), reads
 roles/defaults, normalizes aliases, wires inputs, inlines sub-playbooks, validates the graph, and
 freezes a `PlaybookIR` with a canonical `sha256` hash. It never writes. The run checkpoint stores
-the frozen IR, so editing a playbook cannot change an active run; a new run gets a new hash. See
-`docs/compat.md` for the upstream contract.
+the frozen IR, so editing a playbook cannot change an active run; a new run gets a new hash. An
+edited definition is picked up by `argos fork`, which starts a *new* run at a chosen step (see
+[Fork at a step](#fork-at-a-step)). See `docs/compat.md` for the upstream contract.
 
 ### Pure engine
 
@@ -174,6 +175,40 @@ Per-step `timeout` (default 30m) is resolved at use time; a timed-out attempt is
 `step_timeout`. The run `deadline` fails the whole run immediately. This is a documented deviation
 from a fully ticking scheduler: the run record sees one dispatch per child task, while local
 attempts are visible in the step checkpoint/history.
+
+### Fork at a step
+
+`argos fork <runId> <stepId>` is the iterate loop: edit a step's prompt, branch the finished run at
+that step, keep everything upstream. Three rules make it safe to have without weakening the freeze.
+
+**A fork is a new run.** It gets a fresh run id, its own worktree and branch, its own mirror and
+history. The parent document is never mutated. A same-id reload would produce one document whose
+`playbookHash` disagrees with the prefix that actually ran, and reconstructing the boundary would
+mean replaying history `seq` — so the discontinuity is recorded instead of implied, as
+`RunRecord.forkedFrom = {runId, stepId, fromHash, toHash}` plus one `forked_from` history event
+(`detail = <parentRunId>@<stepId>`). This is the "branch with a parent pointer" model, not the
+"apply the newest code to every resume" model: a resume still never re-reads a file.
+
+**The edit must stay inside the reset closure.** The guard diffs the frozen IR against a fresh
+`loadPlaybook` of the run's `cwd` (`playbook/diff.ts`) and refuses with `definition_conflict` unless
+every differing step is in `downstreamClosure(parentIr, [stepId])` — the set the fork re-runs — and
+the step sequence, input declarations, `isolation`, and `after` are unchanged. `title`,
+`description`, `defaults`, `providers`, `roles`, `blocks`, `outcomes`, `concurrency`, and the hash
+may differ freely; `labels` may not, because `resolve.ts` merges playbook labels into every
+`StepIR`. The closure is computed on the **parent** IR, so a new `goto` edge inside it can only add
+work, never hide it.
+
+**State carries over by policy, not by accident.** Inherited: step status/outputs/attempts/feedback,
+`cwd`, `exhausted`, and the parent's resolved inputs verbatim. Re-pinned: the closure's scripts
+(hash compared against the new IR, `script_repinned` per change). Dropped: `gates` (the parent's
+decisions, and new ids start at `:1`), `loops`/`loopAllowance` (a fork is a fresh attempt and must
+not hit the parent's `max_loops` wall on its first re-run), `trigger` (one fire, one run in
+`argos ls --schedule`), `deadline` (an absolute instant that may already have passed). An isolated
+parent's fork cuts `argos/<forkRunId>` from `refs/heads/argos/<parentRunId>` locally — no fetch, no
+source-dirtiness check — so uncommitted parent work stays behind for inspection.
+
+`argos retry` remains the other tool: same `runId`, same frozen IR, scripts re-pinned. The mental
+model is one sentence each — **retry never reloads, fork always does**.
 
 ## Scheduler
 
@@ -456,7 +491,9 @@ tool, so an agent cannot register, edit, or run one.
   `AGENTS.md`.
 - **Same-commit mirrors.** Run/history documents are committed with the checkpoint; the UI cannot
   observe a state older than the engine.
-- **Definition freeze.** A run's IR and hash are immutable once started.
+- **Definition freeze.** A run's IR and hash are immutable once started, and a resume never
+  re-reads a file. An edited definition continues through `argos fork`: a new run with `forkedFrom`
+  provenance, so every document still contains exactly the IR it ran.
 - **Durable schedules.** A schedule is a document, not a task; one in-process timer only wakes a
   tick, and the fire's single commit (guards plus a deterministic run id) is what makes a fire
   happen exactly once.
@@ -467,3 +504,5 @@ tool, so an agent cannot register, edit, or run one.
 - `docs/compat.md` — the paseo-playbooks divergences with fixtures.
 - `docs/spikes/pi-durable-host.md` — the spike that pinned the pi-durable host behavior.
 - The approved spec and plan in `brain/spec/2026/Nov/11/03_*`.
+- `brain/spec/2026/Nov/13/01_spec_argos_fork_at_step.md` and `01_impl_argos_fork_at_step.md` —
+  fork-at-step: the problem, the closure rule, and the phase plan it was built from.
