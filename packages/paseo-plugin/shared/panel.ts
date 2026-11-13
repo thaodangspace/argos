@@ -19,13 +19,17 @@ import {
   SSE_SNAPSHOT_EVENT,
   type GateDecisionResponse,
   type GateSummary,
+  type HistoryEvent,
+  type RunDetail,
   type RunStatus,
   type RunSummary,
   type Scalar,
   type StartRunRequest,
   type StartRunResponse,
+  type StepDetailSummary,
   type StepKind,
   type StepStatus,
+  type StepSummary,
 } from "argos-core/rpc/contracts";
 
 import {
@@ -35,6 +39,16 @@ import {
   type PanelRpc,
   type SseFrame,
 } from "./rpc-client";
+import {
+  formatClock,
+  formatDateTime,
+  formatDuration,
+  formatRelative,
+  formatScalar,
+  formatUsage,
+  pluralized,
+  shortId,
+} from "./format";
 
 /** Tone names the client maps onto `theme.colors` (`statusSuccess`, `statusDanger`, …). */
 export type StatusTone = "neutral" | "accent" | "success" | "warning" | "danger";
@@ -105,6 +119,35 @@ export function isActiveRun(status: RunStatus): boolean {
   return status === "running" || status === "waiting" || status === "pending";
 }
 
+/**
+ * The list's status filter (GitHub CI's "Filter workflow runs"). `running` covers every run that
+ * still needs a process (`pending`, `running`, `waiting`), which is what a user means by it.
+ */
+export type RunFilter = "all" | "running" | "failed" | "completed";
+
+export const RUN_FILTERS: readonly RunFilter[] = ["all", "running", "failed", "completed"];
+
+export const RUN_FILTER_LABELS: Readonly<Record<RunFilter, string>> = {
+  all: "All",
+  running: "Running",
+  failed: "Failed",
+  completed: "Completed",
+};
+
+/** True when a run belongs to the filter. `cancelled` counts as failed (it needs attention too). */
+export function runMatchesFilter(status: RunStatus, filter: RunFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "running":
+      return isActiveRun(status);
+    case "failed":
+      return status === "failed" || status === "cancelled";
+    case "completed":
+      return status === "completed";
+  }
+}
+
 // ------------------------------------------------------------------ model
 
 export interface PanelError {
@@ -123,6 +166,13 @@ export interface PanelModel {
   readonly busyRuns: readonly string[];
   /** A start-run request is in flight: the start form disables. */
   readonly starting: boolean;
+  /** The run whose CI page is open, or `null` on the list. */
+  readonly selectedRunId: string | null;
+  /** The selected run's `GET /runs/:id` payload (attempts, outputs, history), once loaded. */
+  readonly detail: RunDetail | null;
+  /** A detail fetch for `selectedRunId` is in flight. */
+  readonly detailLoading: boolean;
+  readonly filter: RunFilter;
   readonly loading: boolean;
   readonly connected: boolean;
   readonly error: PanelError | null;
@@ -135,6 +185,10 @@ export const EMPTY_PANEL: PanelModel = {
   inFlight: [],
   busyRuns: [],
   starting: false,
+  selectedRunId: null,
+  detail: null,
+  detailLoading: false,
+  filter: "all",
   loading: false,
   connected: false,
   error: null,
@@ -507,6 +561,12 @@ export interface PanelStore {
   /** Subscribe to `GET /events` and reconnect on drop. Idempotent. */
   start(): void;
   stop(): void;
+  /** Open a run's CI page: `GET /runs/:id` (attempts, outputs, history). */
+  selectRun(runId: string): Promise<PanelModel>;
+  /** Back to the run list. */
+  closeRun(): PanelModel;
+  /** Narrow the run list (`all` clears the filter). */
+  setFilter(filter: RunFilter): PanelModel;
   /** Decide one gate exactly once; resolves with the settled model. */
   decideGate(action: DecideGateAction): Promise<DecideGateOnceResult>;
   /** Cancel one run; the buttons disable while it is in flight. */
@@ -543,6 +603,23 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
     return model;
   };
 
+  /**
+   * Re-fetch the open run's detail when its summary moved. The bridge polls the list every 2 s, so
+   * `seq` is what decides: an unchanged run causes no extra request.
+   */
+  const syncDetail = (): void => {
+    const selected = model.selectedRunId;
+    if (selected === null || model.detailLoading) return;
+    const run = model.runs.find((entry) => entry.id === selected);
+    if (run === undefined) {
+      if (model.detail === null && model.selectedRunId === null) return;
+      set({ ...model, selectedRunId: null, detail: null, detailLoading: false });
+      return;
+    }
+    if (model.detail !== null && model.detail.seq === run.seq) return;
+    void store.selectRun(selected);
+  };
+
   /** Mark one run busy, call `action` once, then refresh; a failure lands in `model.error`. */
   const runBusy = async (runId: string, action: () => Promise<void>): Promise<PanelModel> => {
     if (model.busyRuns.includes(runId)) return model;
@@ -557,8 +634,8 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
       });
     }
     if (disposed) return model;
-    const loaded = await store.load();
-    return set({ ...loaded, busyRuns: without(loaded.busyRuns, runId) });
+    await store.load();
+    return set({ ...model, busyRuns: without(model.busyRuns, runId) });
   };
 
   const store: PanelStore = {
@@ -576,7 +653,7 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
       set({ ...model, loading: true });
       try {
         const loaded = await loadPanel({ client: options.client });
-        return set({
+        const next = set({
           ...model,
           runs: loaded.runs,
           gates: loaded.gates,
@@ -585,6 +662,8 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
           error: null,
           loadedAt: now(),
         });
+        syncDetail();
+        return next;
       } catch (error) {
         return set({
           ...model,
@@ -594,6 +673,36 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
         });
       }
     },
+
+    selectRun: async (runId) => {
+      if (disposed) return model;
+      // Keep a detail already loaded for this run while refreshing it: no flicker on a poll.
+      const keep = model.detail?.id === runId ? model.detail : null;
+      set({ ...model, selectedRunId: runId, detail: keep, detailLoading: true, error: null });
+      try {
+        const detail = await options.client.getRun(runId);
+        if (disposed || model.selectedRunId !== runId) return model;
+        return set({ ...model, detail, detailLoading: false, error: null });
+      } catch (error) {
+        if (disposed || model.selectedRunId !== runId) return model;
+        const failure = toPanelError(error);
+        if (failure.code === "run_unknown") {
+          // The run was removed (or never existed): go back to the list instead of a dead page.
+          return set({
+            ...model,
+            selectedRunId: null,
+            detail: null,
+            detailLoading: false,
+            error: failure,
+          });
+        }
+        return set({ ...model, detailLoading: false, error: failure });
+      }
+    },
+
+    closeRun: () => set({ ...model, selectedRunId: null, detail: null, detailLoading: false }),
+
+    setFilter: (filter) => set({ ...model, filter }),
 
     start: () => {
       if (disposed || subscription !== undefined) return;
@@ -609,10 +718,12 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
             error: null,
             loadedAt: now(),
           });
+          syncDetail();
         },
         onRun: (run) => {
           const runs = mergeRun(model.runs, run);
           set({ ...model, runs, gates: pendingGates(runs), loadedAt: now() });
+          syncDetail();
         },
         onStatus: (status, error) => {
           if (status === "open") set({ ...model, connected: true });
@@ -672,8 +783,8 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
         }
         const started = await options.client.startRun(request);
         if (disposed) return { model, started };
-        const loaded = await store.load();
-        return { model: set({ ...loaded, starting: false }), started };
+        await store.load();
+        return { model: set({ ...model, starting: false }), started };
       } catch (error) {
         const failure = toPanelError(error);
         return { model: set({ ...model, starting: false, error: failure }), error: failure };
@@ -695,7 +806,36 @@ export function createPanel(options: PanelStoreOptions): PanelStore {
 
 // ------------------------------------------------------------------ views
 
-/** One step row: label + tone + attempts, no prompt (the contract never carries one). */
+/** One launch attempt as the step log renders it. */
+export interface StepAttemptView {
+  readonly n: number;
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly durationLabel: string;
+  readonly target?: string;
+  readonly outcome?: string;
+  readonly errorCode?: string;
+  readonly usageLabel: string | null;
+  readonly running: boolean;
+}
+
+/** One declared output of a step (a script's `stdout`, an agent's schema output). */
+export interface StepOutputView {
+  readonly name: string;
+  readonly value: string;
+  /** `value` split on newlines: the log pane prints one line per entry. */
+  readonly lines: readonly string[];
+}
+
+/** One line of the step log (or of the run log). */
+export interface StepLogEntry {
+  readonly at: number | null;
+  readonly timeLabel: string;
+  readonly text: string;
+  readonly tone: StatusTone;
+}
+
+/** One step row: label + tone + duration, and — on the run page — its log. No prompt. */
 export interface StepView {
   readonly id: string;
   readonly title: string;
@@ -703,11 +843,32 @@ export interface StepView {
   readonly kindLabel: string;
   readonly status: StepStatus;
   readonly statusLabel: string;
+  /** A one-column glyph (`✓`, `✕`, `●`, …) so a row scans without color. */
+  readonly glyph: string;
   readonly tone: StatusTone;
   readonly attemptCount: number;
+  readonly startedAt?: number;
+  readonly endedAt?: number;
+  readonly durationLabel: string;
   readonly errorCode?: string;
+  readonly outcome?: string;
+  readonly attempts: readonly StepAttemptView[];
+  readonly outputs: readonly StepOutputView[];
+  readonly gates: readonly GateView[];
+  readonly log: readonly StepLogEntry[];
+  /** The log as copyable text, one line per entry. */
+  readonly logText: string;
+  /** True when the log has more than the header: the row offers an expand affordance. */
+  readonly hasLog: boolean;
   /** The run is finished and this step failed (or was interrupted by a cancel): offer Retry. */
   readonly retryable: boolean;
+}
+
+/** `GET /runs/:id` fields a summary does not carry (older servers may still omit them). */
+interface StepDetailFields {
+  readonly attempts: readonly StepAttemptView[];
+  readonly outputs: readonly StepOutputView[];
+  readonly outcome?: string;
 }
 
 /** One choice button of a pending gate. */
@@ -732,16 +893,53 @@ export interface GateView {
   readonly decision?: string;
 }
 
+/** One finished (or pending) after-task of a run. */
+export interface AfterView {
+  readonly id: string;
+  readonly title: string;
+  readonly trigger: "auto" | "manual";
+  readonly status: string;
+  readonly tone: StatusTone;
+}
+
+/** One segment of the run's step progress bar. */
+export interface StepProgressView {
+  readonly id: string;
+  readonly label: string;
+  readonly status: StepStatus;
+  readonly tone: StatusTone;
+}
+
 export interface RunView {
   readonly id: string;
+  /** The GitHub-CI-style short id (`#01M798D7`); the full id is in the tooltip. */
+  readonly runIdShort: string;
   readonly playbookId: string;
   readonly status: RunStatus;
   readonly statusLabel: string;
   readonly tone: StatusTone;
+  readonly glyph: string;
+  readonly createdAt: number;
+  readonly createdLabel: string;
   readonly updatedAt: number;
   readonly updatedLabel: string;
+  readonly updatedRelative: string;
+  /** `createdAt` → `updatedAt` (or now, for a live run). */
+  readonly durationLabel: string;
+  /** `manual`, or `schedule <id>` (FR8.2 provenance). */
+  readonly triggerLabel: string;
+  readonly scheduleId?: string;
+  readonly cwd: string;
+  readonly worktree?: string;
+  readonly inputs: readonly { readonly name: string; readonly value: string }[];
+  readonly after: readonly AfterView[];
   /** `2/3 steps completed` plus the current step or pending gate. */
   readonly detail: string;
+  readonly stepCount: number;
+  readonly completedCount: number;
+  readonly skippedCount: number;
+  readonly failedCount: number;
+  readonly progress: readonly StepProgressView[];
   readonly steps: readonly StepView[];
   readonly gates: readonly GateView[];
   readonly active: boolean;
@@ -751,8 +949,35 @@ export interface RunView {
   readonly removable: boolean;
 }
 
+/** One playbook's runs, newest first: the list groups by workflow so a schedule does not flood it. */
+export interface WorkflowGroupView {
+  readonly playbookId: string;
+  readonly latest: RunView;
+  readonly runs: readonly RunView[];
+  readonly total: number;
+  readonly active: number;
+  readonly failed: number;
+  readonly pendingGates: number;
+}
+
+/** The open run's page: the run view plus the detail-only log data. */
+export interface RunDetailView {
+  readonly run: RunView;
+  /** The detail fetch is in flight (the page renders the summary meanwhile). */
+  readonly loading: boolean;
+  readonly history: readonly HistoryEvent[];
+  /** Run-level log lines (`run_started`, `settle`, `finish`, `after_*`, …). */
+  readonly runLog: readonly StepLogEntry[];
+}
+
 export interface PanelView {
   readonly runs: readonly RunView[];
+  /** Runs the current filter keeps, grouped by playbook. */
+  readonly groups: readonly WorkflowGroupView[];
+  readonly filter: RunFilter;
+  readonly filters: readonly { readonly id: RunFilter; readonly label: string; readonly count: number }[];
+  readonly visibleCount: number;
+  readonly selected: RunDetailView | null;
   readonly gates: readonly GateView[];
   readonly running: number;
   readonly pendingGates: number;
@@ -777,7 +1002,291 @@ function choiceTone(choice: GateSummary["choices"][string]): StatusTone {
   return choice.color === undefined ? "accent" : (CHOICE_TONES[choice.color] ?? "accent");
 }
 
-function stepView(step: RunSummary["steps"][number], runActive: boolean): StepView {
+// ------------------------------------------------------------------ glyphs
+
+export const RUN_STATUS_GLYPHS: Readonly<Record<RunStatus, string>> = {
+  pending: "○",
+  running: "●",
+  waiting: "◔",
+  completed: "✓",
+  failed: "✕",
+  cancelled: "⊘",
+};
+
+export const STEP_STATUS_GLYPHS: Readonly<Record<StepStatus, string>> = {
+  pending: "○",
+  ready: "◌",
+  running: "●",
+  waiting: "◔",
+  completed: "✓",
+  failed: "✕",
+  skipped: "–",
+};
+
+// ------------------------------------------------------------------ step log
+
+const OUTCOME_WORDS: Readonly<Record<string, string>> = {
+  completed: "completed",
+  failed: "failed",
+  timeout: "timed out",
+  cancelled: "cancelled",
+};
+
+function historyTone(type: HistoryEvent["type"]): StatusTone {
+  switch (type) {
+    case "task_error":
+      return "danger";
+    case "gate":
+      return "warning";
+    case "gate_decided":
+      return "success";
+    case "dispatch":
+    case "retry":
+    case "script_repinned":
+      return "accent";
+    case "finish":
+    case "after_start":
+      return "success";
+    default:
+      return "neutral";
+  }
+}
+
+/** One history event as a log line. The vocabulary is fixed, so a new type must be added here. */
+export function historyText(event: HistoryEvent): string {
+  const detail = event.detail ?? "";
+  const suffix = detail === "" ? "" : `: ${detail}`;
+  switch (event.type) {
+    case "run_started":
+      return `Run started${suffix}`;
+    case "select":
+      return "Selecting ready steps";
+    case "dispatch":
+      return `Dispatched${event.attempt === null ? "" : ` (attempt ${event.attempt})`}`;
+    case "settle":
+      return `Settled${suffix}`;
+    case "gate":
+      return `Gate opened${suffix}`;
+    case "gate_decided":
+      return `Gate decided${suffix}`;
+    case "finish":
+      return `Run finished${suffix}`;
+    case "effect_skipped":
+      return `Effect skipped${suffix}`;
+    case "task_error":
+      return `Task error${suffix}`;
+    case "after_queued":
+      return `After-task queued${suffix}`;
+    case "after_start":
+      return `After-task started${suffix}`;
+    case "retry":
+      return `Retried${suffix}`;
+    case "script_repinned":
+      return `Script repinned${suffix}`;
+  }
+}
+
+interface PendingLogEntry {
+  readonly at: number | null;
+  readonly sortAt: number;
+  readonly text: string;
+  readonly tone: StatusTone;
+}
+
+function pendingEntry(
+  at: number | null,
+  text: string,
+  tone: StatusTone,
+  offset = 0,
+): PendingLogEntry {
+  return { at, sortAt: (at ?? Number.MAX_SAFE_INTEGER) + offset, text, tone };
+}
+
+/** A line that belongs to the entry before it (an output's second line): no timestamp of its own. */
+function continuationEntry(base: number | null, text: string, tone: StatusTone): PendingLogEntry {
+  return {
+    at: null,
+    sortAt: (base ?? Number.MAX_SAFE_INTEGER) + 0.5,
+    text,
+    tone,
+  };
+}
+
+function historyEntry(event: HistoryEvent): PendingLogEntry {
+  return pendingEntry(event.at, historyText(event), historyTone(event.type));
+}
+
+/** Log entries carry a display time; a continuation line (an output's second line) has none. */
+function toLogEntries(entries: readonly PendingLogEntry[]): StepLogEntry[] {
+  return entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((left, right) => left.entry.sortAt - right.entry.sortAt || left.index - right.index)
+    .map(({ entry }) => ({
+      at: entry.at,
+      timeLabel: formatClock(entry.at),
+      text: entry.text,
+      tone: entry.tone,
+    }));
+}
+
+function attemptViews(attempts: readonly StepDetailSummary["attempts"][number][]): StepAttemptView[] {
+  return attempts.map((attempt) => {
+    const ended = attempt.endedAt;
+    return {
+      n: attempt.n,
+      startedAt: attempt.startedAt,
+      ...(ended === undefined ? {} : { endedAt: ended }),
+      durationLabel: ended === undefined ? "running" : formatDuration(ended - attempt.startedAt),
+      ...(attempt.target === undefined ? {} : { target: attempt.target }),
+      ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome }),
+      ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+      usageLabel: formatUsage(attempt.usage),
+      running: ended === undefined,
+    };
+  });
+}
+
+function outputViews(outputs: StepDetailSummary["outputs"]): StepOutputView[] {
+  if (outputs === undefined) return [];
+  return Object.entries(outputs).map(([name, value]) => {
+    const text = formatScalar(value);
+    return { name, value: text, lines: text.replace(/\n$/, "").split("\n") };
+  });
+}
+
+/**
+ * The step's log, built from the detail projection alone: its history events, its attempts (with
+ * target + usage), its declared outputs, its outcome/error, and the gates opened for it.
+ *
+ * Agent transcripts are never stored by Argos, so an agent step's log stops at its declared
+ * outputs; a script step's `stdout`/`stderr` outputs are the console tail.
+ */
+export function buildStepLog(input: {
+  readonly step: StepSummary;
+  readonly history: readonly HistoryEvent[];
+  readonly gates: readonly GateSummary[];
+  readonly attempts: readonly StepAttemptView[];
+  readonly outputs: readonly StepOutputView[];
+  readonly outcome?: string;
+}): StepLogEntry[] {
+  const entries: PendingLogEntry[] = [];
+  for (const event of input.history) {
+    if (event.stepId !== input.step.id) continue;
+    if (event.type === "select") continue;
+    entries.push(historyEntry(event));
+  }
+
+  const lastEnded = input.step.endedAt ?? input.step.startedAt ?? null;
+  for (const attempt of input.attempts) {
+    entries.push(
+      pendingEntry(
+        attempt.startedAt,
+        `Attempt ${attempt.n} started${attempt.target === undefined ? "" : ` on ${attempt.target}`}`,
+        "accent",
+      ),
+    );
+    if (attempt.endedAt !== undefined) {
+      const word = attempt.outcome === undefined ? "finished" : (OUTCOME_WORDS[attempt.outcome] ?? attempt.outcome);
+      const code = attempt.errorCode === undefined ? "" : ` (${attempt.errorCode})`;
+      const failed = attempt.outcome === "failed" || attempt.outcome === "timeout" || attempt.outcome === "cancelled";
+      entries.push(
+        pendingEntry(
+          attempt.endedAt,
+          `Attempt ${attempt.n} ${word} in ${attempt.durationLabel}${code}`,
+          failed ? "danger" : "success",
+        ),
+      );
+    }
+    if (attempt.usageLabel !== null) {
+      entries.push(pendingEntry(attempt.endedAt ?? attempt.startedAt, `Usage: ${attempt.usageLabel}`, "neutral"));
+    }
+  }
+
+  for (const output of input.outputs) {
+    entries.push(pendingEntry(lastEnded, `Output ${output.name}:`, "neutral"));
+    for (const line of output.lines) entries.push(continuationEntry(lastEnded, line, "neutral"));
+  }
+
+  if (input.outcome !== undefined) {
+    entries.push(pendingEntry(lastEnded, `Outcome: ${input.outcome}`, "neutral", 0.5));
+  }
+  if (input.step.errorCode !== undefined) {
+    entries.push(pendingEntry(lastEnded, `Error: ${input.step.errorCode}`, "danger", 0.5));
+  }
+
+  for (const gate of input.gates) {
+    if (gate.stepId !== input.step.id) continue;
+    const decided = gate.status === "decided";
+    entries.push(
+      pendingEntry(
+        decided ? (gate.decidedAt ?? null) : lastEnded,
+        `Gate ${gate.gateId} (${gate.kind}) ${gate.status}${gate.question === "" ? "" : `: ${gate.question}`}`,
+        decided ? "success" : "warning",
+      ),
+    );
+    if (gate.decision !== undefined) {
+      const by = gate.decidedBy === undefined ? "" : ` by ${gate.decidedBy}`;
+      const via = gate.decidedVia === undefined ? "" : ` via ${gate.decidedVia}`;
+      entries.push(pendingEntry(gate.decidedAt ?? lastEnded, `Decision: ${gate.decision}${by}${via}`, "success"));
+    }
+    if (gate.comment !== undefined && gate.comment !== "") {
+      entries.push(pendingEntry(null, `Comment: ${gate.comment}`, "neutral"));
+    }
+  }
+
+  return toLogEntries(entries);
+}
+
+/** `✓ 01:49:00  Attempt 1 started on claude/opus` — the copyable text of a log. */
+export function logText(entries: readonly StepLogEntry[]): string {
+  return entries
+    .map((entry) => (entry.at === null ? `        ${entry.text}` : `${entry.timeLabel}  ${entry.text}`))
+    .join("\n");
+}
+
+/** Run-level lines: everything that is not tied to one step. */
+export function buildRunLog(history: readonly HistoryEvent[]): StepLogEntry[] {
+  return toLogEntries(
+    history
+      .filter((event) => event.stepId === null && event.type !== "select")
+      .map((event) => historyEntry(event)),
+  );
+}
+
+function detailFields(step: StepSummary): StepDetailFields {
+  if (!("attempts" in step)) return { attempts: [], outputs: [] };
+  const detailed = step as StepDetailSummary;
+  return {
+    attempts: attemptViews(detailed.attempts ?? []),
+    outputs: outputViews(detailed.outputs),
+    ...(detailed.outcome === undefined ? {} : { outcome: detailed.outcome }),
+  };
+}
+
+function stepView(
+  step: StepSummary,
+  runActive: boolean,
+  context: {
+    readonly history?: readonly HistoryEvent[];
+    readonly gates?: readonly GateSummary[];
+    readonly now: number;
+  },
+): StepView {
+  const detail = detailFields(step);
+  const gates = (context.gates ?? []).filter((gate) => gate.stepId === step.id);
+  const log =
+    context.history === undefined
+      ? []
+      : buildStepLog({
+          step,
+          history: context.history,
+          gates,
+          attempts: detail.attempts,
+          outputs: detail.outputs,
+          ...(detail.outcome === undefined ? {} : { outcome: detail.outcome }),
+        });
+  const end =
+    step.endedAt ?? (step.status === "running" ? Math.max(context.now, step.startedAt ?? 0) : step.startedAt);
   return {
     id: step.id,
     title: step.title === "" ? step.id : step.title,
@@ -785,10 +1294,24 @@ function stepView(step: RunSummary["steps"][number], runActive: boolean): StepVi
     kindLabel: STEP_KIND_LABELS[step.kind],
     status: step.status,
     statusLabel: STEP_STATUS_LABELS[step.status],
+    glyph: STEP_STATUS_GLYPHS[step.status],
     tone: stepStatusTone(step.status),
     attemptCount: step.attemptCount,
+    ...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
+    ...(step.endedAt === undefined ? {} : { endedAt: step.endedAt }),
+    durationLabel:
+      step.startedAt === undefined || end === undefined
+        ? ""
+        : formatDuration(end - step.startedAt),
     retryable: !runActive && step.status === "failed",
     ...(step.errorCode === undefined ? {} : { errorCode: step.errorCode }),
+    ...(detail.outcome === undefined ? {} : { outcome: detail.outcome }),
+    attempts: detail.attempts,
+    outputs: detail.outputs,
+    gates: gates.map((gate) => gateView(gate)),
+    log,
+    logText: logText(log),
+    hasLog: log.length > 0,
   };
 }
 
@@ -816,7 +1339,8 @@ export function gateView(
 }
 
 function runDetail(run: RunSummary, gates: readonly GateView[]): string {
-  const done = run.steps.filter((step) => step.status === "completed").length;
+  // A skipped step counts as "done" here: `when: false` settles it, it does not hold the run up.
+  const done = run.steps.filter((step) => step.status === "completed" || step.status === "skipped").length;
   const running = run.steps.find((step) => step.status === "running");
   const pending = gates.filter((gate) => gate.status === "pending");
   if (pending.length > 0) {
@@ -833,53 +1357,196 @@ function runDetail(run: RunSummary, gates: readonly GateView[]): string {
   return `${done}/${run.steps.length} steps`;
 }
 
-/** One run as the panel renders it. `gates` are every gate of the run, pending and decided. */
+function afterViews(run: RunSummary): AfterView[] {
+  const tones: Readonly<Record<string, StatusTone>> = {
+    pending: "neutral",
+    running: "accent",
+    completed: "success",
+    failed: "danger",
+    skipped: "neutral",
+  };
+  return run.after.map((entry) => ({
+    id: entry.id,
+    title: entry.title === "" ? entry.id : entry.title,
+    trigger: entry.trigger,
+    status: entry.status,
+    tone: tones[entry.status] ?? "neutral",
+  }));
+}
+
+export function triggerLabel(run: RunSummary): string {
+  if (run.trigger === undefined) return "manual";
+  return `schedule ${run.trigger.scheduleId} (${run.trigger.reason.replace("_", " ")})`;
+}
+
+/** `RunDetail` is a `RunSummary` plus `history`: a caller may hand us either. */
+function asRunDetail(run: RunSummary): RunDetail | undefined {
+  const candidate = run as Partial<RunDetail>;
+  return Array.isArray(candidate.history) ? (candidate as RunDetail) : undefined;
+}
+
+/** One run as the list and the run page render it. */
 export function runView(
   run: RunSummary,
-  options: { readonly inFlight?: readonly string[]; readonly busyRuns?: readonly string[]; readonly gates?: readonly GateSummary[] } = {},
+  options: {
+    readonly inFlight?: readonly string[];
+    readonly busyRuns?: readonly string[];
+    readonly gates?: readonly GateSummary[];
+    readonly detail?: RunDetail;
+    readonly now?: number;
+  } = {},
 ): RunView {
   const inFlight = options.inFlight ?? [];
   const busyRuns = options.busyRuns ?? [];
-  const gates = (options.gates ?? run.gates).map((gate) =>
+  const now = options.now ?? Date.now();
+  const detail = options.detail ?? asRunDetail(run);
+  // The detail projection is fresher than the list entry and carries attempts/outputs/history.
+  const steps = detail?.id === run.id ? detail.steps : run.steps;
+  // Gates come from the gate documents, which the list projection always carries and which are
+  // fresher than the mirrored record (a decision lands before the next settle).
+  const gateSummaries = options.gates ?? run.gates;
+
+  const gates = gateSummaries.map((gate) =>
     gateView(gate, { deciding: inFlight.includes(gateKey(gate.runId, gate.gateId)) }),
   );
+  const active = isActiveRun(run.status);
+  const completedCount = steps.filter((step) => step.status === "completed").length;
+  const skippedCount = steps.filter((step) => step.status === "skipped").length;
+  const failedCount = steps.filter((step) => step.status === "failed").length;
   return {
     id: run.id,
+    runIdShort: shortId(run.id),
     playbookId: run.playbookId,
     status: run.status,
     statusLabel: RUN_STATUS_LABELS[run.status],
     tone: runStatusTone(run.status),
+    glyph: RUN_STATUS_GLYPHS[run.status],
+    createdAt: run.createdAt,
+    createdLabel: formatDateTime(run.createdAt),
     updatedAt: run.updatedAt,
     updatedLabel: new Date(run.updatedAt).toISOString(),
+    updatedRelative: formatRelative(run.updatedAt, now),
+    durationLabel: formatDuration((active ? now : run.updatedAt) - run.createdAt),
+    triggerLabel: triggerLabel(run),
+    ...(run.trigger === undefined ? {} : { scheduleId: run.trigger.scheduleId }),
+    cwd: run.cwd,
+    ...(run.worktree === undefined ? {} : { worktree: run.worktree.path }),
+    inputs: Object.entries(run.inputs).map(([name, value]) => ({
+      name,
+      value: formatScalar(value),
+    })),
+    after: afterViews(run),
     detail: runDetail(run, gates),
-    steps: run.steps.map((step) => stepView(step, isActiveRun(run.status))),
+    stepCount: steps.length,
+    completedCount,
+    skippedCount,
+    failedCount,
+    progress: steps.map((step) => ({
+      id: step.id,
+      label: step.title === "" ? step.id : step.title,
+      status: step.status,
+      tone: stepStatusTone(step.status),
+    })),
+    steps: steps.map((step) =>
+      stepView(step, active, {
+        ...(detail === undefined ? {} : { history: detail.history }),
+        gates: gateSummaries,
+        now,
+      }),
+    ),
     gates,
-    active: isActiveRun(run.status),
+    active,
     cancelling: busyRuns.includes(run.id),
-    removable: !isActiveRun(run.status),
+    removable: !active,
   };
 }
 
+/**
+ * Group runs by playbook, newest group first, runs newest first inside. A schedule fires the same
+ * playbook every hour, so a flat list is a wall of one name; grouping is the CI-style answer.
+ */
+export function groupRuns(runs: readonly RunView[]): WorkflowGroupView[] {
+  const groups = new Map<string, RunView[]>();
+  for (const run of runs) {
+    const existing = groups.get(run.playbookId);
+    if (existing === undefined) groups.set(run.playbookId, [run]);
+    else existing.push(run);
+  }
+  const views: WorkflowGroupView[] = [];
+  for (const [playbookId, entries] of groups) {
+    const latest = entries[0];
+    if (latest === undefined) continue;
+    views.push({
+      playbookId,
+      latest,
+      runs: entries,
+      total: entries.length,
+      active: entries.filter((run) => run.active).length,
+      failed: entries.filter((run) => run.status === "failed" || run.status === "cancelled").length,
+      pendingGates: entries.reduce(
+        (count, run) => count + run.gates.filter((gate) => gate.status === "pending").length,
+        0,
+      ),
+    });
+  }
+  return views.sort(
+    (left, right) =>
+      right.latest.updatedAt - left.latest.updatedAt ||
+      (left.playbookId < right.playbookId ? 1 : -1),
+  );
+}
+
 /** Map the model to labels/tones. Pure: same model in, same view out (snapshot-testable). */
-export function panelView(model: PanelModel): PanelView {
+export function panelView(model: PanelModel, options: { readonly now?: number } = {}): PanelView {
+  const now = options.now ?? Date.now();
   const runs = model.runs.map((run) =>
-    runView(run, { inFlight: model.inFlight, busyRuns: model.busyRuns }),
+    runView(run, {
+      now,
+      inFlight: model.inFlight,
+      busyRuns: model.busyRuns,
+      ...(model.detail?.id === run.id ? { detail: model.detail } : {}),
+    }),
   );
   const gates = model.gates.map((gate) =>
     gateView(gate, { deciding: model.inFlight.includes(gateKey(gate.runId, gate.gateId)) }),
   );
+  const visible = runs.filter((run) => runMatchesFilter(run.status, model.filter));
   const running = runs.filter((run) => run.status === "running").length;
   const pending = gates.filter((gate) => gate.status === "pending").length;
-  const statusLabel = model.error !== null ? "Argos server not running" : model.connected ? "Live" : "Connecting";
+  const statusLabel =
+    model.error !== null ? "Argos server not running" : model.connected ? "Live" : "Connecting";
+  const selectedRun =
+    model.selectedRunId === null ? undefined : runs.find((run) => run.id === model.selectedRunId);
+  const detail =
+    model.detail !== null && selectedRun !== undefined && model.detail.id === selectedRun.id
+      ? model.detail
+      : undefined;
   return {
     runs,
+    groups: groupRuns(visible),
+    filter: model.filter,
+    filters: RUN_FILTERS.map((id) => ({
+      id,
+      label: RUN_FILTER_LABELS[id],
+      count: runs.filter((run) => runMatchesFilter(run.status, id)).length,
+    })),
+    visibleCount: visible.length,
+    selected:
+      selectedRun === undefined
+        ? null
+        : {
+            run: selectedRun,
+            loading: model.detailLoading,
+            history: detail?.history ?? [],
+            runLog: buildRunLog(detail?.history ?? []),
+          },
     gates,
     running,
     pendingGates: pending,
     heading:
       runs.length === 0
         ? "No Argos runs yet"
-        : `${runs.length} run${runs.length === 1 ? "" : "s"} · ${running} running · ${pending} gate${pending === 1 ? "" : "s"}`,
+        : `${pluralized(runs.length, "run")} · ${running} running · ${pluralized(pending, "gate")}`,
     statusLabel,
     statusTone: model.error !== null ? "danger" : model.connected ? "success" : "warning",
     empty: runs.length === 0,

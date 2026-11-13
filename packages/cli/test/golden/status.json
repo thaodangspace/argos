@@ -20,7 +20,20 @@
       "status": "completed",
       "attemptCount": 1,
       "startedAt": 1000,
-      "endedAt": 2000
+      "endedAt": 2000,
+      "outcome": "success",
+      "attempts": [
+        {
+          "n": 1,
+          "startedAt": 1500,
+          "endedAt": 2000,
+          "outcome": "completed",
+          "target": "claude/opus"
+        }
+      ],
+      "outputs": {
+        "note": "drafted"
+      }
     },
     {
       "id": "review",
@@ -29,7 +42,8 @@
       "status": "completed",
       "attemptCount": 0,
       "startedAt": 2000,
-      "endedAt": 3000
+      "endedAt": 3000,
+      "attempts": []
     }
   ],
   "gates": [

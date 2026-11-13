@@ -657,7 +657,11 @@ Contract highlights: `StartRunRequest`, `DecideGateRequest`, `RunSummary`, `RunD
 `ServerInfo`, `DoctorReport`, and the schedule shapes (`ScheduleCreateRequest`,
 `ScheduleEditRequest`, `ScheduleSummary`, `ScheduleDetail`, `ScheduleFire`). `RunSummary`/
 `RunDetail` never contain `ir`, prompts, agent messages, transcripts, or credential-like inputs;
-`RunDetail.gates` comes from the gate documents (fresher than the mirror after a decision). All
+`RunDetail.gates` comes from the gate documents (fresher than the mirror after a decision). The
+list projection stays lean; `RunDetail.steps` use `StepDetailSummary` instead of `StepSummary` and
+add each step's `attempts` (`n`, timing, `target`, `usage`, `outcome`, `errorCode`), its `outcome`,
+and its declared `outputs` (credential-shaped names dropped, values cut at
+`STEP_OUTPUT_VALUE_LIMIT` = 4,000) — that is what the panel renders as a step log. All
 bodies are strict zod schemas; `RPC_ERROR_STATUS` is the single code → HTTP map; bodies are capped
 at 1 MiB. `ScheduleSummary` is the document without `uid`, `runIds`, and `fires` (inputs filtered
 by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunIds`.
@@ -756,7 +760,8 @@ the CLI never opens SQLite and never arms a timer.
 
 ## Paseo plugin
 
-`packages/paseo-plugin` is a thin client: a sidebar row, a screen listing runs/steps/gates, and four
+`packages/paseo-plugin` is a thin client: a sidebar row, a GitHub-CI-style screen (run list grouped
+by playbook, filter chips, a run page with one row per step and an expandable step log), and four
 chat tools. It never opens SQLite and keeps no run state, so a plugin reload cannot kill a run (the
 engine lives in `argos serve`). The **chat tools** call `argos serve` over HTTP from the plugin
 server (Node), while the **panel** calls the plugin server over Paseo RPC. That is deliberate: the
@@ -768,6 +773,11 @@ app may run on a different machine than the daemon.
 | `paseo-plugin.json` | manifest: `id: argos`, `requirements.paseo: ">=0.15.3"` |
 | `index.server.ts` | default-exports `contribute(server)`; `agent.open.before` + the panel RPC handlers; teardown removes the hook and closes the client |
 | `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), `SidebarRow` with the Lucide `Workflow` icon, theme tokens, `useRpc()` |
+| `client/screen.tsx` | header (live pill, refresh, start form), error banner, list-or-run-page switch |
+| `client/RunList.tsx` | filter chips + one collapsible group per playbook (newest run per row, older runs on demand) |
+| `client/RunDetail.tsx` | run header/actions, pending-gate callouts, step rows with the log console, run log, after tasks |
+| `client/GateCard.tsx` / `client/StartRunForm.tsx` | gate choices with a comment box / the start-run form |
+| `client/ui.tsx` | theme-token primitives (`Pill`, `StatusGlyph`, `RunId`, `StepProgress`, buttons) and `usePanel` |
 | `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` |
 | `server/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
 | `server/connection.ts` | Node-only: resolves `ARGOS_HOME`/`ARGOS_PORT` + token, builds the tools client |
@@ -775,7 +785,8 @@ app may run on a different machine than the daemon.
 | `shared/rpc-api.ts` | zod RPC contracts + `{ok, data}` / `{ok:false, error}` result envelope |
 | `shared/rpc-bridge.ts` | panel `ArgosRpc` over RPC: unwraps envelopes, polls snapshots every 2 s |
 | `shared/rpc-client.ts` | portable `createArgosClient({url, token})` for the tools/HTTP path |
-| `shared/panel.ts` | pure panel model, `loadPanel`, `decideGateOnce`, `subscribeRuns`, `runView` |
+| `shared/panel.ts` | pure panel model: `loadPanel`, `decideGateOnce`, `subscribeRuns`, selection/detail sync, `groupRuns`, `buildStepLog`, `runView`/`panelView` |
+| `shared/format.ts` | locale-free labels: duration, clock, relative time, short id, token/cost usage |
 | `shared/panel-hub.ts` | one ref-counted panel per plugin instance (sidebar + screen share one poll loop) |
 | `shared/identity.ts` | `PLUGIN_ID`, `REQUIRED_PASEO_VERSION` |
 
@@ -801,6 +812,18 @@ in-flight model before deciding (buttons disable), calls `decideGate` exactly on
 already-decided gate as refresh-without-retry, and reconnects with capped exponential backoff (1 s
 doubling to 8 s). Since Paseo RPC has no server push, `shared/rpc-bridge.ts` polls
 `argos.runs.list` every 2 s and feeds the panel the same `snapshot` frames the SSE endpoint uses.
+
+The screen is a two-level CI view. The list groups runs by playbook (a schedule would otherwise
+flood it) with `All|Running|Failed|Completed` filter chips and one row per run (status glyph,
+`#shortId`, trigger, relative time, duration, per-step progress); opening a run calls
+`argos.runs.get` once and renders the run page: header + actions, pending-gate callouts, one row
+per step, the selected step's log, the run log, and after tasks. The log is a pure projection of
+`RunDetail` — the step's history events, its attempts (target, duration, usage), its declared
+outputs, its outcome/error, and its gates — built by `buildStepLog`; agent transcripts are not
+stored, so an agent step's log ends at its declared outputs. `selectRun` keeps the last detail
+while refreshing and re-fetches only when the run's summary `seq` moved (`syncDetail`), so the 2 s
+poll does not multiply requests. Copy-to-clipboard uses the host's `copyText` (no
+`navigator.clipboard` assumption).
 
 **Install (Paseo 0.15.4):** start `argos serve` first (it creates `$ARGOS_HOME/token`), then
 `paseo plugin install /Users/dt/code/github.com/argos/packages/paseo-plugin`. Paseo bundles the
@@ -854,7 +877,8 @@ create arguments, adoption with zero extra creates, `launch_uncertain`, handover
 fallback/exhaustion, `invalid_output`, fenced JSON fallback, and `model_unavailable`. The RPC suite
 covers auth, idempotency, SSE, retry, gates, response projection, and the `/schedules` routes
 (codes, statuses, projections). The plugin suite covers
-manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload survival, and the
+manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload survival, the
+CI-style grouping/filters/step log and the one-fetch detail sync (`test/detail.test.ts`), and the
 import graph. The CLI suite covers validate exit codes, golden JSON shapes (including
 `ls-schedule` and every `schedule-*` command), the no-storage import graph, the fire-line
 formatter, and a real-serve sentinel.

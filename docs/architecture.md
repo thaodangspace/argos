@@ -311,8 +311,11 @@ unattended run means the same thing after a restart or from another machine; the
 requires `cwd` in the body for the same reason.
 
 `RunSummary`/`RunDetail` never contain prompts, agent messages, transcripts, or credential-like
-inputs. The plugin holds no durable state: teardown closes only its HTTP client and streams, and a
-new plugin instance reconnects to the same `argos serve` run.
+inputs. `RunDetail` adds what a CI-style step log needs — each step's attempts (`target`, timing,
+usage), its declared outputs (credential-shaped output names dropped, long values truncated), its
+outcome, and the run's bounded history; the list projection stays lean. The plugin holds no
+durable state: teardown closes only its HTTP client and streams, and a new plugin instance
+reconnects to the same `argos serve` run.
 
 ## Security
 

@@ -134,7 +134,7 @@ export interface ArgosRpc {
 }
 
 /** What the panel needs; a mocked object with these members satisfies it. */
-export type PanelRpc = Pick<ArgosRpc, "listRuns" | "decideGate" | "openEvents"> & {
+export type PanelRpc = Pick<ArgosRpc, "listRuns" | "getRun" | "decideGate" | "openEvents"> & {
   readonly cancelRun?: (runId: string) => Promise<unknown>;
   readonly removeRun?: (runId: string) => Promise<unknown>;
   readonly retryStep?: (runId: string, stepId: string) => Promise<unknown>;

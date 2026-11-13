@@ -6,12 +6,13 @@
  * metadata and counts only, which is what keeps `GET /runs` safe to render in a panel.
  */
 
-import type { RunRecord } from "../engine/index.js";
+import type { RunRecord, StepRecord } from "../engine/index.js";
 import { isSecretEnvName, isTerminalRunStatus } from "../engine/index.js";
 import type { HistoryDocValue, RunDoc } from "../durable/mirror.js";
 import type { FireEntry, ScheduleDoc } from "../durable/schedule-docs.js";
 import {
   SCHEDULE_RECENT_RUN_LIMIT,
+  STEP_OUTPUT_VALUE_LIMIT,
   type AfterSummary,
   type GateSummary,
   type HistoryEvent,
@@ -20,6 +21,7 @@ import {
   type ScheduleDetail,
   type ScheduleFire,
   type ScheduleSummary,
+  type StepDetailSummary,
   type StepSummary,
 } from "./contracts.js";
 
@@ -74,6 +76,41 @@ function stepSummaries(record: RunRecord): StepSummary[] {
     });
   }
   return steps;
+}
+
+/** Longest output string a detail copies; the rest is replaced by a marker. */
+function boundedOutput(value: StepRecord["outputs"][string]): StepRecord["outputs"][string] {
+  if (typeof value !== "string" || value.length <= STEP_OUTPUT_VALUE_LIMIT) return value;
+  return `${value.slice(0, STEP_OUTPUT_VALUE_LIMIT)}… (truncated)`;
+}
+
+/**
+ * The detail-only step fields (`GET /runs/:id`): what the panel's per-step log renders. Declared
+ * outputs go through {@link publicInputs} (a credential-shaped output name is dropped) and a long
+ * string is truncated, so one detail response stays small. No prompt, agent id, or transcript.
+ */
+export function stepDetailSummaries(record: RunRecord): StepDetailSummary[] {
+  return stepSummaries(record).map((summary) => {
+    const state = record.steps[summary.id];
+    if (state === undefined) return { ...summary, attempts: [] };
+    const outputs = publicInputs(state.outputs);
+    const bounded: Record<string, StepRecord["outputs"][string]> = {};
+    for (const [name, value] of Object.entries(outputs)) bounded[name] = boundedOutput(value);
+    return {
+      ...summary,
+      ...(state.outcome === undefined ? {} : { outcome: state.outcome }),
+      attempts: state.attempts.map((attempt) => ({
+        n: attempt.n,
+        startedAt: attempt.startedAt,
+        ...(attempt.endedAt === undefined ? {} : { endedAt: attempt.endedAt }),
+        ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome }),
+        ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+        ...(attempt.target === undefined ? {} : { target: attempt.target }),
+        ...(attempt.usage === undefined ? {} : { usage: attempt.usage }),
+      })),
+      ...(Object.keys(bounded).length === 0 ? {} : { outputs: bounded }),
+    };
+  });
 }
 
 /** One gate, preferring the decision document when the caller has it (fresher than the mirror). */
@@ -171,7 +208,8 @@ export function toRunDetail(
     attempt: event.attempt,
     detail: event.detail,
   }));
-  return { ...toRunSummary(doc, gateDocuments), history: events };
+  const summary = toRunSummary(doc, gateDocuments);
+  return { ...summary, steps: stepDetailSummaries(doc.record), history: events };
 }
 
 /** True for runs that still need a process (used by `argos doctor` counters). */

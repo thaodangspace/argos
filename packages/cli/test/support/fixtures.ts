@@ -75,7 +75,14 @@ export const RUN_DETAIL: RunDetail = {
   status: "completed",
   gates: [DECIDED_GATE],
   steps: [
-    RUN_SUMMARY.steps[0] as RunDetail["steps"][number],
+    {
+      ...(RUN_SUMMARY.steps[0] as RunDetail["steps"][number]),
+      outcome: "success",
+      attempts: [
+        { n: 1, startedAt: 1_500, endedAt: 2_000, outcome: "completed", target: "claude/opus" },
+      ],
+      outputs: { note: "drafted" },
+    },
     {
       id: "review",
       title: "Review",
@@ -84,6 +91,7 @@ export const RUN_DETAIL: RunDetail = {
       attemptCount: 0,
       startedAt: 2_000,
       endedAt: DECIDED_AT,
+      attempts: [],
     },
   ],
   updatedAt: DECIDED_AT,

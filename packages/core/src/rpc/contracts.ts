@@ -301,6 +301,41 @@ export const StepSummarySchema = z.strictObject({
 });
 export type StepSummary = z.infer<typeof StepSummarySchema>;
 
+/**
+ * One launch attempt of a step (`GET /runs/:id` only). Attempt history is what the panel's step log
+ * is built from; `agentId` and `requestId` stay private, `target` is just `provider/model`.
+ */
+export const StepAttemptSummarySchema = z.strictObject({
+  n: z.number().int().min(1),
+  startedAt: z.number(),
+  endedAt: z.number().optional(),
+  outcome: z.enum(["completed", "failed", "timeout", "cancelled"]).optional(),
+  errorCode: ErrorCodeSchema.optional(),
+  /** The `provider/model` the attempt ran on (a script step has none). */
+  target: z.string().min(1).optional(),
+  /** Provider/token accounting when the executor reported it. */
+  usage: z.record(z.string(), z.number()).optional(),
+});
+export type StepAttemptSummary = z.infer<typeof StepAttemptSummarySchema>;
+
+/**
+ * A step as `GET /runs/:id` publishes it: the list fields plus everything a per-step log needs.
+ * `outputs` are the step's **declared** outputs (a script's `stdout`, an agent's schema outputs),
+ * never a transcript; secret-looking output names are dropped like secret-looking inputs are.
+ */
+export const StepDetailSummarySchema = StepSummarySchema.extend({
+  /** The outcome the step reported (drives `on`/`when` routing), when it settled with one. */
+  outcome: z.string().min(1).optional(),
+  /** Every attempt, oldest first. Empty for a step that never launched (a gate, a pending step). */
+  attempts: z.array(StepAttemptSummarySchema),
+  /** Declared outputs, each string bounded to {@link STEP_OUTPUT_VALUE_LIMIT} characters. */
+  outputs: z.record(z.string(), ScalarSchema).optional(),
+});
+export type StepDetailSummary = z.infer<typeof StepDetailSummarySchema>;
+
+/** Longest output value a run detail copies: a script tail is bounded, an agent's may not be. */
+export const STEP_OUTPUT_VALUE_LIMIT = 4_000;
+
 export const AfterSummarySchema = z.strictObject({
   id: z.string().min(1),
   title: z.string(),
@@ -348,10 +383,12 @@ export const HistoryEventSchema = z.strictObject({
 export type HistoryEvent = z.infer<typeof HistoryEventSchema>;
 
 /**
- * `GET /runs/:id`. `gates` are the gate documents projected to {@link GateSummary}; `history` is
- * the bounded (≤500) event log. Still no prompts or transcripts.
+ * `GET /runs/:id`. `gates` are the gate documents projected to {@link GateSummary}; `steps` carry
+ * the attempt/output detail the panel renders as a step log; `history` is the bounded (≤500) event
+ * log. Still no prompts or transcripts.
  */
 export const RunDetailSchema = RunSummarySchema.extend({
+  steps: z.array(StepDetailSummarySchema),
   history: z.array(HistoryEventSchema),
 });
 export type RunDetail = z.infer<typeof RunDetailSchema>;

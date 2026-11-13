@@ -2,7 +2,7 @@
   "id": "argos",
   "name": "Argos",
   "version": "0.0.0",
-  "description": "List Argos runs, follow step status, and decide gates from Paseo.",
+  "description": "Follow Argos runs like CI: workflow list, run pages, per-step logs, and gates from Paseo.",
   "media": [],
   "requirements": {
     "paseo": ">=0.15.3"

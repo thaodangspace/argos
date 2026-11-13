@@ -68,7 +68,8 @@ export function makeRun(overrides: Partial<RunSummary> & { id: string }): RunSum
 }
 
 export function makeRunDetail(run: RunSummary, history: RunDetail["history"] = []): RunDetail {
-  return { ...run, history };
+  // A detail step carries the attempt list; a summary step does not, so fill it in here.
+  return { ...run, steps: run.steps.map((step) => ({ ...step, attempts: [] })), history };
 }
 
 // ------------------------------------------------------------------ fake client
