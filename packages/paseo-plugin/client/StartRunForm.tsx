@@ -1,10 +1,12 @@
 /** Collapsible "Start run" form: playbook id, optional cwd, inputs as key=value lines or JSON. */
 
 import { useState } from "react";
+import { View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
+import { TextInput } from "@getpaseo/plugin/client/ui";
 
 import { parseStartForm, type PanelStore } from "../shared/panel";
-import { buttonStyle, fieldStyle } from "./ui";
+import { Button, cardStyle, fieldStyle, MONO_FONT, Row, Txt } from "./ui";
 
 export function StartRunForm({
   theme,
@@ -23,15 +25,15 @@ export function StartRunForm({
 
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => {
+      <Button
+        theme={theme}
+        tone="accent"
+        label="+ New run"
+        style={{ alignSelf: "flex-start" }}
+        onPress={() => {
           setOpen(true);
         }}
-        style={buttonStyle(theme, "accent")}
-      >
-        + New run
-      </button>
+      />
     );
   }
 
@@ -51,64 +53,65 @@ export function StartRunForm({
     });
   };
 
+  const field = fieldStyle(theme);
   return (
-    <div
-      style={{
-        border: `1px solid ${theme.colors.border}`,
-        background: theme.colors.surface1,
-        borderRadius: 8,
-        padding: 10,
-        marginTop: 10,
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-      }}
-    >
-      <strong style={{ fontSize: 12 }}>Start run</strong>
-      <input
+    <View style={[cardStyle(theme), { marginTop: 10, gap: 6 }]}>
+      <Txt theme={theme} size={12} bold>
+        Start run
+      </Txt>
+      <TextInput
         value={playbookId}
         placeholder="playbook id (file name without .yaml)"
-        onChange={(event) => {
-          setPlaybookId(event.target.value);
-        }}
-        style={fieldStyle(theme)}
+        placeholderTextColor={theme.colors.foregroundMuted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        onChangeText={setPlaybookId}
+        style={field}
       />
-      <input
+      <TextInput
         value={cwd}
         placeholder="cwd (optional, default: the server's cwd)"
-        onChange={(event) => {
-          setCwd(event.target.value);
-        }}
-        style={fieldStyle(theme)}
+        placeholderTextColor={theme.colors.foregroundMuted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        onChangeText={setCwd}
+        style={field}
       />
-      <textarea
+      <TextInput
         value={inputs}
-        rows={3}
+        multiline
+        numberOfLines={3}
         placeholder={'inputs: key=value per line, or {"key": 1}'}
-        onChange={(event) => {
-          setInputs(event.target.value);
-        }}
-        style={{ ...fieldStyle(theme), fontFamily: "monospace", resize: "vertical" }}
+        placeholderTextColor={theme.colors.foregroundMuted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        onChangeText={setInputs}
+        style={[field, { fontFamily: MONO_FONT, minHeight: 60, textAlignVertical: "top" }]}
       />
       {formError === null ? null : (
-        <div style={{ color: theme.colors.statusDanger, fontSize: 11 }}>{formError}</div>
+        <Txt theme={theme} color={theme.colors.statusDanger} size={11}>
+          {formError}
+        </Txt>
       )}
-      <div style={{ display: "flex", gap: 6 }}>
-        <button type="button" disabled={starting} onClick={submit} style={buttonStyle(theme, "accent", starting)}>
-          {starting ? "Starting…" : "Start"}
-        </button>
-        <button
-          type="button"
+      <Row>
+        <Button
+          theme={theme}
+          tone="accent"
+          label={starting ? "Starting…" : "Start"}
           disabled={starting}
-          onClick={() => {
+          onPress={submit}
+        />
+        <Button
+          theme={theme}
+          tone="neutral"
+          label="Close"
+          disabled={starting}
+          onPress={() => {
             setOpen(false);
             setFormError(null);
           }}
-          style={buttonStyle(theme, "neutral", starting)}
-        >
-          Close
-        </button>
-      </div>
-    </div>
+        />
+      </Row>
+    </View>
   );
 }

@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { View } from "react-native";
 import type {
   PluginClientContext,
   PluginScreenProps,
@@ -36,7 +37,7 @@ import {
   RunStartRpc,
   RunsListRpc,
 } from "./shared/rpc-api";
-import { Pill } from "./client/ui";
+import { Pill, Txt } from "./client/ui";
 
 export const ARGOS_SCREEN_ID = "argos";
 export const ARGOS_SIDEBAR_ITEM_ID = "argos";
@@ -79,9 +80,11 @@ function useArgosPanel(): { readonly panel: PanelStore | null; readonly error: s
 
 function LoadingPanel({ theme, error }: { theme: PluginTheme; error: string | null }) {
   return (
-    <div style={{ color: theme.colors.foregroundMuted, padding: 12, fontSize: 12 }}>
-      {error ?? "Connecting to Argos…"}
-    </div>
+    <View style={{ flex: 1, padding: 12, backgroundColor: theme.colors.surface0 }}>
+      <Txt theme={theme} color={theme.colors.foregroundMuted} size={12}>
+        {error ?? "Connecting to Argos…"}
+      </Txt>
+    </View>
   );
 }
 
@@ -97,13 +100,13 @@ function ArgosSidebarTrailing({
   error: boolean;
 }) {
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
       {error ? <Pill theme={theme} label="not running" tone="danger" /> : null}
       {running === 0 ? null : <Pill theme={theme} label={`${running} running`} tone="success" />}
       {pendingGates === 0 ? null : (
         <Pill theme={theme} label={`${pendingGates} waiting`} tone="warning" />
       )}
-    </span>
+    </View>
   );
 }
 

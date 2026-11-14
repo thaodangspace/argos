@@ -98,13 +98,35 @@ describe("plugin import graph", () => {
     ];
     const offenders: string[] = [];
     for (const file of pluginSources) {
+      // The Paseo client host hands its own `react-native` to client code (native on mobile,
+      // react-native-web on desktop); the server half runs in the daemon and must not import it.
+      const clientOnly =
+        file.includes(`${pluginRoot}client${sep}`) || file === join(pluginRoot, "index.client.tsx");
       for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
         if (specifier.startsWith(".") || specifier.startsWith("node:")) continue;
+        if (clientOnly && specifier === "react-native") continue;
         if (!allowed.some((pattern) => pattern.test(specifier))) {
           offenders.push(`${file}: ${specifier}`);
         }
       }
     }
+    expect(offenders).toEqual([]);
+  });
+
+  it("renders the client half without DOM elements (Paseo mobile is native React Native)", () => {
+    const clientSources = [
+      ...sourceFiles(join(pluginRoot, "client")),
+      join(pluginRoot, "index.client.tsx"),
+    ].filter((file) => file.endsWith(".tsx"));
+    const offenders: string[] = [];
+    for (const file of clientSources) {
+      // A lowercase JSX tag is a DOM element: `<div`, `<span>`, `<button …`. A `<` right after an
+      // identifier is a type argument (`useState<string | null>`), not a tag.
+      for (const match of readFileSync(file, "utf8").matchAll(/(?<![\w$.])<([a-z][a-z0-9]*)(?=[\s>/])/g)) {
+        offenders.push(`${file}: <${match[1]}>`);
+      }
+    }
+    expect(clientSources.length).toBeGreaterThanOrEqual(6);
     expect(offenders).toEqual([]);
   });
 

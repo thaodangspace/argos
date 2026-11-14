@@ -1,10 +1,12 @@
 /** Pending-gate callout: the question, the comment box, and one button per choice. */
 
 import { useState } from "react";
+import { View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
+import { TextInput } from "@getpaseo/plugin/client/ui";
 
 import type { GateView } from "../shared/panel";
-import { buttonStyle, toneColor } from "./ui";
+import { Button, cardStyle, fieldStyle, Row, toneColor, Txt } from "./ui";
 
 export function GateCard({
   theme,
@@ -17,52 +19,34 @@ export function GateCard({
 }) {
   const [comment, setComment] = useState("");
   return (
-    <div
-      style={{
-        border: `1px solid ${toneColor(theme, "warning")}`,
-        background: theme.colors.surface1,
-        borderRadius: 8,
-        padding: 10,
-        marginTop: 8,
-      }}
-    >
-      <div style={{ fontSize: 12, color: theme.colors.foreground }}>{gate.question}</div>
-      <div style={{ color: theme.colors.foregroundMuted, fontSize: 11, marginTop: 2 }}>
+    <View style={cardStyle(theme, toneColor(theme, "warning"))}>
+      <Txt theme={theme} size={12} selectable>
+        {gate.question}
+      </Txt>
+      <Txt theme={theme} color={theme.colors.foregroundMuted} size={11} style={{ marginTop: 2 }}>
         {gate.gateId} · step {gate.stepId} · {gate.kind}
-      </div>
-      <input
+      </Txt>
+      <TextInput
         value={comment}
         placeholder="comment (optional)"
-        onChange={(event) => {
-          setComment(event.target.value);
-        }}
-        style={{
-          marginTop: 6,
-          width: "100%",
-          background: theme.colors.surface0,
-          color: theme.colors.foreground,
-          border: `1px solid ${theme.colors.border}`,
-          borderRadius: 6,
-          padding: "4px 6px",
-          fontSize: 12,
-          boxSizing: "border-box",
-        }}
+        placeholderTextColor={theme.colors.foregroundMuted}
+        onChangeText={setComment}
+        style={[fieldStyle(theme), { marginTop: 6 }]}
       />
-      <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+      <Row wrap style={{ marginTop: 8 }}>
         {gate.choices.map((choice) => (
-          <button
+          <Button
             key={choice.id}
-            type="button"
+            theme={theme}
+            tone={choice.tone}
+            label={gate.deciding ? `${choice.label}…` : choice.label}
             disabled={gate.deciding}
-            onClick={() => {
+            onPress={() => {
               onDecide(choice.id, comment === "" ? undefined : comment);
             }}
-            style={buttonStyle(theme, choice.tone, gate.deciding)}
-          >
-            {gate.deciding ? `${choice.label}…` : choice.label}
-          </button>
+          />
         ))}
-      </div>
-    </div>
+      </Row>
+    </View>
   );
 }

@@ -3,11 +3,13 @@
  * list or one run's CI page. All state comes from `panelView`; every action is a store call.
  */
 
+import { View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
+import { ScrollView } from "@getpaseo/plugin/client/ui";
 
 import type { PanelStore } from "../shared/panel";
 import { panelView } from "../shared/panel";
-import { buttonStyle, Pill, usePanel } from "./ui";
+import { Button, Pill, Row, Txt, usePanel } from "./ui";
 import { RunDetailPage } from "./RunDetail";
 import { RunList } from "./RunList";
 import { StartRunForm } from "./StartRunForm";
@@ -16,42 +18,40 @@ export function ArgosScreenView({ theme, panel }: { theme: PluginTheme; panel: P
   const model = usePanel(panel);
   const view = panelView(model);
   return (
-    <div
-      style={{
-        height: "100%",
-        overflow: "auto",
-        background: theme.colors.surface0,
-        color: theme.colors.foreground,
-        padding: 12,
-        boxSizing: "border-box",
-      }}
+    <ScrollView
+      keyboardShouldPersistTaps="handled"
+      style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
+      contentContainerStyle={{ padding: 12 }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <strong style={{ fontSize: 14 }}>Argos</strong>
+      <Row gap={8} wrap>
+        <Txt theme={theme} size={14} bold>
+          Argos
+        </Txt>
         <Pill theme={theme} label={view.statusLabel} tone={view.statusTone} />
-        <span style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{view.heading}</span>
-        <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
-          <button
-            type="button"
-            onClick={() => {
+        <Txt theme={theme} color={theme.colors.foregroundMuted} size={12} style={{ flexShrink: 1 }}>
+          {view.heading}
+        </Txt>
+        <Row style={{ marginLeft: "auto" }}>
+          <Button
+            theme={theme}
+            tone="neutral"
+            label="Refresh"
+            onPress={() => {
               if (view.selected === null) void panel.load();
               else void panel.selectRun(view.selected.run.id);
             }}
-            style={buttonStyle(theme, "neutral")}
-          >
-            Refresh
-          </button>
-        </span>
-      </div>
+          />
+        </Row>
+      </Row>
 
-      <div style={{ marginTop: 8 }}>
+      <View style={{ marginTop: 8 }}>
         <StartRunForm theme={theme} panel={panel} starting={model.starting} />
-      </div>
+      </View>
 
       {view.error === null ? null : (
-        <div style={{ color: theme.colors.statusDanger, fontSize: 12, marginTop: 8 }}>
+        <Txt theme={theme} color={theme.colors.statusDanger} size={12} selectable style={{ marginTop: 8 }}>
           {view.error.code}: {view.error.message}
-        </div>
+        </Txt>
       )}
 
       {view.selected === null ? (
@@ -75,6 +75,6 @@ export function ArgosScreenView({ theme, panel }: { theme: PluginTheme; panel: P
           }}
         />
       )}
-    </div>
+    </ScrollView>
   );
 }

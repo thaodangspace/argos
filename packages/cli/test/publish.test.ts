@@ -92,11 +92,14 @@ describe("npm package manifests", () => {
 });
 
 describe("scripts/check-version.mjs", () => {
-  const run = (args: string[]): { status: number; stdout: string; stderr: string } => {
+  const run = (
+    args: string[],
+    env: Record<string, string> = {},
+  ): { status: number; stdout: string; stderr: string } => {
     try {
       const stdout = execFileSync(process.execPath, [join(repoRoot, "scripts", "check-version.mjs"), ...args], {
         cwd: repoRoot,
-        env: { ...process.env, GITHUB_REF_NAME: "" },
+        env: { ...process.env, GITHUB_REF: "", GITHUB_REF_NAME: "", ...env },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -122,5 +125,30 @@ describe("scripts/check-version.mjs", () => {
 
   it("accepts a branch run with no tag", () => {
     expect(run([]).status).toBe(0);
+  });
+
+  // `GITHUB_REF_NAME` is `main` on a branch push and `2/merge` on a pull_request event. Reading
+  // either as a tag failed the `test` workflow on every run (a tag ref is the only one that names a
+  // release).
+  it.each([
+    ["a branch push", { GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main" }],
+    ["a pull_request merge ref", { GITHUB_REF: "refs/pull/2/merge", GITHUB_REF_NAME: "2/merge" }],
+  ])("ignores GITHUB_REF_NAME on %s", (_label, env) => {
+    const result = run([], env);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("main");
+  });
+
+  it("reads the tag from GITHUB_REF_NAME on a tag ref", () => {
+    const result = run([], { GITHUB_REF: `refs/tags/v${root.version}`, GITHUB_REF_NAME: `v${root.version}` });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`(v${root.version})`);
+  });
+
+  it("refuses a tag ref that does not match", () => {
+    const result = run([], { GITHUB_REF: "refs/tags/v9.9.9", GITHUB_REF_NAME: "v9.9.9" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("tag v9.9.9 does not match the workspace version");
   });
 });
