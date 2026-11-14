@@ -936,13 +936,14 @@ script pinning (pins at start, `script_changed` on edit/delete/resume, `script_r
 after-task copy, pre-pinning records), `fork` (new run id, edited prompt reaching the executor,
 prefix preserved and parent untouched, `forkedFrom` + `forked_from`, gates/loops/trigger/deadline
 dropped, `definition_conflict` inside/outside the closure, script re-pin, fork worktree from the
-parent branch), worktrees, `readonly_violation`, and the scheduler:
+parent branch), `definition-freeze` (a new start reads the edited YAML while a parked loop-limit
+gate and a `retry` keep the frozen IR), worktrees, `readonly_violation`, and the scheduler:
 `schedule-docs` (strict/hydrating documents, bounded `fires`/`runIds`, `scheduleRunId`),
 `schedules` (CRUD, duplicate/limit refusals, the dry check), `schedule-runner` (arm/disarm, tick
 order, cache), `schedule-fire` (one commit, guards, adopt-existing, run-now, refusal,
-announcement), `schedule-retention` (`keep`, live/worktree skips, failures swallowed), and
-`run-request` (the shared resolve plus prepare/commit parity with `POST /runs`). `test/schedule/`
-covers the pure `model` (ids, bounds, `catchUp`/`keep` normalization) and `next`
+fire-time reload, announcement), `schedule-retention` (`keep`, live/worktree skips, failures
+swallowed), and `run-request` (the shared resolve plus prepare/commit parity with `POST /runs`).
+`test/schedule/` covers the pure `model` (ids, bounds, `catchUp`/`keep` normalization) and `next`
 (`parseScheduleSpec`, `nextFireAfter`, `dueFireTimes`, DST in America/New_York, Europe/Berlin,
 Asia/Saigon). The Paseo suite covers
 create arguments, adoption with zero extra creates, `launch_uncertain`, handover, quota

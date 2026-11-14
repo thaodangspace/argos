@@ -79,6 +79,20 @@ steps:
     prompt: Work.
 `;
 
+/** One step, no inputs: the prompt is the only thing an operator edits between two fires. */
+const EDITABLE = `title: Editable
+steps:
+  - id: a
+    prompt: "Fire one."
+`;
+
+/** `EDITABLE` after the operator rewrote the prompt; nothing else about the playbook changed. */
+const EDITED = `title: Editable
+steps:
+  - id: a
+    prompt: "Fire two."
+`;
+
 const SCRIPTED = `title: Scripted
 steps:
   - id: build
@@ -596,6 +610,51 @@ describe("a refused fire answers the same code as POST /runs (FR2.4, FR4.1, FR6.
       },
       expected: "model_unavailable",
     });
+  });
+});
+
+// ------------------------------------------------------------------ fire-time reload (FR4.2)
+
+describe("a fire reloads the playbook (FR4.2)", () => {
+  it("gives the edit to the next fire's run and never to the run that already started", async () => {
+    const world = await makeWorld({ playbooks: { nightly: EDITABLE } });
+    await addSchedule(world, { id: "hourly" });
+    await world.host.scheduleIdle();
+
+    // Fire one at 07:00, against the playbook as it is on disk.
+    await world.clock.advance(MINUTE);
+    await world.host.scheduleIdle();
+    const firstFire = (await schedule(world, "hourly")).lastFire;
+    expect(firstFire).toMatchObject({ fireAt: at(7), status: "started" });
+    const firstRunId = String(firstFire?.runId);
+    const firstRun = (await world.host.getRun(firstRunId))?.record;
+    expect(firstRun?.ir.steps[0]?.prompt).toBe("Fire one.");
+
+    // Let the fired run finish, so `overlap: skip` (the default) allows the next fire.
+    world.executor.completeAll();
+    await drive(
+      world.clock,
+      async () => (await world.host.getRun(firstRunId))?.record.status === "completed",
+      { stepMs: MINUTE, maxRounds: 5 },
+    );
+
+    // A deploy edits the prompt between two fires. The schedule document is not touched.
+    writePlaybook(world.repo.repo, "nightly", EDITED);
+    await world.clock.advance(HOUR);
+    await world.host.scheduleIdle();
+
+    // Fire two loads the file again: a new run id, a new hash, and the new prompt on disk.
+    const secondFire = (await schedule(world, "hourly")).lastFire;
+    expect(secondFire).toMatchObject({ fireAt: at(8), status: "started" });
+    const secondRunId = String(secondFire?.runId);
+    expect(secondRunId).not.toBe(firstRunId);
+    const secondRun = (await world.host.getRun(secondRunId))?.record;
+    expect(secondRun?.ir.steps[0]?.prompt).toBe("Fire two.");
+    expect(secondRun?.playbookHash).not.toBe(firstRun?.playbookHash);
+    expect(world.executor.latestAgentForStep("a")?.prompt).toBe("Fire two.");
+
+    // The first run is unaffected evidence: it keeps the definition it started with.
+    expect((await world.host.getRun(firstRunId))?.record.ir.steps[0]?.prompt).toBe("Fire one.");
   });
 });
 
