@@ -94,7 +94,9 @@ packages live under the `@thaodangspace` scope. `argos` remains the command name
 - **Release guard.** `scripts/check-version.mjs` (`npm run version:check [-- vX.Y.Z]`) fails when a
   workspace drifts, when a published package is still `private` or `0.0.0`, when
   `publishConfig.access`/`engines.node`/`files`/`repository` is missing, or when the tag does not
-  match. CI runs it on every push; the release workflow runs it again with the tag.
+  match. CI runs it on every push; the release workflow runs it again with the tag. The
+  `GITHUB_REF_NAME` fallback applies only to a `refs/tags/` ref: a branch push (`main`) and a
+  `pull_request` merge ref (`2/merge`) both set it too, and reading those as tags failed every run.
 - **Release workflow.** Pushing a `v*` tag runs `.github/workflows/release.yml`: install, version
   guard, `npm test`, `npm run typecheck`, then `npm publish -w @thaodangspace/argos-core` and
   `npm publish -w @thaodangspace/argos` (in that order, `--provenance`, `NODE_AUTH_TOKEN` from the

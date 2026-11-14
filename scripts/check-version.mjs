@@ -8,8 +8,11 @@
  *   node scripts/check-version.mjs v0.1.0
  *   npm run version:check -- v0.1.0
  *
- * The tag argument falls back to `GITHUB_REF_NAME`. With no tag and no workspace version mismatch,
- * only the workspace-level checks run (so `npm run version:check` works on a branch).
+ * The tag argument falls back to `GITHUB_REF_NAME`, but only when Actions is building a tag ref
+ * (`GITHUB_REF` under `refs/tags/`). A branch push or a `pull_request` event also sets
+ * `GITHUB_REF_NAME` (`main`, `2/merge`), and treating those as tags failed every CI run. With no tag
+ * and no workspace version mismatch, only the workspace-level checks run, so
+ * `npm run version:check` works on a branch.
  */
 
 import { readFileSync } from "node:fs";
@@ -28,8 +31,19 @@ const UNPUBLISHED = ["packages/paseo-plugin"];
 
 const readManifest = (dir) => JSON.parse(readFileSync(join(root, dir, "package.json"), "utf8"));
 
+/**
+ * Actions sets `GITHUB_REF_NAME` for every ref (`v0.1.0`, `main`, `2/merge`), so only a real tag ref
+ * may supply the fallback. Outside Actions neither variable is set and an explicit argument is the
+ * only way to check a tag.
+ */
+const refTag = () => {
+  const ref = process.env["GITHUB_REF"];
+  if (ref !== undefined && !ref.startsWith("refs/tags/")) return undefined;
+  return process.env["GITHUB_REF_NAME"] || undefined;
+};
+
 const problems = [];
-const tag = process.argv[2] ?? process.env["GITHUB_REF_NAME"] ?? "";
+const tag = process.argv[2] ?? refTag() ?? "";
 const rootManifest = readManifest(".");
 const expected = rootManifest.version;
 
