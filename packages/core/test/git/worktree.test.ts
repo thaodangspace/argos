@@ -214,7 +214,9 @@ describe("createRunWorktree (D9)", () => {
     try {
       execFileSync("git", ["init", "--quiet", "--bare", awkwardOrigin], { encoding: "utf8" });
       mkdirSync(awkward, { recursive: true });
-      repo.git(["init", "--quiet"], awkward);
+      // An explicit initial branch: `git init` only names it `main` when the machine config says so
+      // (the CI runner's default is still `master`), and this test pushes `main` by name.
+      repo.git(["init", "--quiet", "--initial-branch=main"], awkward);
       repo.git(["config", "user.email", "argos@example.test"], awkward);
       repo.git(["config", "user.name", "Argos Test"], awkward);
       repo.git(["remote", "add", "origin", awkwardOrigin], awkward);
