@@ -846,7 +846,8 @@ app may run on a different machine than the daemon.
 | `client/RunList.tsx` | filter chips + one collapsible group per playbook (newest run per row, older runs on demand) |
 | `client/RunDetail.tsx` | run header/actions, pending-gate callouts, step rows with the log console, run log, after tasks |
 | `client/GateCard.tsx` / `client/StartRunForm.tsx` | gate choices with a comment box / the start-run form |
-| `client/ui.tsx` | theme-token primitives (`Pill`, `StatusGlyph`, `RunId`, `StepProgress`, buttons) and `usePanel` |
+| `client/ui.tsx` | theme-token React Native primitives (`Row`, `Txt`, `Button`, `PressableRow`, `Pill`, `StatusGlyph`, `RunId`, `StepProgress`) and `usePanel` |
+| `client/react-native-host.d.ts` | narrow, strict types for the host-provided `react-native` module (client typecheck only) |
 | `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` |
 | `server/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
 | `server/connection.ts` | Node-only: resolves `ARGOS_HOME`/`ARGOS_PORT` + token, builds the tools client |
@@ -873,7 +874,7 @@ a sandbox (symlinks pass); see `docs/architecture.md#security`.
 exactly one `agent.open.before` hook that appends the tools, and registers the panel RPCs
 (`argos.runs.list`, `argos.runs.get`, `argos.runs.start`, `argos.runs.cancel`,
 `argos.runs.remove`, `argos.runs.retry`, `argos.gates.decide`). Finished runs get a two-click
-**Remove** button (no `window.confirm`: the panel may render in React Native). Teardown removes the hook and closes the client (aborting streams). No
+**Remove** button (no `window.confirm`: it does not exist on native). Teardown removes the hook and closes the client (aborting streams). No
 settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token`
 lazily on first use (a plugin reload before `argos serve` still loads). RPC results are envelopes,
 so stable codes such as `gate_already_decided` reach the panel unchanged. The panel publishes an
@@ -906,8 +907,24 @@ Import-graph rule (`test/import-graph.test.ts`): no file under `packages/paseo-p
 `@thaodangspace/argos-core` root, `@earendil-works/*`, `node:sqlite`, or `node:child_process`. Only `server/` may
 import `node:fs` (it reads the token); `shared/` and the client entry must stay portable. The only
 `@thaodangspace/argos-core` subpaths are `@thaodangspace/argos-core/rpc` and `@thaodangspace/argos-core/rpc/contracts` (the latter is
-Node-free); other imports are limited to `@getpaseo/*`, `react`, and `zod`.
-`react`/`@types/react` are exact dev dependencies for the `.tsx` typecheck. Typecheck is split
+Node-free); other imports are limited to `@getpaseo/*`, `react`, and `zod`, plus `react-native` in
+the client half only.
+
+**The client half is React Native, never DOM.** Paseo renders plugin UI natively on iOS/Android
+and through react-native-web on desktop, so a DOM element (`<div>`, `<span>`, `<button>`) or a CSS
+value (`padding: "0 8px"`, `lineHeight: "18px"`, `cursor`) works on desktop and breaks on mobile.
+Build with `View`/`Text`/`Pressable` from `react-native` and `ScrollView`/`TextInput`/`copyText`
+from `@getpaseo/plugin/client/ui` (the host resolves both at load time). Every string sits in a
+`Text`; every outermost `Text` sets a color (native `Text` does not inherit it from a `View`); a
+`View` is a column unless it says `row`. Three guards: `tsconfig.client.json` has no `DOM` lib and
+types `react-native` through the strict `client/react-native-host.d.ts` (Paseo's template
+installs `react-native` for types instead, ~290 packages); `test/import-graph.test.ts` rejects
+lowercase JSX tags under `client/`; and `test/native-render.test.tsx` renders the list, form,
+error banner, run page, and sidebar contribution with bare host components and checks the native
+rules (host components only, text in `Text`, native style keys/values, explicit text color).
+
+`react`/`@types/react` and `react-test-renderer`/`@types/react-test-renderer` are exact dev
+dependencies for the `.tsx` typecheck and the native render test. Typecheck is split
 (`tsconfig.json`, `tsconfig.test.json`, `tsconfig.entry.json`, `tsconfig.client.json`) so JSX never
 leaks into the server graph.
 

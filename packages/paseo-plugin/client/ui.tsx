@@ -3,14 +3,33 @@
  *
  * The panel is deliberately plain: Paseo owns typography and chrome, so these render status
  * glyphs, pills, buttons, and monospace log text with the tokens it hands us.
+ *
+ * Everything here is React Native (`View`/`Text`/`Pressable`), never DOM: Paseo renders plugins
+ * natively on iOS/Android and through react-native-web on desktop. Three native rules shape the
+ * code: every string sits inside a `Text`; a `Text` does not inherit color from a `View`, so every
+ * `Txt` sets one; and a `View` lays out as a column unless it says `row`.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  Platform,
+  Pressable,
+  Text,
+  View,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 
 import { type PanelModel, type PanelStore, type StatusTone } from "../shared/panel";
 
-export const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+/** Native takes one family name; the web build passes the CSS stack through. */
+export const MONO_FONT = Platform.select({
+  ios: "Menlo",
+  android: "monospace",
+  default: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+});
 
 export function toneColor(theme: PluginTheme, tone: StatusTone): string {
   switch (tone) {
@@ -34,6 +53,72 @@ export function usePanel(panel: PanelStore): PanelModel {
   return model;
 }
 
+/** A horizontal row: centered children with a gap. */
+export function Row({
+  gap = 6,
+  wrap = false,
+  style,
+  children,
+}: {
+  gap?: number;
+  wrap?: boolean;
+  style?: StyleProp<ViewStyle>;
+  children?: ReactNode;
+}) {
+  return (
+    <View
+      style={[
+        { flexDirection: "row", alignItems: "center", gap, flexWrap: wrap ? "wrap" : "nowrap" },
+        style,
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
+
+/**
+ * Themed text. `color` defaults to the foreground; `lines={1}` truncates with an ellipsis.
+ * A nested `Txt` inherits the outer size and font, but always sets its own color.
+ */
+export function Txt({
+  theme,
+  color,
+  size,
+  mono = false,
+  bold = false,
+  lines,
+  selectable,
+  style,
+  children,
+}: {
+  theme: PluginTheme;
+  color?: string;
+  size?: number;
+  mono?: boolean;
+  bold?: boolean;
+  lines?: number;
+  selectable?: boolean;
+  style?: StyleProp<TextStyle>;
+  children?: ReactNode;
+}) {
+  return (
+    <Text
+      {...(lines === undefined ? {} : { numberOfLines: lines })}
+      {...(selectable === undefined ? {} : { selectable })}
+      style={[
+        { color: color ?? theme.colors.foreground },
+        size === undefined ? null : { fontSize: size },
+        mono ? { fontFamily: MONO_FONT } : null,
+        bold ? { fontWeight: "600" } : null,
+        style,
+      ]}
+    >
+      {children}
+    </Text>
+  );
+}
+
 export function Pill({
   theme,
   label,
@@ -44,19 +129,18 @@ export function Pill({
   tone: StatusTone;
 }) {
   return (
-    <span
+    <View
       style={{
-        color: toneColor(theme, tone),
-        border: `1px solid ${theme.colors.border}`,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
         borderRadius: 999,
-        padding: "0 8px",
-        fontSize: 11,
-        lineHeight: "18px",
-        whiteSpace: "nowrap",
+        paddingHorizontal: 8,
       }}
     >
-      {label}
-    </span>
+      <Txt theme={theme} color={toneColor(theme, tone)} size={11} lines={1} style={{ lineHeight: 18 }}>
+        {label}
+      </Txt>
+    </View>
   );
 }
 
@@ -73,66 +157,147 @@ export function StatusGlyph({
   size?: number;
 }) {
   return (
-    <span
-      aria-hidden
+    <Text
+      accessibilityElementsHidden
+      importantForAccessibility="no"
       style={{
         color: toneColor(theme, tone),
         fontSize: size,
-        lineHeight: `${size + 3}px`,
+        lineHeight: size + 3,
         width: size + 4,
-        display: "inline-block",
         textAlign: "center",
         flexShrink: 0,
       }}
     >
       {glyph}
-    </span>
+    </Text>
   );
 }
 
-export function buttonStyle(
-  theme: PluginTheme,
-  tone: StatusTone,
+/** A small bordered button; `filled` paints the tone as the background. */
+export function Button({
+  theme,
+  tone,
+  label,
+  onPress,
   disabled = false,
   filled = false,
-) {
-  return {
-    background: filled ? toneColor(theme, tone) : theme.colors.surface0,
-    color: filled ? theme.colors.accentForeground : toneColor(theme, tone),
-    border: `1px solid ${filled ? toneColor(theme, tone) : theme.colors.border}`,
-    borderRadius: 6,
-    padding: "3px 9px",
-    fontSize: 11,
-    lineHeight: "16px",
-    cursor: disabled ? "default" : "pointer",
-    opacity: disabled ? 0.5 : 1,
-  } as const;
+  accessibilityLabel,
+  style,
+}: {
+  theme: PluginTheme;
+  tone: StatusTone;
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  filled?: boolean;
+  accessibilityLabel?: string;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const color = toneColor(theme, tone);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      {...(accessibilityLabel === undefined ? {} : { accessibilityLabel })}
+      disabled={disabled}
+      hitSlop={4}
+      onPress={onPress}
+      style={({ pressed }) => [
+        {
+          backgroundColor: filled ? color : theme.colors.surface0,
+          borderWidth: 1,
+          borderColor: filled ? color : theme.colors.border,
+          borderRadius: 6,
+          paddingVertical: 3,
+          paddingHorizontal: 9,
+          opacity: disabled ? 0.5 : pressed ? 0.7 : 1,
+        },
+        style,
+      ]}
+    >
+      <Txt
+        theme={theme}
+        color={filled ? theme.colors.accentForeground : color}
+        size={11}
+        lines={1}
+        style={{ lineHeight: 16 }}
+      >
+        {label}
+      </Txt>
+    </Pressable>
+  );
 }
 
-export function fieldStyle(theme: PluginTheme) {
+/** A borderless pressable row (list rows, fold toggles). */
+export function PressableRow({
+  onPress,
+  accessibilityLabel,
+  expanded,
+  style,
+  children,
+}: {
+  onPress: () => void;
+  accessibilityLabel?: string;
+  expanded?: boolean;
+  style?: StyleProp<ViewStyle>;
+  children?: ReactNode;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      {...(accessibilityLabel === undefined ? {} : { accessibilityLabel })}
+      {...(expanded === undefined ? {} : { accessibilityState: { expanded } })}
+      onPress={onPress}
+      style={({ pressed }) => [style, pressed ? { opacity: 0.6 } : null]}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+export function fieldStyle(theme: PluginTheme): TextStyle {
   return {
-    width: "100%",
-    background: theme.colors.surface0,
+    backgroundColor: theme.colors.surface0,
     color: theme.colors.foreground,
-    border: `1px solid ${theme.colors.border}`,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
     borderRadius: 6,
-    padding: "4px 6px",
+    paddingVertical: 4,
+    paddingHorizontal: 6,
     fontSize: 12,
-    boxSizing: "border-box",
-  } as const;
+  };
+}
+
+/** A bordered card on `surface1`. */
+export function cardStyle(theme: PluginTheme, borderColor = theme.colors.border): ViewStyle {
+  return {
+    borderWidth: 1,
+    borderColor,
+    backgroundColor: theme.colors.surface1,
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 8,
+  };
 }
 
 /** A muted monospace id (`#01M798D7`). */
 export function RunId({ theme, id }: { theme: PluginTheme; id: string }) {
   return (
-    <span
-      title={id}
-      style={{ fontFamily: MONO_FONT, fontSize: 11, color: theme.colors.foregroundMuted }}
+    <Txt
+      theme={theme}
+      color={theme.colors.foregroundMuted}
+      size={11}
+      mono
+      lines={1}
+      selectable
+      style={{ flexShrink: 0 }}
     >
       #{id}
-    </span>
+    </Txt>
   );
 }
+
 /** A thin segmented progress bar: one square per step, colored by its status. */
 export function StepProgress({
   theme,
@@ -142,20 +307,22 @@ export function StepProgress({
   segments: readonly { id: string; label: string; tone: StatusTone }[];
 }) {
   return (
-    <span style={{ display: "inline-flex", gap: 3, alignItems: "center" }}>
+    <View
+      accessibilityLabel={segments.map((segment) => segment.label).join(", ")}
+      style={{ flexDirection: "row", gap: 3, alignItems: "center", flexShrink: 0 }}
+    >
       {segments.map((segment) => (
-        <span
+        <View
           key={segment.id}
-          title={segment.label}
           style={{
             width: 7,
             height: 7,
             borderRadius: 2,
-            background: toneColor(theme, segment.tone),
+            backgroundColor: toneColor(theme, segment.tone),
             opacity: segment.tone === "neutral" ? 0.45 : 1,
           }}
         />
       ))}
-    </span>
+    </View>
   );
 }

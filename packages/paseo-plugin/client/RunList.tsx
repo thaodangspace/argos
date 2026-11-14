@@ -6,29 +6,24 @@
  */
 
 import { useState } from "react";
+import { View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 
 import type { PanelView, RunView, WorkflowGroupView } from "../shared/panel";
-import { buttonStyle, Pill, RunId, StatusGlyph, StepProgress, toneColor } from "./ui";
+import {
+  Button,
+  cardStyle,
+  Pill,
+  PressableRow,
+  Row,
+  RunId,
+  StatusGlyph,
+  StepProgress,
+  toneColor,
+  Txt,
+} from "./ui";
 
 const RUNS_PER_GROUP = 5;
-
-function rowStyle(theme: PluginTheme) {
-  return {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: 3,
-    width: "100%",
-    textAlign: "left" as const,
-    background: "transparent",
-    color: theme.colors.foreground,
-    border: "none",
-    borderTop: `1px solid ${theme.colors.border}`,
-    padding: "7px 0",
-    cursor: "pointer",
-    font: "inherit",
-  };
-}
 
 function RunRow({
   theme,
@@ -39,38 +34,41 @@ function RunRow({
   run: RunView;
   onOpen: (runId: string) => void;
 }) {
+  const muted = theme.colors.foregroundMuted;
   return (
-    <button type="button" onClick={() => onOpen(run.id)} style={rowStyle(theme)}>
-      <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+    <PressableRow
+      accessibilityLabel={`${run.playbookId} ${run.runIdShort} ${run.statusLabel}`}
+      onPress={() => onOpen(run.id)}
+      style={{
+        gap: 3,
+        borderTopWidth: 1,
+        borderTopColor: theme.colors.border,
+        paddingVertical: 7,
+      }}
+    >
+      <Row>
         <StatusGlyph theme={theme} glyph={run.glyph} tone={run.tone} />
-        <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <Txt theme={theme} size={13} lines={1} style={{ flexShrink: 1 }}>
           {run.playbookId}
-        </span>
+        </Txt>
         <RunId theme={theme} id={run.runIdShort} />
         <Pill theme={theme} label={run.statusLabel} tone={run.tone} />
-        <span
-          style={{
-            marginLeft: "auto",
-            fontSize: 11,
-            color: theme.colors.foregroundMuted,
-            whiteSpace: "nowrap",
-          }}
-        >
+        <Txt theme={theme} color={muted} size={11} lines={1} style={{ marginLeft: "auto" }}>
           {run.durationLabel}
-        </span>
-      </span>
-      <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: theme.colors.foregroundMuted }}>
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        </Txt>
+      </Row>
+      <Row>
+        <Txt theme={theme} color={muted} size={11} lines={1} style={{ flexShrink: 1 }}>
           {run.triggerLabel} · {run.updatedRelative} · {run.detail}
-        </span>
-        <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6, alignItems: "center" }}>
+        </Txt>
+        <Row style={{ marginLeft: "auto" }}>
           <StepProgress theme={theme} segments={run.progress} />
-          <span style={{ whiteSpace: "nowrap" }}>
+          <Txt theme={theme} color={muted} size={11} lines={1}>
             {run.completedCount}/{run.stepCount}
-          </span>
-        </span>
-      </span>
-    </button>
+          </Txt>
+        </Row>
+      </Row>
+    </PressableRow>
   );
 }
 
@@ -104,80 +102,50 @@ function WorkflowGroup({
   const hidden = group.total - shown.length;
   // A one-run workflow needs no fold: the header row opens it directly.
   const single = group.total === 1;
+  const muted = theme.colors.foregroundMuted;
 
   return (
-    <div
-      style={{
-        border: `1px solid ${theme.colors.border}`,
-        background: theme.colors.surface1,
-        borderRadius: 8,
-        padding: "6px 10px",
-        marginTop: 8,
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => {
+    <View style={[cardStyle(theme), { paddingVertical: 6 }]}>
+      <PressableRow
+        accessibilityLabel={`${group.playbookId}, ${groupSummary(group)}`}
+        {...(single ? {} : { expanded: open })}
+        onPress={() => {
           if (single) onOpen(group.latest.id);
           else setOpen(!open);
         }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          width: "100%",
-          textAlign: "left",
-          background: "transparent",
-          color: theme.colors.foreground,
-          border: "none",
-          padding: "2px 0",
-          cursor: "pointer",
-          font: "inherit",
-        }}
+        style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2 }}
       >
         <StatusGlyph theme={theme} glyph={group.latest.glyph} tone={group.latest.tone} />
-        <strong style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <Txt theme={theme} size={13} bold lines={1} style={{ flexShrink: 1 }}>
           {group.playbookId}
-        </strong>
+        </Txt>
         <Pill theme={theme} label={group.latest.statusLabel} tone={group.latest.tone} />
-        <span
-          style={{
-            fontSize: 11,
-            color: theme.colors.foregroundMuted,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
+        <Txt theme={theme} color={muted} size={11} lines={1} style={{ flexShrink: 1 }}>
           {groupSummary(group)}
           {single
             ? ` · ${group.latest.triggerLabel} · ${group.latest.updatedRelative} · ${group.latest.durationLabel}`
             : ""}
-        </span>
-        <span style={{ marginLeft: "auto", color: theme.colors.foregroundMuted, fontSize: 11 }}>
+        </Txt>
+        <Txt theme={theme} color={muted} size={11} style={{ marginLeft: "auto" }}>
           {single ? "›" : open ? "▾" : "▸"}
-        </span>
-      </button>
+        </Txt>
+      </PressableRow>
 
       {!single && open
         ? shown.map((run) => <RunRow key={run.id} theme={theme} run={run} onOpen={onOpen} />)
         : null}
       {!single && open && hidden > 0 ? (
-        <button
-          type="button"
-          onClick={() => {
+        <Button
+          theme={theme}
+          tone="accent"
+          label={`Show ${Math.min(hidden, RUNS_PER_GROUP)} older`}
+          style={{ alignSelf: "flex-start", marginTop: 6, marginBottom: 2 }}
+          onPress={() => {
             setLimit(limit + RUNS_PER_GROUP);
           }}
-          style={{
-            ...buttonStyle(theme, "accent"),
-            marginTop: 6,
-            marginBottom: 2,
-          }}
-        >
-          Show {Math.min(hidden, RUNS_PER_GROUP)} older
-        </button>
+        />
       ) : null}
-    </div>
+    </View>
   );
 }
 
@@ -192,44 +160,42 @@ export function RunList({
   onOpen: (runId: string) => void;
   onFilter: (filter: PanelView["filter"]) => void;
 }) {
+  const muted = theme.colors.foregroundMuted;
   return (
-    <div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+    <View>
+      <Row wrap style={{ marginTop: 10 }}>
         {view.filters.map((filter) => {
           const active = filter.id === view.filter;
           return (
-            <button
+            <Button
               key={filter.id}
-              type="button"
-              onClick={() => {
+              theme={theme}
+              tone={active ? "accent" : "neutral"}
+              label={`${filter.label} ${filter.count}`}
+              style={active ? { borderColor: toneColor(theme, "accent") } : null}
+              onPress={() => {
                 onFilter(filter.id);
               }}
-              style={{
-                ...buttonStyle(theme, active ? "accent" : "neutral"),
-                ...(active ? { border: `1px solid ${toneColor(theme, "accent")}` } : {}),
-              }}
-            >
-              {filter.label} {filter.count}
-            </button>
+            />
           );
         })}
-      </div>
+      </Row>
 
       {view.empty ? (
-        <div style={{ color: theme.colors.foregroundMuted, fontSize: 12, marginTop: 12 }}>
+        <Txt theme={theme} color={muted} size={12} style={{ marginTop: 12 }}>
           No Argos runs yet. Start one above, or ask an agent to use argos_start_playbook.
-        </div>
+        </Txt>
       ) : null}
 
       {!view.empty && view.groups.length === 0 ? (
-        <div style={{ color: theme.colors.foregroundMuted, fontSize: 12, marginTop: 12 }}>
+        <Txt theme={theme} color={muted} size={12} style={{ marginTop: 12 }}>
           No run matches this filter.
-        </div>
+        </Txt>
       ) : null}
 
       {view.groups.map((group) => (
         <WorkflowGroup key={group.playbookId} theme={theme} group={group} onOpen={onOpen} />
       ))}
-    </div>
+    </View>
   );
 }

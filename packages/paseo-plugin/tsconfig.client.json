@@ -8,9 +8,15 @@
     "declarationMap": false,
     "sourceMap": false,
     "jsx": "react-jsx",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023"],
     "types": ["node", "react"]
   },
-  "include": ["index.client.tsx", "client/**/*.ts", "client/**/*.tsx", "shared/**/*.ts"],
+  "include": [
+    "index.client.tsx",
+    "client/**/*.ts",
+    "client/**/*.tsx",
+    "shared/**/*.ts",
+    "test/**/*.tsx"
+  ],
   "exclude": []
 }

@@ -7,9 +7,10 @@
  * `shared/panel.ts` (selection, one-shot decisions, retries).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { copyText } from "@getpaseo/plugin/client/ui";
+import { copyText, ScrollView } from "@getpaseo/plugin/client/ui";
 
 import type {
   GateView,
@@ -19,7 +20,17 @@ import type {
   StepLogEntry,
   StepView,
 } from "../shared/panel";
-import { buttonStyle, MONO_FONT, Pill, RunId, StatusGlyph, StepProgress, toneColor } from "./ui";
+import {
+  Button,
+  Pill,
+  PressableRow,
+  Row,
+  RunId,
+  StatusGlyph,
+  StepProgress,
+  toneColor,
+  Txt,
+} from "./ui";
 import { GateCard } from "./GateCard";
 
 function formatLineCount(count: number): string {
@@ -30,25 +41,41 @@ function LogLine({ theme, entry }: { theme: PluginTheme; entry: StepLogEntry }) 
   const color =
     entry.tone === "neutral" ? theme.colors.foregroundMuted : toneColor(theme, entry.tone);
   return (
-    <div style={{ display: "flex", gap: 8, fontFamily: MONO_FONT, fontSize: 11, lineHeight: "17px" }}>
-      <span style={{ color: theme.colors.foregroundMuted, opacity: 0.7, flexShrink: 0 }}>
+    <View style={{ flexDirection: "row", gap: 8 }}>
+      <Txt
+        theme={theme}
+        color={theme.colors.foregroundMuted}
+        size={11}
+        mono
+        style={{ lineHeight: 17, opacity: 0.7, flexShrink: 0 }}
+      >
         {entry.timeLabel === "" ? "        " : entry.timeLabel}
-      </span>
-      <span style={{ color, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{entry.text}</span>
-    </div>
+      </Txt>
+      <Txt theme={theme} color={color} size={11} mono selectable style={{ lineHeight: 17, flex: 1 }}>
+        {entry.text}
+      </Txt>
+    </View>
   );
 }
 
-function logPaneStyle(theme: PluginTheme) {
-  return {
-    background: theme.colors.surface0,
-    border: `1px solid ${theme.colors.border}`,
-    borderRadius: 6,
-    padding: "8px 10px",
-    maxHeight: 360,
-    overflow: "auto" as const,
-    marginTop: 6,
-  };
+/** A bounded, scrollable console pane (nested scrolling stays inside it on mobile). */
+function LogPane({ theme, children }: { theme: PluginTheme; children: ReactNode }) {
+  return (
+    <ScrollView
+      nestedScrollEnabled
+      style={{
+        backgroundColor: theme.colors.surface0,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 6,
+        maxHeight: 360,
+        marginTop: 6,
+      }}
+      contentContainerStyle={{ paddingVertical: 8, paddingHorizontal: 10 }}
+    >
+      {children}
+    </ScrollView>
+  );
 }
 
 function CopyLogButton({ theme, text }: { theme: PluginTheme; text: string }) {
@@ -59,19 +86,18 @@ function CopyLogButton({ theme, text }: { theme: PluginTheme; text: string }) {
     return () => clearTimeout(timer);
   }, [copied]);
   return (
-    <button
-      type="button"
+    <Button
+      theme={theme}
+      tone="neutral"
+      label={copied ? "Copied" : "Copy log"}
       disabled={text === ""}
-      onClick={() => {
+      onPress={() => {
         void copyText(text).then(
           () => setCopied(true),
           () => setCopied(false),
         );
       }}
-      style={buttonStyle(theme, "neutral", text === "")}
-    >
-      {copied ? "Copied" : "Copy log"}
-    </button>
+    />
   );
 }
 
@@ -84,47 +110,33 @@ function StepLog({
   step: StepView;
   loading: boolean;
 }) {
+  const muted = theme.colors.foregroundMuted;
   return (
-    <div style={logPaneStyle(theme)}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          marginBottom: step.log.length === 0 ? 0 : 4,
-        }}
-      >
-        <span style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
+    <LogPane theme={theme}>
+      <Row gap={8} style={{ marginBottom: step.log.length === 0 ? 0 : 4 }}>
+        <Txt theme={theme} color={muted} size={11}>
           {loading && step.log.length === 0 ? "Loading log…" : formatLineCount(step.log.length)}
-        </span>
-        <span style={{ marginLeft: "auto" }}>
+        </Txt>
+        <View style={{ marginLeft: "auto" }}>
           <CopyLogButton theme={theme} text={step.logText} />
-        </span>
-      </div>
+        </View>
+      </Row>
       {step.log.length === 0 && !loading ? (
-        <div style={{ fontFamily: MONO_FONT, fontSize: 11, color: theme.colors.foregroundMuted }}>
+        <Txt theme={theme} color={muted} size={11} mono>
           {step.status === "pending" || step.status === "ready"
             ? "This step has not run yet."
             : "Argos recorded no log lines for this step."}
-        </div>
+        </Txt>
       ) : null}
       {step.log.map((entry, index) => (
         <LogLine key={`${entry.timeLabel}-${index}`} theme={theme} entry={entry} />
       ))}
       {step.kind === "agent" && step.log.length > 0 ? (
-        <div
-          style={{
-            fontFamily: MONO_FONT,
-            fontSize: 10,
-            color: theme.colors.foregroundMuted,
-            marginTop: 6,
-            opacity: 0.8,
-          }}
-        >
+        <Txt theme={theme} color={muted} size={10} mono style={{ marginTop: 6, opacity: 0.8 }}>
           — agent transcripts are not stored; declared outputs only —
-        </div>
+        </Txt>
       ) : null}
-    </div>
+    </LogPane>
   );
 }
 
@@ -145,88 +157,74 @@ function StepRow({
   onToggle: () => void;
   loading: boolean;
 }) {
+  const muted = theme.colors.foregroundMuted;
   return (
-    <div style={{ borderTop: `1px solid ${theme.colors.border}`, padding: "6px 0" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <button
-          type="button"
-          onClick={onToggle}
+    <View style={{ borderTopWidth: 1, borderTopColor: theme.colors.border, paddingVertical: 6 }}>
+      <Row gap={8}>
+        <PressableRow
+          accessibilityLabel={`${step.title}, ${step.kindLabel}`}
+          expanded={open}
+          onPress={onToggle}
           style={{
-            display: "flex",
+            flexDirection: "row",
             alignItems: "center",
             gap: 8,
             flex: 1,
             minWidth: 0,
-            background: "transparent",
-            color: theme.colors.foreground,
-            border: "none",
-            padding: "2px 0",
-            cursor: "pointer",
-            font: "inherit",
-            textAlign: "left",
+            paddingVertical: 2,
           }}
         >
           <StatusGlyph theme={theme} glyph={step.glyph} tone={step.tone} />
-          <span
-            style={{
-              fontSize: 12,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <Txt theme={theme} size={12} lines={1} style={{ flexShrink: 1 }}>
             {step.title}
-          </span>
-          <span
+          </Txt>
+          <View
             style={{
-              fontSize: 10,
-              color: theme.colors.foregroundMuted,
-              border: `1px solid ${theme.colors.border}`,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
               borderRadius: 4,
-              padding: "0 4px",
+              paddingHorizontal: 4,
             }}
           >
-            {step.kindLabel}
-          </span>
+            <Txt theme={theme} color={muted} size={10} lines={1}>
+              {step.kindLabel}
+            </Txt>
+          </View>
           {step.attemptCount > 1 ? (
-            <span style={{ fontSize: 10, color: theme.colors.foregroundMuted }}>
+            <Txt theme={theme} color={muted} size={10} lines={1}>
               {step.attemptCount} attempts
-            </span>
+            </Txt>
           ) : null}
           {step.errorCode === undefined ? null : (
-            <span style={{ fontSize: 10, color: theme.colors.statusDanger }}>{step.errorCode}</span>
+            <Txt theme={theme} color={theme.colors.statusDanger} size={10} lines={1}>
+              {step.errorCode}
+            </Txt>
           )}
-          <span
-            style={{
-              marginLeft: "auto",
-              fontSize: 11,
-              color: theme.colors.foregroundMuted,
-              whiteSpace: "nowrap",
-            }}
-          >
+          <Txt theme={theme} color={muted} size={11} lines={1} style={{ marginLeft: "auto" }}>
             {step.durationLabel}
-          </span>
-          <span style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>{open ? "▾" : "▸"}</span>
-        </button>
+          </Txt>
+          <Txt theme={theme} color={muted} size={10}>
+            {open ? "▾" : "▸"}
+          </Txt>
+        </PressableRow>
         {step.retryable ? (
-          <button
-            type="button"
+          <Button
+            theme={theme}
+            tone="accent"
+            label={run.cancelling ? "Retrying…" : "Retry"}
             disabled={run.cancelling}
-            onClick={() => {
+            onPress={() => {
               void panel.retryStep(run.id, step.id);
             }}
-            style={buttonStyle(theme, "accent", run.cancelling)}
-          >
-            {run.cancelling ? "Retrying…" : "Retry"}
-          </button>
+          />
         ) : null}
-      </div>
+      </Row>
       {open ? <StepLog theme={theme} step={step} loading={loading} /> : null}
-    </div>
+    </View>
   );
 }
 
-/** Remove a finished run. Two clicks, because `window.confirm` may not exist on this surface. */
+/** Remove a finished run. Two presses, because `window.confirm` does not exist on native. */
 function RemoveRunButton({
   theme,
   panel,
@@ -246,11 +244,13 @@ function RemoveRunButton({
     return () => clearTimeout(timer);
   }, [armed]);
   return (
-    <button
-      type="button"
+    <Button
+      theme={theme}
+      tone={armed ? "danger" : "neutral"}
+      label={busy && removing ? "Removing…" : armed ? "Confirm remove" : "Remove"}
+      accessibilityLabel="Delete this run from Argos (its worktree, if any, is kept)"
       disabled={busy}
-      title="Delete this run from Argos (its worktree, if any, is kept)"
-      onClick={() => {
+      onPress={() => {
         if (!armed) {
           setArmed(true);
           return;
@@ -259,10 +259,7 @@ function RemoveRunButton({
         setRemoving(true);
         void panel.removeRun(runId).finally(() => setRemoving(false));
       }}
-      style={buttonStyle(theme, armed ? "danger" : "neutral", busy)}
-    >
-      {busy && removing ? "Removing…" : armed ? "Confirm remove" : "Remove"}
-    </button>
+    />
   );
 }
 
@@ -278,15 +275,15 @@ function defaultOpenStep(run: RunView): string | null {
 
 function MetaItem({ theme, label, value }: { theme: PluginTheme; label: string; value: string }) {
   return (
-    <span style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
-      {label} <span style={{ color: theme.colors.foreground }}>{value}</span>
-    </span>
+    <Txt theme={theme} color={theme.colors.foregroundMuted} size={11} selectable>
+      {label} <Txt theme={theme}>{value}</Txt>
+    </Txt>
   );
 }
 
 function RunMeta({ theme, run }: { theme: PluginTheme; run: RunView }) {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 6 }}>
+    <View style={{ flexDirection: "row", flexWrap: "wrap", rowGap: 4, columnGap: 14, marginTop: 6 }}>
       <MetaItem theme={theme} label="trigger" value={run.triggerLabel} />
       <MetaItem theme={theme} label="started" value={run.createdLabel} />
       <MetaItem theme={theme} label="duration" value={run.durationLabel} />
@@ -297,7 +294,7 @@ function RunMeta({ theme, run }: { theme: PluginTheme; run: RunView }) {
       {run.inputs.map((input) => (
         <MetaItem key={input.name} theme={theme} label={input.name} value={input.value} />
       ))}
-    </div>
+    </View>
   );
 }
 
@@ -305,44 +302,37 @@ function RunLogSection({ theme, entries }: { theme: PluginTheme; entries: readon
   const [open, setOpen] = useState(false);
   if (entries.length === 0) return null;
   return (
-    <div style={{ marginTop: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <button
-          type="button"
-          onClick={() => {
+    <View style={{ marginTop: 10 }}>
+      <Row gap={8}>
+        <PressableRow
+          expanded={open}
+          onPress={() => {
             setOpen(!open);
           }}
-          style={{
-            background: "transparent",
-            color: theme.colors.foreground,
-            border: "none",
-            padding: 0,
-            cursor: "pointer",
-            font: "inherit",
-            fontSize: 12,
-          }}
         >
-          {open ? "▾" : "▸"} Run log ({formatLineCount(entries.length)})
-        </button>
+          <Txt theme={theme} size={12}>
+            {open ? "▾" : "▸"} Run log ({formatLineCount(entries.length)})
+          </Txt>
+        </PressableRow>
         {open ? (
-          <span style={{ marginLeft: "auto" }}>
+          <View style={{ marginLeft: "auto" }}>
             <CopyLogButton
               theme={theme}
               text={entries
                 .map((entry) => (entry.at === null ? `        ${entry.text}` : `${entry.timeLabel}  ${entry.text}`))
                 .join("\n")}
             />
-          </span>
+          </View>
         ) : null}
-      </div>
+      </Row>
       {open ? (
-        <div style={logPaneStyle(theme)}>
+        <LogPane theme={theme}>
           {entries.map((entry, index) => (
             <LogLine key={`${entry.timeLabel}-${index}`} theme={theme} entry={entry} />
           ))}
-        </div>
+        </LogPane>
       ) : null}
-    </div>
+    </View>
   );
 }
 
@@ -358,7 +348,7 @@ function PendingGates({
   const pending = gates.filter((gate) => gate.status === "pending");
   if (pending.length === 0) return null;
   return (
-    <div style={{ marginTop: 10 }}>
+    <View style={{ marginTop: 10 }}>
       {pending.map((gate) => (
         <GateCard
           key={gate.key}
@@ -374,7 +364,7 @@ function PendingGates({
           }}
         />
       ))}
-    </div>
+    </View>
   );
 }
 
@@ -390,6 +380,7 @@ export function RunDetailPage({
   onBack: () => void;
 }) {
   const run = detail.run;
+  const muted = theme.colors.foregroundMuted;
   const [openStep, setOpenStep] = useState<string | null>(() => defaultOpenStep(run));
   // A different run starts folded on its failure/running step; polls never override the user.
   useEffect(() => {
@@ -397,51 +388,52 @@ export function RunDetailPage({
   }, [run.id]);
 
   return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-        <button type="button" onClick={onBack} style={buttonStyle(theme, "neutral")}>
-          ← Runs
-        </button>
+    <View>
+      <Row gap={8} wrap style={{ marginTop: 10 }}>
+        <Button theme={theme} tone="neutral" label="← Runs" onPress={onBack} />
         <StatusGlyph theme={theme} glyph={run.glyph} tone={run.tone} size={15} />
-        <strong style={{ fontSize: 15 }}>{run.playbookId}</strong>
+        <Txt theme={theme} size={15} bold lines={1} style={{ flexShrink: 1 }}>
+          {run.playbookId}
+        </Txt>
         <RunId theme={theme} id={run.id} />
         <Pill theme={theme} label={run.statusLabel} tone={run.tone} />
-        <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <Row wrap style={{ marginLeft: "auto" }}>
           {run.active ? (
-            <button
-              type="button"
+            <Button
+              theme={theme}
+              tone="danger"
+              label={run.cancelling ? "Cancelling…" : "Cancel"}
               disabled={run.cancelling}
-              onClick={() => {
+              onPress={() => {
                 void panel.cancelRun(run.id);
               }}
-              style={buttonStyle(theme, "danger", run.cancelling)}
-            >
-              {run.cancelling ? "Cancelling…" : "Cancel"}
-            </button>
+            />
           ) : null}
           {run.removable ? (
             <RemoveRunButton theme={theme} panel={panel} runId={run.id} busy={run.cancelling} />
           ) : null}
-        </span>
-      </div>
+        </Row>
+      </Row>
 
       <RunMeta theme={theme} run={run} />
       <PendingGates theme={theme} gates={run.gates} panel={panel} />
 
-      <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12 }}>Steps</span>
-        <span style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
+      <Row gap={8} style={{ marginTop: 12 }}>
+        <Txt theme={theme} size={12}>
+          Steps
+        </Txt>
+        <Txt theme={theme} color={muted} size={11} style={{ flexShrink: 1 }}>
           {run.completedCount}/{run.stepCount} completed
           {run.skippedCount === 0 ? "" : ` · ${run.skippedCount} skipped`}
           {run.failedCount === 0 ? "" : ` · ${run.failedCount} failed`}
           {detail.loading ? " · loading log…" : ""}
-        </span>
-        <span style={{ marginLeft: "auto" }}>
+        </Txt>
+        <View style={{ marginLeft: "auto" }}>
           <StepProgress theme={theme} segments={run.progress} />
-        </span>
-      </div>
+        </View>
+      </Row>
 
-      <div style={{ marginTop: 4 }}>
+      <View style={{ marginTop: 4 }}>
         {run.steps.map((step) => (
           <StepRow
             key={step.id}
@@ -456,27 +448,28 @@ export function RunDetailPage({
             loading={detail.loading}
           />
         ))}
-      </div>
+      </View>
 
       <RunLogSection theme={theme} entries={detail.runLog} />
 
       {run.after.length === 0 ? null : (
-        <div style={{ marginTop: 10 }}>
-          <div style={{ fontSize: 12 }}>After tasks</div>
+        <View style={{ marginTop: 10 }}>
+          <Txt theme={theme} size={12}>
+            After tasks
+          </Txt>
           {run.after.map((after) => (
-            <div
-              key={after.id}
-              style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, marginTop: 3 }}
-            >
+            <Row key={after.id} gap={8} style={{ marginTop: 3 }}>
               <StatusGlyph theme={theme} glyph="•" tone={after.tone} size={10} />
-              <span>{after.title}</span>
-              <span style={{ color: theme.colors.foregroundMuted }}>
+              <Txt theme={theme} size={11} lines={1} style={{ flexShrink: 1 }}>
+                {after.title}
+              </Txt>
+              <Txt theme={theme} color={muted} size={11} lines={1}>
                 {after.trigger} · {after.status}
-              </span>
-            </div>
+              </Txt>
+            </Row>
           ))}
-        </div>
+        </View>
       )}
-    </div>
+    </View>
   );
 }
