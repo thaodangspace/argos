@@ -51,6 +51,10 @@
       "types": "./dist/paseo/index.d.ts",
       "import": "./dist/paseo/index.js"
     },
+    "./hc": {
+      "types": "./dist/hc/index.d.ts",
+      "import": "./dist/hc/index.js"
+    },
     "./git": {
       "types": "./dist/git/index.d.ts",
       "import": "./dist/git/index.js"

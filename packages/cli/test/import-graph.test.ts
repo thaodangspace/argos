@@ -36,6 +36,8 @@ describe("CLI import graph", () => {
         /from\s+["']@thaodangspace\/argos-core\/durable/,
         /from\s+["']@thaodangspace\/argos-core\/git/,
         /["']node:sqlite["']/,
+        // The CLI is an HTTP client: opening a socket of its own is the transport's job.
+        /["']node:net["']/,
         /from\s+["']@earendil-works\//,
       ];
       for (const pattern of forbidden) {
@@ -50,6 +52,22 @@ describe("CLI import graph", () => {
     for (const file of sourceFiles(cliSource)) {
       if (file.endsWith(join("commands", "serve.ts"))) continue;
       if (/from\s+["']@thaodangspace\/argos-core\/rpc\/server["']/.test(readFileSync(file, "utf8"))) {
+        offenders.push(file);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("reaches the hc transport only from commands/serve.ts", () => {
+    // The `hc` subpath opens a socket (`node:net`), so the CLI may name it in exactly one place:
+    // the process that owns the executor registry (`serve`). `argos run` stays an HTTP client.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(cliSource)) {
+      if (file.endsWith(join("commands", "serve.ts"))) continue;
+      if (
+        /from\s+["']@thaodangspace\/argos-core\/hc["']/.test(readFileSync(file, "utf8")) ||
+        /import\s*\(\s*["']@thaodangspace\/argos-core\/hc["']/.test(readFileSync(file, "utf8"))
+      ) {
         offenders.push(file);
       }
     }
