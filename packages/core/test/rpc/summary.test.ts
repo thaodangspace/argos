@@ -133,4 +133,31 @@ describe("toRunDetail (step logs)", () => {
     // The public schema accepts the projection as-is (strict, so a stray key fails here).
     expect(RunDetailSchema.safeParse(toRunDetail({ taskId: "43", record: { ...settledRecord(), forkedFrom } }, { events: [] })).success).toBe(true);
   });
+
+  it("aggregates a step's attempts and the run total (FR26)", () => {
+    const record = settledRecord();
+    const summary = toRunSummary({ taskId: "42", record });
+    expect(summary.steps[0]?.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
+    expect(summary.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
+    // The detail projection inherits both through StepDetailSummary.
+    expect(detail(record).steps[0]?.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
+    expect(RunDetailSchema.safeParse(detail(record)).success).toBe(true);
+  });
+
+  it("keeps usage absent when no attempt reported accounting", () => {
+    let record = createRunRecord({ id: "run-3", ir, inputs: {}, cwd: "/repo", now: 1_000 });
+    record = next(record, { type: "tick", now: 1_000 }).record;
+    record = next(record, {
+      type: "stepSettled",
+      stepId: "pick",
+      endedAt: 2_000,
+      outcome: "success",
+      now: 2_000,
+    }).record;
+
+    const summary = toRunSummary({ taskId: "42", record });
+    expect(summary.steps[0]).not.toHaveProperty("usage");
+    expect(summary).not.toHaveProperty("usage");
+    expect(JSON.stringify(summary)).not.toContain('"usage"');
+  });
 });

@@ -355,9 +355,12 @@ requires `cwd` in the body for the same reason.
 `RunSummary`/`RunDetail` never contain prompts, agent messages, transcripts, or credential-like
 inputs. `RunDetail` adds what a CI-style step log needs — each step's attempts (`target`, timing,
 usage), its declared outputs (credential-shaped output names dropped, long values truncated), its
-outcome, and the run's bounded history; the list projection stays lean. The plugin holds no
-durable state: teardown closes only its HTTP client and streams, and a new plugin instance
-reconnects to the same `argos serve` run.
+outcome, and the run's bounded history; the list projection stays lean. Usage also rolls up: a
+step's `usage` aggregates its attempts and the run's `usage` aggregates every main step
+(`engine/usage.ts`), which is what `argos ls`'s COST column, `argos status`'s `usage` line, and the
+panel's run meta/step rows render; after tasks are separate runs and are not counted in the
+parent. The plugin holds no durable state: teardown closes only its HTTP client and streams, and a
+new plugin instance reconnects to the same `argos serve` run.
 
 ## Security
 

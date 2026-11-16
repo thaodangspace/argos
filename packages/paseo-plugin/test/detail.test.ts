@@ -10,6 +10,7 @@ import type { RunDetail, StepDetailSummary } from "@thaodangspace/argos-core/rpc
 import {
   buildRunLog,
   buildStepLog,
+  compactUsage,
   createPanel,
   groupRuns,
   logText,
@@ -63,6 +64,7 @@ const DETAIL_STEPS: StepDetailSummary[] = [
         usage: { inputTokens: 120, outputTokens: 3_000, totalCostUsd: 0.42 },
       },
     ],
+    usage: { inputTokens: 120, outputTokens: 3_000, totalCostUsd: 0.42 },
     outputs: { stdout: "specs/VP-7.md\n" },
   }),
   detailStep({
@@ -88,6 +90,7 @@ function detailRun(): RunDetail {
       updatedAt: 4_500,
       steps: DETAIL_STEPS,
     }),
+    usage: { inputTokens: 120, outputTokens: 3_000, totalCostUsd: 0.42 },
     steps: DETAIL_STEPS,
     history: HISTORY,
   };
@@ -140,6 +143,19 @@ describe("step log", () => {
     expect(view.steps[0]?.log).toEqual([]);
     expect(view.steps[0]?.hasLog).toBe(false);
     expect(view.steps[0]?.logText).toBe("");
+  });
+
+  it("aggregates usage per step and for the run (FR26)", () => {
+    const view = runView(detailRun(), { now: 5_000 });
+    // Workflow total: the sum of every agent step's attempts.
+    expect(view.usageLabel).toBe("$0.42 · 120 in · 3k out");
+    expect(view.costLabel).toBe("$0.42");
+    // Per-step totals: the agent step reports cost, the timed-out step reported nothing.
+    expect(view.steps[0]?.usageLabel).toBe("$0.42");
+    expect(view.steps[1]?.usageLabel).toBeNull();
+    // A provider that reports tokens but no price still gets a compact label.
+    expect(compactUsage({ inputTokens: 120, outputTokens: 3_000 })).toBe("120 in · 3k out");
+    expect(compactUsage(undefined)).toBeNull();
   });
 
   it("builds the run-level log without step events", () => {

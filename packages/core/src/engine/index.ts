@@ -67,6 +67,13 @@ export {
   type NextResult,
 } from "./reducer.js";
 export {
+  accumulateUsage,
+  aggregateUsage,
+  attemptUsage,
+  USAGE_GAUGE_KEYS,
+  type UsageTotals,
+} from "./usage.js";
+export {
   decideGate,
   type GateDecisionPlan,
   type GateDecisionRejection,

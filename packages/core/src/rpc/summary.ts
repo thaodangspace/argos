@@ -7,7 +7,7 @@
  */
 
 import type { RunRecord, StepRecord } from "../engine/index.js";
-import { isSecretEnvName, isTerminalRunStatus } from "../engine/index.js";
+import { aggregateUsage, attemptUsage, isSecretEnvName, isTerminalRunStatus } from "../engine/index.js";
 import type { HistoryDocValue, RunDoc } from "../durable/mirror.js";
 import type { FireEntry, ScheduleDoc } from "../durable/schedule-docs.js";
 import {
@@ -64,6 +64,7 @@ function stepSummaries(record: RunRecord): StepSummary[] {
     const attempts = state.attempts;
     const first = attempts[0];
     const ended = [...attempts].reverse().find((attempt) => attempt.endedAt !== undefined);
+    const usage = attemptUsage(attempts);
     steps.push({
       id: definition.id,
       title: definition.title,
@@ -73,6 +74,7 @@ function stepSummaries(record: RunRecord): StepSummary[] {
       attemptCount: attempts.length,
       ...(first === undefined ? {} : { startedAt: first.startedAt }),
       ...(ended?.endedAt === undefined ? {} : { endedAt: ended.endedAt }),
+      ...(usage === undefined ? {} : { usage }),
     });
   }
   return steps;
@@ -174,6 +176,8 @@ export function toRunSummary(
   gateDocuments?: ReadonlyMap<string, GateDocumentView>,
 ): RunSummary {
   const record = doc.record;
+  const steps = stepSummaries(record);
+  const usage = aggregateUsage(steps.map((step) => step.usage));
   return {
     id: record.id,
     playbookId: record.playbookId,
@@ -187,7 +191,10 @@ export function toRunSummary(
     ...(record.trigger === undefined ? {} : { trigger: record.trigger }),
     // Fork provenance: same rule — a normally started run omits the key, so goldens hold.
     ...(record.forkedFrom === undefined ? {} : { forkedFrom: record.forkedFrom }),
-    steps: stepSummaries(record),
+    // Workflow total: every main step's aggregate. Absent when nothing reported accounting, so a
+    // run without usage keeps the JSON byte-identical to before this field existed.
+    ...(usage === undefined ? {} : { usage }),
+    steps,
     gates: record.gates.map((gate) => toGateSummary(record.id, gate, gateDocuments?.get(gate.id))),
     after: afterSummaries(record),
     createdAt: record.createdAt,

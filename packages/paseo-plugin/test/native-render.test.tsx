@@ -307,6 +307,7 @@ const DETAIL_STEPS: StepDetailSummary[] = [
         usage: { inputTokens: 120, outputTokens: 3_000, totalCostUsd: 0.42 },
       },
     ],
+    usage: { inputTokens: 120, outputTokens: 3_000, totalCostUsd: 0.42 },
     outputs: { stdout: "specs/VP-7.md\n" },
   }),
   detailStep({
@@ -337,6 +338,7 @@ function detailRun(): RunDetail {
   });
   return {
     ...run,
+    usage: { inputTokens: 120, outputTokens: 3_000, totalCostUsd: 0.42 },
     steps: DETAIL_STEPS,
     history: [
       { at: 1_000, seq: 0, type: "run_started", stepId: null, attempt: null, detail: "va-spec-impl" },
@@ -455,6 +457,8 @@ describe("panel renders with React Native primitives only", () => {
     expect(text).toContain("Ship it?");
     expect(text).toContain("step_timeout");
     expect(text).toContain("Notify");
+    // FR26: the run header shows the workflow total, and the step row shows its own cost.
+    expect(text).toContain("usage $0.42 · 120 in · 3k out");
 
     await press(renderer, "Pick spec");
     expectNative(renderer);

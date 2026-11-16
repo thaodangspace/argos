@@ -20,8 +20,11 @@ import {
   FORKED_RUN_DETAIL,
   FORKED_RUN_SUMMARY,
   REFUSED_SCHEDULE_SUMMARY,
+  RUN_ID,
   SCHEDULE_ID,
   SCHEDULED_RUN_SUMMARY,
+  USAGE_RUN_DETAIL,
+  USAGE_RUN_SUMMARY,
 } from "./support/fixtures.js";
 import { startStubServer, type StubServer } from "./support/stub-server.js";
 
@@ -627,6 +630,36 @@ describe("argos schedule (FR10.2)", () => {
       expect(await runCli(["status", "run-1"], status.io)).toBe(0);
       expect(status.stdout()).toContain("forked    from run-1 at review");
       expect(status.stdout()).toContain("0123456789ab -> fedcba987654");
+    } finally {
+      restore();
+      await alternate.close();
+    }
+  });
+
+  it("renders aggregate usage in the human ls column and status block (FR26)", async () => {
+    const alternate = await startStubServer(undefined, {
+      runs: [USAGE_RUN_SUMMARY],
+      detail: USAGE_RUN_DETAIL,
+    });
+    const restore = withEnv({
+      ARGOS_HOME: current().home.home,
+      ARGOS_PORT: String(alternate.port),
+    });
+    try {
+      const list = capture();
+      expect(await runCli(["ls"], list.io)).toBe(0);
+      // The column appears only when accounting exists; this run reported $0.67 in total.
+      expect(list.stdout()).toContain("COST");
+      expect(list.stdout()).toContain("$0.67");
+
+      const status = capture();
+      expect(await runCli(["status", RUN_ID], status.io)).toBe(0);
+      expect(status.stdout()).toContain("usage     $0.67 · 240 in · 6k out · ctx 4.1k/200k");
+      // Per-step cost: one line for each agent step, none for the gate step.
+      expect(status.stdout()).toContain("$0.25");
+      expect(status.stdout()).toContain("$0.42");
+      const review = status.stdout().split("\n").find((line) => line.includes("review"));
+      expect(review).not.toContain("$");
     } finally {
       restore();
       await alternate.close();

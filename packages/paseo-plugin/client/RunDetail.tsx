@@ -200,6 +200,11 @@ function StepRow({
               {step.errorCode}
             </Txt>
           )}
+          {step.usageLabel === null ? null : (
+            <Txt theme={theme} color={muted} size={10} lines={1}>
+              {step.usageLabel}
+            </Txt>
+          )}
           <Txt theme={theme} color={muted} size={11} lines={1} style={{ marginLeft: "auto" }}>
             {step.durationLabel}
           </Txt>
@@ -287,6 +292,9 @@ function RunMeta({ theme, run }: { theme: PluginTheme; run: RunView }) {
       <MetaItem theme={theme} label="trigger" value={run.triggerLabel} />
       <MetaItem theme={theme} label="started" value={run.createdLabel} />
       <MetaItem theme={theme} label="duration" value={run.durationLabel} />
+      {run.usageLabel === null ? null : (
+        <MetaItem theme={theme} label="usage" value={run.usageLabel} />
+      )}
       <MetaItem theme={theme} label="cwd" value={run.cwd} />
       {run.worktree === undefined ? null : (
         <MetaItem theme={theme} label="worktree" value={run.worktree} />

@@ -41,10 +41,12 @@ import {
 } from "./rpc-client";
 import {
   formatClock,
+  formatCostUsd,
   formatDateTime,
   formatDuration,
   formatRelative,
   formatScalar,
+  formatTokens,
   formatUsage,
   pluralized,
   shortId,
@@ -851,6 +853,8 @@ export interface StepView {
   readonly startedAt?: number;
   readonly endedAt?: number;
   readonly durationLabel: string;
+  /** Compact accounting of the step's attempts: `$0.42`, else `120 in · 3k out`; null if none. */
+  readonly usageLabel: string | null;
   readonly errorCode?: string;
   readonly outcome?: string;
   readonly attempts: readonly StepAttemptView[];
@@ -940,6 +944,10 @@ export interface RunView {
   readonly completedCount: number;
   readonly skippedCount: number;
   readonly failedCount: number;
+  /** Workflow accounting of every agent step (`$0.67 · 240 in · 6k out`); null when none. */
+  readonly usageLabel: string | null;
+  /** Compact cost/token total for a list row (`$0.67`, else `240 in · 6k out`). */
+  readonly costLabel: string | null;
   readonly progress: readonly StepProgressView[];
   readonly steps: readonly StepView[];
   readonly gates: readonly GateView[];
@@ -1248,6 +1256,25 @@ export function logText(entries: readonly StepLogEntry[]): string {
     .join("\n");
 }
 
+/**
+ * Compact accounting for a row: the reported cost when there is one, else the token counters (a
+ * provider that reports tokens but no price still shows something). `null` when nothing was
+ * reported, so a step without an agent (script, gate, delay) adds no noise.
+ */
+export function compactUsage(
+  usage: Readonly<Record<string, number>> | undefined,
+): string | null {
+  if (usage === undefined) return null;
+  const cost = usage["totalCostUsd"];
+  if (cost !== undefined) return formatCostUsd(cost);
+  const input = usage["inputTokens"];
+  const output = usage["outputTokens"];
+  const parts: string[] = [];
+  if (input !== undefined) parts.push(`${formatTokens(input)} in`);
+  if (output !== undefined) parts.push(`${formatTokens(output)} out`);
+  return parts.length === 0 ? null : parts.join(" · ");
+}
+
 /** Run-level lines: everything that is not tied to one step. */
 export function buildRunLog(history: readonly HistoryEvent[]): StepLogEntry[] {
   return toLogEntries(
@@ -1307,6 +1334,7 @@ function stepView(
       step.startedAt === undefined || end === undefined
         ? ""
         : formatDuration(end - step.startedAt),
+    usageLabel: compactUsage(step.usage),
     retryable: !runActive && step.status === "failed",
     ...(step.errorCode === undefined ? {} : { errorCode: step.errorCode }),
     ...(detail.outcome === undefined ? {} : { outcome: detail.outcome }),
@@ -1406,6 +1434,8 @@ export function runView(
   const detail = options.detail ?? asRunDetail(run);
   // The detail projection is fresher than the list entry and carries attempts/outputs/history.
   const steps = detail?.id === run.id ? detail.steps : run.steps;
+  // Usage follows the same rule: a detail fetch is newer than the list snapshot.
+  const effective = detail?.id === run.id ? detail : run;
   // Gates come from the gate documents, which the list projection always carries and which are
   // fresher than the mirrored record (a decision lands before the next settle).
   const gateSummaries = options.gates ?? run.gates;
@@ -1445,6 +1475,8 @@ export function runView(
     completedCount,
     skippedCount,
     failedCount,
+    usageLabel: formatUsage(effective.usage),
+    costLabel: compactUsage(effective.usage),
     progress: steps.map((step) => ({
       id: step.id,
       label: step.title === "" ? step.id : step.title,
