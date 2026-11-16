@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ArgosHost } from "../../src/durable/host.js";
 import type { AddScheduleInput, EditScheduleInput } from "../../src/durable/host.js";
+import type { StepExecutor } from "../../src/durable/context.js";
 import { isArgosError } from "../../src/errors.js";
 import { nextFireAfter, parseScheduleSpec } from "../../src/schedule/next.js";
 import { SCHEDULE_LIMIT } from "../../src/schedule/model.js";
@@ -84,6 +85,10 @@ function writePlaybook(repo: string, id: string, yaml: string): void {
 /** A clean checkout (the playbooks are committed) with one host on in-memory storage. */
 async function makeFixture(
   playbooks: Readonly<Record<string, string>> = { nightly: NIGHTLY },
+  options: {
+    /** Extra registered executors (FR1); `paseo` is always the host's `executor` option. */
+    readonly executors?: Partial<Record<"paseo" | "hc", StepExecutor>>;
+  } = {},
 ): Promise<Fixture> {
   const repo = makeTempRepo();
   repositories.push(repo);
@@ -99,6 +104,7 @@ async function makeFixture(
     home: home.home,
     clock,
     executor: new FakeExecutor(),
+    ...(options.executors === undefined ? {} : { executors: options.executors }),
   });
   const fixture: Fixture = { host, clock, storage, home, repo };
   fixtures.push(fixture);
@@ -616,10 +622,91 @@ describe("schedule timing (FR7.2–FR7.4)", () => {
   });
 });
 
+// ------------------------------------------------------------------ executor (FR10, FR12)
+
+describe("schedule executor (FR10, FR12)", () => {
+  const base = (fixture: Fixture) => ({
+    playbookId: "nightly",
+    cwd: fixture.repo.repo,
+    cron: "@daily",
+    tz: "UTC",
+  });
+
+  it("stores the pinned executor canonically and keeps an absent one absent", async () => {
+    const hc = new FakeExecutor();
+    const fixture = await makeFixture({ nightly: NIGHTLY }, { executors: { hc } });
+    const { host } = fixture;
+
+    const pinned = await host.addSchedule({ ...base(fixture), executor: "hc" });
+    expect(pinned.executor).toBe("hc");
+    expect((await host.getSchedule("nightly"))?.executor).toBe("hc");
+
+    // FR1: an alias normalizes on input, so storage never holds `herdr-core`.
+    const aliased = await host.addSchedule({
+      ...base(fixture),
+      id: "aliased",
+      executor: " Herdr-Core ",
+    });
+    expect(aliased.executor).toBe("hc");
+    expect((await host.getSchedule("aliased"))?.executor).toBe("hc");
+
+    // A schedule without the flag keeps the key out of the typed document entirely (byte identity).
+    const plain = await host.addSchedule({ ...base(fixture), id: "plain" });
+    expect(Object.hasOwn(plain, "executor")).toBe(false);
+    expect(Object.hasOwn(await host.getSchedule("plain") ?? {}, "executor")).toBe(false);
+
+    // The edit moves the pin, and an edit of another field keeps it.
+    const moved = await host.editSchedule("nightly", { executor: "paseo" });
+    expect(moved.executor).toBe("paseo");
+    const kept = await host.editSchedule("nightly", { keep: 7 });
+    expect(kept.executor).toBe("paseo");
+    expect(kept.keep).toBe(7);
+
+    // Pause and resume are document rewrites: the pin survives both.
+    await host.pauseSchedule("nightly");
+    expect((await host.resumeSchedule("nightly")).executor).toBe("paseo");
+  });
+
+  it("refuses an unknown executor with invalid_request and writes nothing", async () => {
+    const hc = new FakeExecutor();
+    const fixture = await makeFixture({ nightly: NIGHTLY }, { executors: { hc } });
+    const { host } = fixture;
+
+    const error = await errorOf(() => host.addSchedule({ ...base(fixture), executor: "typo" }));
+    expect(codeOf(error)).toBe("invalid_request");
+    expect(await host.listSchedules()).toEqual([]);
+    await assertNothingCreated(fixture);
+
+    // The same gate applies to an edit, and the stored document is untouched.
+    const added = await host.addSchedule(base(fixture));
+    expect(
+      codeOf(await errorOf(() => host.editSchedule(added.id, { executor: "typo" }))),
+    ).toBe("invalid_request");
+    expect(await host.getSchedule(added.id)).toEqual(added);
+  });
+
+  it("refuses an executor the server cannot run, at add and at edit (FR12)", async () => {
+    // A host with no `hc` adapter: `argos schedule add|edit` must answer what a fire would answer
+    // now, not at 3am, and the refusal must create no schedule (the dry check writes nothing).
+    const fixture = await makeFixture();
+    const { host } = fixture;
+
+    const addError = await errorOf(() => host.addSchedule({ ...base(fixture), executor: "hc" }));
+    expect(codeOf(addError)).toBe("executor_unavailable");
+    expect((addError as Error).message).toContain("paseo");
+    expect(await host.listSchedules()).toEqual([]);
+    await assertNothingCreated(fixture);
+
+    const added = await host.addSchedule(base(fixture));
+    const editError = await errorOf(() => host.editSchedule(added.id, { executor: "hc" }));
+    expect(codeOf(editError)).toBe("executor_unavailable");
+    expect(await host.getSchedule(added.id)).toEqual(added);
+  });
+});
+
 // ------------------------------------------------------------------ persistence
 
-describe("schedule persistence (FR1.1)", () => {
-  it("keeps the documents and the index across a host reopen", async () => {
+describe("schedule persistence (FR1.1)", () => {  it("keeps the documents and the index across a host reopen", async () => {
     // MemoryStorage cannot be reopened, so this one case uses the real `$ARGOS_HOME` SQLite file.
     const home = makeTempHome();
     const repo = makeTempRepo();

@@ -16,6 +16,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
 import { ArgosError } from "../errors.js";
+import type { ExecutorId } from "../executor/model.js";
 import { loadPlaybook } from "../playbook/index.js";
 import type { InputDefIR, PlaybookIR, Scalar } from "../playbook/ir.js";
 
@@ -24,6 +25,12 @@ export interface RunRequest {
   readonly playbookId: string;
   readonly cwd: string;
   readonly inputs?: Readonly<Record<string, Scalar>>;
+  /**
+   * FR2/FR10: the substrate the caller pinned — a schedule's stored `executor` (already canonical:
+   * add/edit normalized it) or a request override. Omitted means "the playbook's own, then the
+   * server default", which the host applies last.
+   */
+  readonly executor?: ExecutorId;
   /** `$ARGOS_HOME` for global playbooks (`<home>/playbooks`); omit for repo-only discovery. */
   readonly home?: string;
 }
@@ -33,6 +40,12 @@ export interface ResolvedRunRequest {
   readonly ir: PlaybookIR;
   readonly inputs: Record<string, Scalar>;
   readonly cwd: string;
+  /**
+   * FR2: `request.executor ?? ir.executor` — the schedule document wins over the playbook, and the
+   * server default is applied by the host when both are absent. A fire and its dry check resolve
+   * through this one function, so `argos schedule add|edit` can never disagree with the fire.
+   */
+  readonly executor?: ExecutorId;
 }
 
 /**
@@ -53,7 +66,15 @@ export function resolveRunRequest(request: RunRequest): ResolvedRunRequest {
     request.playbookId,
     request.home === undefined ? {} : { home: request.home },
   );
-  return { ir, inputs: prepareInputs(ir, request.inputs ?? {}), cwd };
+  // FR2: the schedule document outranks the playbook's own default; the server default is applied
+  // last, by the host, so an absent value here means "let the host decide".
+  const executor = request.executor ?? ir.executor;
+  return {
+    ir,
+    inputs: prepareInputs(ir, request.inputs ?? {}),
+    cwd,
+    ...(executor === undefined ? {} : { executor }),
+  };
 }
 
 /** Coerce one provided value to the playbook input's declared type. */

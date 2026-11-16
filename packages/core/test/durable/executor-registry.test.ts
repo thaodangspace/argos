@@ -449,4 +449,60 @@ describe("executor registry (FR2, FR6, FR7)", () => {
       await host.close();
     }
   });
+
+  it("keeps the record's executor on a retry and launches on it (FR15)", async () => {
+    const clock = new FakeClock();
+    const paseo = new RecordingExecutor(new FakeExecutor());
+    const hc = new RecordingExecutor(new FakeExecutor());
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock,
+      executor: paseo,
+      executors: { hc },
+    });
+    try {
+      const runId = "run-retry-hc";
+      await host.startRun({
+        ir: chainPlaybook(),
+        inputs: {},
+        cwd: "/tmp/argos-retry-hc",
+        id: runId,
+        executor: "hc",
+      });
+      await drive(clock, () => hc.fake.agentsForStep("a").length === 1);
+      await drive(
+        clock,
+        async () => {
+          hc.fake.completeAll();
+          return (await host.getRun(runId))?.record.status === "completed";
+        },
+        { stepMs: 3_000, maxRounds: 30 },
+      );
+      expect((await host.getRun(runId))?.record.executor).toBe("hc");
+      expect(hc.calls.launches).toBe(2);
+
+      // FR15: a retry is the same run on the same frozen record — same `runId`, same substrate.
+      const retried = await host.retryStep(runId, "b");
+      expect(retried.runId).toBe(runId);
+      expect((await host.getRun(runId))?.record.executor).toBe("hc");
+
+      await drive(clock, () => hc.fake.agentsForStep("b").length === 2);
+      await drive(
+        clock,
+        async () => {
+          hc.fake.completeAll();
+          return (await host.getRun(runId))?.record.status === "completed";
+        },
+        { stepMs: 3_000, maxRounds: 30 },
+      );
+
+      // The re-run step launched on hc; the default substrate was never asked.
+      expect(hc.fake.agentsForStep("b")).toHaveLength(2);
+      expect(paseo.calls.launches).toBe(0);
+      expect(paseo.fake.agents.size).toBe(0);
+      expect((await host.getRun(runId))?.record.executor).toBe("hc");
+    } finally {
+      await host.close();
+    }
+  });
 });

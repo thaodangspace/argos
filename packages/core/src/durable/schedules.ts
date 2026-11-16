@@ -55,6 +55,7 @@ import type { Harness, Tx } from "@earendil-works/pi-durable";
 
 import { isTerminalRunStatus, type RunRecord } from "../engine/index.js";
 import { ArgosError, isArgosError } from "../errors.js";
+import { normalizeExecutorId, type ExecutorId } from "../executor/model.js";
 import type { GitRunner } from "../git/exec.js";
 import type { Scalar } from "../playbook/ir.js";
 import {
@@ -211,6 +212,8 @@ interface ScheduleValues {
   readonly cwd: string;
   readonly inputs: Readonly<Record<string, Scalar>>;
   readonly isolation?: "none" | "worktree";
+  /** FR10: canonical, already normalized by `add`/`edit`; absent means "resolve at each fire". */
+  readonly executor?: ExecutorId;
   readonly cron: string;
   readonly tz: string;
   readonly overlap: Overlap;
@@ -325,6 +328,9 @@ export class ScheduleRunner {
       cwd: input.cwd,
       inputs: input.inputs ?? {},
       ...(input.isolation === undefined ? {} : { isolation: input.isolation }),
+      // FR10: stored canonical, so an alias such as `herdr-core` never reaches a document and an
+      // unknown id is `invalid_request` here rather than at 3am (the same gate `--isolation` uses).
+      ...(input.executor === undefined ? {} : { executor: normalizeExecutorId(input.executor) }),
       cron: input.cron,
       tz: input.tz ?? serverZone(),
       overlap: input.overlap ?? "skip",
@@ -341,6 +347,7 @@ export class ScheduleRunner {
       cwd: values.cwd,
       inputs: values.inputs,
       ...(values.isolation === undefined ? {} : { isolation: values.isolation }),
+      ...(values.executor === undefined ? {} : { executor: values.executor }),
       cron: timing.cron,
       tz: timing.tz,
       overlap: values.overlap,
@@ -381,17 +388,21 @@ export class ScheduleRunner {
     if (!hasEditableField(input)) {
       throw new ArgosError(
         "invalid_request",
-        `schedule ${id}: an edit needs at least one of cwd, inputs, isolation, cron, tz, overlap, catchUp, keep`,
+        `schedule ${id}: an edit needs at least one of cwd, inputs, isolation, executor, cron, tz, overlap, catchUp, keep`,
       );
     }
     const now = this.#clock.now();
     const current = await this.#require(id);
     const isolation = input.isolation ?? current.isolation;
+    // FR10: the schedule document outranks the playbook's own default; an edit may move the pin.
+    const executor =
+      input.executor === undefined ? current.executor : normalizeExecutorId(input.executor);
     const values: ScheduleValues = {
       playbookId: current.playbookId,
       cwd: input.cwd ?? current.cwd,
       inputs: input.inputs ?? current.inputs,
       ...(isolation === undefined ? {} : { isolation }),
+      ...(executor === undefined ? {} : { executor }),
       cron: input.cron ?? current.cron,
       tz: input.tz ?? current.tz,
       overlap: input.overlap ?? current.overlap,
@@ -411,6 +422,7 @@ export class ScheduleRunner {
         cwd: values.cwd,
         inputs: values.inputs,
         ...(values.isolation === undefined ? {} : { isolation: values.isolation }),
+        ...(values.executor === undefined ? {} : { executor: values.executor }),
         cron: timing.cron,
         tz: timing.tz,
         overlap: values.overlap,
@@ -568,6 +580,7 @@ export class ScheduleRunner {
         playbookId: doc.playbookId,
         cwd: doc.cwd,
         inputs: doc.inputs,
+        ...(doc.executor === undefined ? {} : { executor: doc.executor }),
         ...(this.#home === undefined ? {} : { home: this.#home }),
       });
       const outcome = await this.#port.prepare({
@@ -575,6 +588,7 @@ export class ScheduleRunner {
         inputs: resolved.inputs,
         cwd: resolved.cwd,
         id: runId,
+        ...(resolved.executor === undefined ? {} : { executor: resolved.executor }),
         ...(doc.isolation === undefined ? {} : { isolation: { mode: doc.isolation } }),
         trigger: { kind: "schedule", scheduleId: doc.id, fireAt, reason },
         ...(options.clientRequestId === undefined
@@ -946,6 +960,7 @@ export class ScheduleRunner {
       playbookId: doc.playbookId,
       cwd: doc.cwd,
       inputs: doc.inputs,
+      ...(doc.executor === undefined ? {} : { executor: doc.executor }),
       ...(this.#home === undefined ? {} : { home: this.#home }),
     });
     const outcome = await this.#port.prepare({
@@ -953,6 +968,7 @@ export class ScheduleRunner {
       inputs: resolved.inputs,
       cwd: resolved.cwd,
       id: runId,
+      ...(resolved.executor === undefined ? {} : { executor: resolved.executor }),
       ...(doc.isolation === undefined ? {} : { isolation: { mode: doc.isolation } }),
       trigger: { kind: "schedule", scheduleId: doc.id, fireAt, reason },
     });
@@ -1275,16 +1291,20 @@ export class ScheduleRunner {
     }
     // FR2.4/FR4.1: the dry check is the resolve + prepare half of `POST /runs`, so every refusal code
     // an operator would see when starting the run by hand is the code they see at add and edit.
+    // FR12: the executor rides along, so an id the server cannot run is refused here — with the
+    // schedule document outranking the playbook, exactly as the fire will resolve it (FR2).
     const resolved = resolveRunRequest({
       playbookId: values.playbookId,
       cwd: values.cwd,
       inputs: values.inputs,
+      ...(values.executor === undefined ? {} : { executor: values.executor }),
       ...(this.#home === undefined ? {} : { home: this.#home }),
     });
     await this.#port.dryCheck({
       ir: resolved.ir,
       inputs: resolved.inputs,
       cwd: resolved.cwd,
+      ...(resolved.executor === undefined ? {} : { executor: resolved.executor }),
       ...(values.isolation === undefined ? {} : { isolation: { mode: values.isolation } }),
     });
     return { cron: spec.cron, tz: spec.tz, nextFireAt: next };

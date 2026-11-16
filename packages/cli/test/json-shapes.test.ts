@@ -543,6 +543,55 @@ describe("argos schedule (FR10.2)", () => {
     });
   });
 
+  it("sends --executor as the canonical id on add and edit, and refuses an unknown one (FR10)", async () => {
+    // An alias is normalized by the CLI, so only `paseo`/`hc` ever reaches the server.
+    const added = await invoke([
+      "schedule",
+      "add",
+      "gated",
+      "--cron",
+      "* * * * *",
+      "--executor",
+      "herdr-core",
+      "--json",
+    ]);
+    expect(added.code).toBe(0);
+    expect(lastRequest("POST", "/schedules")?.body).toMatchObject({ executor: "hc" });
+
+    const edited = await invoke([
+      "schedule",
+      "edit",
+      SCHEDULE_ID,
+      "--executor",
+      "paseo",
+      "--json",
+    ]);
+    expect(edited.code).toBe(0);
+    expect(lastRequest("POST", `/schedules/${SCHEDULE_ID}`)?.body).toEqual({ executor: "paseo" });
+
+    // The default path is byte-identical to before this field existed.
+    const plain = await invoke(["schedule", "add", "gated", "--cron", "* * * * *", "--json"]);
+    expect(plain.code).toBe(0);
+    expect(current().stub.requests.at(-1)?.body).not.toHaveProperty("executor");
+
+    const before = current().stub.requests.length;
+    const unknown = await invoke([
+      "schedule",
+      "add",
+      "gated",
+      "--cron",
+      "* * * * *",
+      "--executor",
+      "nope",
+      "--json",
+    ]);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain("--executor");
+    expect(unknown.stderr).toContain("paseo, hc");
+    expect(unknown.stdout).toBe("");
+    expect(current().stub.requests.length).toBe(before);
+  });
+
   it("argos schedule ls --json", async () => {
     const result = await invoke(["schedule", "ls", "--json"]);
     expect(result.code).toBe(0);

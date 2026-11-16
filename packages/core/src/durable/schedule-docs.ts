@@ -22,6 +22,7 @@ import { defineDoc, defineDocFamily, type Tx } from "@earendil-works/pi-durable"
 import { z } from "zod";
 
 import { ArgosError } from "../errors.js";
+import { ExecutorIdSchema, type ExecutorId } from "../executor/model.js";
 import type { Scalar } from "../playbook/ir.js";
 import {
   CatchUpSchema,
@@ -72,6 +73,12 @@ export interface ScheduleDoc {
   readonly cwd: string;
   readonly inputs: Readonly<Record<string, Scalar>>;
   readonly isolation?: "none" | "worktree";
+  /**
+   * FR10: the substrate this schedule pins, canonical and normalized at add/edit. Absent means
+   * "decide at each fire" (playbook default, then the server default), so a later default change
+   * moves it — pinning the flag is what keeps an unattended run on one substrate.
+   */
+  readonly executor?: ExecutorId;
   readonly cron: string;
   readonly tz: string;
   readonly overlap: "skip" | "allow";
@@ -111,6 +118,8 @@ export const ScheduleDocSchema = z.strictObject({
   cwd: z.string(),
   inputs: z.record(z.string(), ScalarValueSchema),
   isolation: ScheduleIsolationSchema.optional(),
+  /** FR10: canonical only — a hand-edited row with an unknown id is refused, never fired. */
+  executor: ExecutorIdSchema.optional(),
   cron: z.string(),
   tz: z.string(),
   overlap: OverlapSchema,
@@ -155,6 +164,7 @@ export type ScheduleDocValue = {
   cwd: string;
   inputs: Record<string, JsonValue>;
   isolation: string | null;
+  executor: string | null;
   cron: string;
   tz: string;
   overlap: string;
@@ -197,6 +207,10 @@ const ScheduleDocValueSchema = z.strictObject({
   cwd: z.string(),
   inputs: z.record(z.string(), ScalarValueSchema),
   isolation: ScheduleIsolationSchema.nullable(),
+  // A row written before this key existed simply has no `executor`: absence means "unpinned", so
+  // the missing key hydrates as `null` instead of refusing a schedule the operator already has.
+  // A present but non-canonical value is still refused (an alias or a typo is a corrupt row).
+  executor: ExecutorIdSchema.nullable().default(null),
   cron: z.string(),
   tz: z.string(),
   overlap: OverlapSchema,
@@ -232,6 +246,7 @@ export const ScheduleDocFamily = defineDocFamily<ScheduleDocValue, ScheduleDocVa
     cwd: seed.cwd,
     inputs: seed.inputs,
     isolation: seed.isolation,
+    executor: seed.executor,
     cron: seed.cron,
     tz: seed.tz,
     overlap: seed.overlap,
@@ -275,6 +290,7 @@ export function scheduleDocSeed(id: string): ScheduleDocValue {
     cwd: "",
     inputs: {},
     isolation: null,
+    executor: null,
     cron: "",
     tz: "",
     overlap: "skip",
@@ -298,6 +314,7 @@ export function scheduleDocSeed(id: string): ScheduleDocValue {
 /** Storage value → typed shape (drops the `null` placeholders). */
 export function toScheduleDoc(value: Readonly<ScheduleDocValue>): ScheduleDoc {
   const isolation = value.isolation;
+  const executor = value.executor;
   const lastFire = value.lastFire;
   const liveRunId = value.liveRunId;
   return {
@@ -308,6 +325,7 @@ export function toScheduleDoc(value: Readonly<ScheduleDocValue>): ScheduleDoc {
     // Copies, so a caller can never mutate the snapshot its document came from.
     inputs: { ...value.inputs } as Readonly<Record<string, Scalar>>,
     ...(isolation === null ? {} : { isolation: isolation as "none" | "worktree" }),
+    ...(executor === null ? {} : { executor: executor as ExecutorId }),
     cron: value.cron,
     tz: value.tz,
     overlap: value.overlap as "skip" | "allow",
@@ -337,6 +355,7 @@ export function toScheduleDocValue(doc: Readonly<ScheduleDoc>): ScheduleDocValue
     cwd: doc.cwd,
     inputs,
     isolation: doc.isolation ?? null,
+    executor: doc.executor ?? null,
     cron: doc.cron,
     tz: doc.tz,
     overlap: doc.overlap,
@@ -482,6 +501,7 @@ export async function writeScheduleDoc(tx: Tx, doc: ScheduleDoc): Promise<void> 
   draft.cwd = value.cwd;
   draft.inputs = value.inputs;
   draft.isolation = value.isolation;
+  draft.executor = value.executor;
   draft.cron = value.cron;
   draft.tz = value.tz;
   draft.overlap = value.overlap;

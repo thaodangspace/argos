@@ -144,6 +144,7 @@ function makeExecutor(): FakeExecutor {
 async function openHost(options: {
   readonly clock: FakeClock;
   readonly executor?: FakeExecutor;
+  readonly executors?: Partial<Record<"paseo" | "hc", FakeExecutor>>;
   readonly home?: string;
   readonly modelCatalog?: TargetCatalog;
 }): Promise<ArgosHost> {
@@ -151,6 +152,7 @@ async function openHost(options: {
     storage: new MemoryStorage(),
     clock: options.clock,
     executor: options.executor ?? makeExecutor(),
+    ...(options.executors === undefined ? {} : { executors: options.executors }),
     ...(options.home === undefined ? {} : { home: options.home }),
     ...(options.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
   });
@@ -548,6 +550,112 @@ describe("forkRun: scripts (S-FR8)", () => {
     expect(codeOf(error)).toBe("playbook_invalid");
     expect(messageOf(error)).toContain("b");
     expect((await host.listRuns()).map((doc) => doc.record.id)).toEqual(["run-parent"]);
+  });
+});
+
+describe("forkRun: the executor (FR13)", () => {
+  /** The `a → b → c` book with a playbook-level `executor:` (the loader normalizes it). */
+  function bookOn(executor: string, options: { readonly bPrompt?: string } = {}): string {
+    return book(options).replace("title: Fork fixture", `title: Fork fixture\nexecutor: ${executor}`);
+  }
+
+  it("inherits the parent's executor, so the fork keeps running on it", async () => {
+    const repo = makeRepo({ fork: bookOn("hc") });
+    const clock = new FakeClock();
+    const paseo = makeExecutor();
+    const hc = makeExecutor();
+    const host = await openHost({ clock, executor: paseo, executors: { hc } });
+
+    const started = await host.startRun({
+      ir: loadPlaybook(repo, "fork"),
+      inputs: { topic: "v1" },
+      cwd: repo,
+      id: "run-parent",
+    });
+    const parent = await driveToTerminal(host, clock, started.runId);
+    expect(parent.executor).toBe("hc");
+    expect(paseo.agents.size).toBe(0);
+
+    writeBook(repo, "fork", bookOn("hc", { bPrompt: "Review the plan for regressions." }));
+    const forked = await host.forkRun(started.runId, "b", { id: "run-fork" });
+    const record = (await host.getRun(forked.runId))?.record;
+    expect(record?.executor).toBe("hc");
+
+    await driveToTerminal(host, clock, forked.runId);
+    // The fork re-ran `b` and `c` on hc, and never touched the default substrate.
+    expect(hc.agentsForStep("b")).toHaveLength(2);
+    expect(hc.agentsForStep("c")).toHaveLength(2);
+    expect(paseo.agents.size).toBe(0);
+  });
+
+  it("refuses a definition that changed executor with definition_conflict (FR13)", async () => {
+    const repo = makeRepo({ fork: bookOn("hc") });
+    const clock = new FakeClock();
+    const paseo = makeExecutor();
+    const hc = makeExecutor();
+    const host = await openHost({ clock, executor: paseo, executors: { hc } });
+
+    const started = await host.startRun({
+      ir: loadPlaybook(repo, "fork"),
+      inputs: { topic: "v1" },
+      cwd: repo,
+      id: "run-parent",
+    });
+    await driveToTerminal(host, clock, started.runId);
+
+    // The operator moved the playbook to the other substrate: the settled prefix ran on `hc`, so
+    // the fork cannot silently continue on `paseo`.
+    writeBook(repo, "fork", bookOn("paseo"));
+    const error = await errorOf(host.forkRun(started.runId, "b", { id: "run-fork" }));
+    expect(codeOf(error)).toBe("definition_conflict");
+    const issues = isArgosError(error) ? (error.issues ?? []) : [];
+    expect(issues.map((issue) => issue.path)).toContain("executor");
+    // Nothing was created by the refusal.
+    expect((await host.listRuns()).map((doc) => doc.record.id)).toEqual(["run-parent"]);
+  });
+
+  it("refuses the fork when this server no longer registers the parent's executor (FR6)", async () => {
+    const repo = makeRepo({ fork: bookOn("hc") });
+    const clock = new FakeClock();
+    const paseo = makeExecutor();
+    const hc = makeExecutor();
+    const { home, cleanup } = makeTempHome();
+
+    const first = await ArgosHost.open({
+      home,
+      clock,
+      executor: paseo,
+      executors: { hc },
+    });
+    try {
+      const started = await first.startRun({
+        ir: loadPlaybook(repo, "fork"),
+        inputs: { topic: "v1" },
+        cwd: repo,
+        id: "run-parent",
+      });
+      await driveToTerminal(first, clock, started.runId);
+    } finally {
+      await first.close();
+    }
+
+    // The operator restarts `argos serve` without the `hc` adapter: the fork must refuse rather
+    // than fall back to the default substrate (FR6).
+    const second = await ArgosHost.open({
+      home,
+      clock: new FakeClock(clock.now()),
+      executor: paseo,
+    });
+    try {
+      const error = await errorOf(second.forkRun("run-parent", "b", { id: "run-fork" }));
+      expect(codeOf(error)).toBe("executor_unavailable");
+      expect((error as Error).message).toContain("paseo");
+      // Nothing was created by the refusal.
+      expect((await second.listRuns()).map((doc) => doc.record.id)).toEqual(["run-parent"]);
+    } finally {
+      await second.close();
+      cleanup();
+    }
   });
 });
 

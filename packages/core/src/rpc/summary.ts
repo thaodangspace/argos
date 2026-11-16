@@ -269,6 +269,12 @@ export function toScheduleSummary(doc: ScheduleDoc): ScheduleSummary {
     cwd: doc.cwd,
     inputs: publicInputs(doc.inputs),
     ...(doc.isolation === undefined ? {} : { isolation: doc.isolation }),
+    // FR10: only a non-default pin is named, the same rule a run summary applies — a schedule
+    // without the key (and one that pinned `paseo`) keeps the existing golden JSON unchanged. The
+    // document still stores an explicit `paseo` pin, so the flag keeps its meaning at every fire.
+    ...(doc.executor === undefined || doc.executor === DEFAULT_EXECUTOR_ID
+      ? {}
+      : { executor: doc.executor }),
     cron: doc.cron,
     tz: doc.tz,
     overlap: doc.overlap,

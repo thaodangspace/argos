@@ -70,10 +70,15 @@ function makeRepo(): string {
   return directory.home;
 }
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(options: { readonly hc?: FakeExecutor } = {}): Promise<Harness> {
   const home = makeTempHome();
   const executor = new FakeExecutor();
-  const host = await ArgosHost.open({ storage: new MemoryStorage(), home: home.home, executor });
+  const host = await ArgosHost.open({
+    storage: new MemoryStorage(),
+    home: home.home,
+    executor,
+    ...(options.hc === undefined ? {} : { executors: { hc: options.hc } }),
+  });
   const server = await createRpcServer({ host, home: home.home, port: 0, token: TOKEN });
   const harness: Harness = { host, server, base: server.url, home, executor, repo: makeRepo() };
   openHarnesses.push(harness);
@@ -525,6 +530,76 @@ describe("RpcClient schedule methods (FR10.1)", () => {
     // The run list still works: `/runs` behavior is untouched by the schedule block.
     const runs = await client.listRuns();
     expect(runs.runs.map((run) => run.id)).toEqual([started.runId]);
+  });
+});
+
+describe("schedule executor (FR10, FR12)", () => {
+  it("stores the pin canonically, publishes it, and keeps it out of a paseo schedule", async () => {
+    const harness = await startHarness({ hc: new FakeExecutor() });
+
+    // FR1: an alias is normalized by the host, so storage and the wire hold `hc` only.
+    const pinned = await createSchedule(harness, { id: "pinned", executor: "herdr-core" });
+    expect(pinned.executor).toBe("hc");
+    expect((await harness.host.getSchedule("pinned"))?.executor).toBe("hc");
+
+    // `argos schedule show` reads the same detail: the pin comes back canonical.
+    const shown = await call(harness.base, "GET", "/schedules/pinned");
+    expect(shown.status).toBe(200);
+    expect(ScheduleDetailSchema.parse(shown.body).executor).toBe("hc");
+
+    const listed = ScheduleListResponseSchema.parse(
+      (await call(harness.base, "GET", "/schedules")).body,
+    );
+    expect(listed.schedules.find((schedule) => schedule.id === "pinned")?.executor).toBe("hc");
+
+    // A schedule without the flag omits the key: the existing golden JSON is unchanged.
+    const plain = await createSchedule(harness, { id: "plain" });
+    expect(plain).not.toHaveProperty("executor");
+    const plainDetail = await call(harness.base, "GET", "/schedules/plain");
+    expect(plainDetail.text).not.toContain('"executor"');
+
+    // The edit moves the pin; a `paseo` pin is honoured at fire time but not published (FR8 rule).
+    const moved = await call(harness.base, "POST", "/schedules/pinned", {
+      body: { executor: "paseo" },
+    });
+    expect(moved.status).toBe(200);
+    const movedDetail = ScheduleDetailSchema.parse(moved.body);
+    expect(movedDetail).not.toHaveProperty("executor");
+    expect((await harness.host.getSchedule("pinned"))?.executor).toBe("paseo");
+    expect(movedDetail.generation).toBe(1);
+  });
+
+  it("refuses an unknown pin with 400 and an unregistered one with 422, creating nothing", async () => {
+    const harness = await startHarness({ hc: new FakeExecutor() });
+
+    const unknown = await call(harness.base, "POST", "/schedules", {
+      body: createBody(harness.repo, { executor: "typo" }),
+    });
+    expect(unknown.status).toBe(400);
+    expect(errorCode(unknown.body)).toBe("invalid_request");
+
+    // A schedule whose stored pin cannot run is refused at add time (FR12), not at the first fire.
+    const bare = await startHarness();
+    const unregistered = await call(bare.base, "POST", "/schedules", {
+      body: createBody(bare.repo, { executor: "hc" }),
+    });
+    expect(unregistered.status).toBe(422);
+    expect(errorCode(unregistered.body)).toBe("executor_unavailable");
+    expect(await bare.host.listSchedules()).toEqual([]);
+  });
+
+  it("accepts the field in both request schemas", () => {
+    expect(
+      ScheduleCreateRequestSchema.safeParse({
+        playbook: "p",
+        cwd: "/tmp",
+        cron: "0 * * * *",
+        executor: "hc",
+      }).success,
+    ).toBe(true);
+    expect(ScheduleEditRequestSchema.safeParse({ executor: "hc" }).success).toBe(true);
+    expect(ScheduleEditRequestSchema.safeParse({ executor: "" }).success).toBe(false);
+    expect(ScheduleSummarySchema.safeParse({}).success).toBe(false);
   });
 });
 

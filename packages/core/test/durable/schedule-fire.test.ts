@@ -173,6 +173,9 @@ async function makeWorld(
     readonly modelCatalog?: TargetCatalog;
     readonly rpc?: boolean;
     readonly sqlite?: boolean;
+    /** Register an `hc` executor (FR10/FR11); `paseo` stays the host's `executor` option. */
+    readonly hc?: FakeExecutor;
+    readonly defaultExecutor?: "paseo" | "hc";
   } = {},
 ): Promise<World> {
   const repo = makeRepo(options.playbooks ?? { nightly: LIVE });
@@ -186,6 +189,10 @@ async function makeWorld(
     home: home.home,
     executor,
     clock,
+    ...(options.hc === undefined ? {} : { executors: { hc: options.hc } }),
+    ...(options.defaultExecutor === undefined
+      ? {}
+      : { defaultExecutor: options.defaultExecutor }),
     ...(options.git === undefined ? {} : { git: options.git }),
     ...(options.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
   });
@@ -264,6 +271,7 @@ async function addSchedule(
     readonly inputs?: Readonly<Record<string, Scalar>>;
     readonly overlap?: "skip" | "allow";
     readonly isolation?: "none" | "worktree";
+    readonly executor?: string;
     readonly enabled?: boolean;
   } = {},
 ): Promise<ScheduleDoc> {
@@ -276,6 +284,7 @@ async function addSchedule(
     tz: "UTC",
     ...(input.overlap === undefined ? {} : { overlap: input.overlap }),
     ...(input.isolation === undefined ? {} : { isolation: input.isolation }),
+    ...(input.executor === undefined ? {} : { executor: input.executor }),
     ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
   });
 }
@@ -655,6 +664,118 @@ describe("a fire reloads the playbook (FR4.2)", () => {
 
     // The first run is unaffected evidence: it keeps the definition it started with.
     expect((await world.host.getRun(firstRunId))?.record.ir.steps[0]?.prompt).toBe("Fire one.");
+  });
+});
+
+// ------------------------------------------------------------------ a fire's executor (FR10, FR11)
+
+describe("a fire's executor (FR10, FR11)", () => {
+  it("freezes the schedule's executor into the fired run and launches on it", async () => {
+    const hc = new FakeExecutor();
+    const world = await makeWorld({ hc });
+    const added = await addSchedule(world, { id: "nightly-hc", executor: "hc" });
+    await world.host.scheduleIdle();
+    expect(added.executor).toBe("hc");
+    // A status read is what the operator and the RPC layer see.
+    expect((await schedule(world, "nightly-hc")).executor).toBe("hc");
+
+    await world.clock.advance(MINUTE);
+    await world.host.scheduleIdle();
+
+    const doc = await schedule(world, "nightly-hc");
+    expect(doc.lastFire).toMatchObject({ fireAt: at(7), reason: "cron", status: "started" });
+    const runId = String(doc.lastFire?.runId);
+
+    // The one commit wrote the run: the record names the substrate, so a resume/retry cannot move it.
+    const record = (await world.host.getRun(runId))?.record;
+    expect(record?.executor).toBe("hc");
+    expect(record?.trigger).toEqual({
+      kind: "schedule",
+      scheduleId: "nightly-hc",
+      fireAt: at(7),
+      reason: "cron",
+    });
+    expect((await world.host.listRuns()).map((entry) => entry.record.id)).toEqual([runId]);
+
+    // The step child went to the pinned executor, never to the server default (`paseo`).
+    expect(hc.creationsByStep()).toEqual({ a: 1 });
+    expect(world.executor.agents.size).toBe(0);
+  });
+
+  it("lets the schedule's pin outrank the playbook, and the playbook outrank the default (FR2)", async () => {
+    // One playbook that names `hc`, two schedules: the pinned one must win with `paseo`, and the
+    // unpinned one must follow the playbook rather than the server default (`paseo`).
+    const hc = new FakeExecutor();
+    const world = await makeWorld({
+      hc,
+      playbooks: {
+        pinned: `title: Pinned\nexecutor: hc\nsteps:\n  - id: a\n    prompt: Work.\n`,
+      },
+      defaultExecutor: "paseo",
+    });
+    await addSchedule(world, { id: "pin-paseo", playbookId: "pinned", executor: "paseo" });
+    await addSchedule(world, { id: "pin-playbook", playbookId: "pinned" });
+    await world.host.scheduleIdle();
+
+    await world.clock.advance(MINUTE);
+    await world.host.scheduleIdle();
+
+    const pinnedPaseo = await schedule(world, "pin-paseo");
+    const pinnedPlaybook = await schedule(world, "pin-playbook");
+    expect(pinnedPaseo.lastFire?.status).toBe("started");
+    expect(pinnedPlaybook.lastFire?.status).toBe("started");
+
+    // `paseo` is the default substrate, so the record omits the key (FR5).
+    const paseoRun = (await world.host.getRun(String(pinnedPaseo.lastFire?.runId)))?.record;
+    const hcRun = (await world.host.getRun(String(pinnedPlaybook.lastFire?.runId)))?.record;
+    expect(paseoRun?.executor).toBeUndefined();
+    expect(hcRun?.executor).toBe("hc");
+
+    // One launch on each substrate: neither fire borrowed the other's executor.
+    expect(world.executor.creationsByStep()).toEqual({ a: 1 });
+    expect(hc.creationsByStep()).toEqual({ a: 1 });
+  });
+
+  it("refuses the fire — and starts no run — when this server does not register the pin (FR11)", async () => {
+    const hc = new FakeExecutor();
+    const world = await makeWorld({ sqlite: true, hc });
+    await addSchedule(world, { id: "nightly-hc", executor: "hc" });
+    await world.host.scheduleIdle();
+    const stored = await schedule(world, "nightly-hc");
+    expect(stored.executor).toBe("hc");
+    expect(await world.host.listRuns()).toEqual([]);
+
+    // The operator restarts `argos serve` without the `hc` adapter. The document still says `hc`:
+    // the fire must be refused rather than silently fall back to the default (FR6).
+    await world.host.close();
+    world.host = await ArgosHost.open({
+      home: world.home.home,
+      clock: world.clock,
+      executor: new FakeExecutor(),
+    });
+    hosts.push(world.host);
+    await world.host.scheduleIdle();
+
+    await world.clock.advance(MINUTE);
+    await world.host.scheduleIdle();
+
+    const doc = await schedule(world, "nightly-hc");
+    expect(doc.lastFire).toMatchObject({
+      fireAt: at(7),
+      reason: "cron",
+      status: "refused",
+      errorCode: "executor_unavailable",
+    });
+    // The log holds the outcome, the streak grew, and the schedule moved on instead of retrying.
+    expect(doc.fires[0]).toEqual(doc.lastFire);
+    expect(doc.fires).toHaveLength(1);
+    expect(doc.consecutiveFailures).toBe(1);
+    expect(doc.nextFireAt).toBe(at(8));
+    expect(doc.enabled).toBe(true);
+    // Nothing was created: no run, no task, no worktree.
+    expect(await world.host.listRuns()).toEqual([]);
+    expect((await world.host.inspect()).tasks).toHaveLength(0);
+    expect(hc.creationsByStep()).toEqual({});
   });
 });
 

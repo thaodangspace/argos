@@ -520,6 +520,8 @@ export const ScheduleSummarySchema = z.strictObject({
   /** Schedule inputs with secret-looking names removed (SECRET_INPUT_NAME_PATTERN). */
   inputs: z.record(z.string(), ScalarSchema),
   isolation: ScheduleIsolationModeSchema.optional(),
+  /** FR10: present only for a non-default pinned substrate (a paseo/absent schedule omits it). */
+  executor: ExecutorIdSchema.optional(),
   cron: z.string().min(1),
   tz: z.string().min(1),
   overlap: OverlapSchema,
@@ -561,6 +563,12 @@ export const ScheduleCreateRequestSchema = z.strictObject({
   cwd: z.string().min(1),
   inputs: z.record(z.string(), ScalarSchema).optional(),
   isolation: ScheduleIsolationModeSchema.optional(),
+  /**
+   * FR10: pin the substrate this schedule fires on. A raw string on the wire: the host normalizes
+   * aliases (`herdr-core` → `hc`) and refuses an unknown id with `invalid_request`, while a known
+   * id nobody registered is `executor_unavailable` from the add-time dry check (FR12).
+   */
+  executor: z.string().min(1).optional(),
   cron: z.string().min(1),
   tz: z.string().min(1).optional(),
   overlap: OverlapSchema.optional(),
@@ -582,6 +590,8 @@ export const ScheduleEditRequestSchema = z
     cwd: z.string().min(1).optional(),
     inputs: z.record(z.string(), ScalarSchema).optional(),
     isolation: ScheduleIsolationModeSchema.optional(),
+    /** FR10: move the pin (same normalization/refusal rules as a create). */
+    executor: z.string().min(1).optional(),
     cron: z.string().min(1).optional(),
     tz: z.string().min(1).optional(),
     overlap: OverlapSchema.optional(),
@@ -589,7 +599,8 @@ export const ScheduleEditRequestSchema = z
     keep: KeepSchema.optional(),
   })
   .refine((body) => Object.keys(body).length > 0, {
-    message: "an edit needs at least one of cwd, inputs, isolation, cron, tz, overlap, catchUp, keep",
+    message:
+      "an edit needs at least one of cwd, inputs, isolation, executor, cron, tz, overlap, catchUp, keep",
   });
 export type ScheduleEditRequest = z.infer<typeof ScheduleEditRequestSchema>;
 

@@ -13,6 +13,7 @@
 import { resolve } from "node:path";
 
 import type {
+  ExecutorId,
   RpcClient,
   Scalar,
   ScheduleCreateRequest,
@@ -21,6 +22,7 @@ import type {
   ScheduleFire,
   ScheduleSummary,
 } from "@thaodangspace/argos-core/rpc";
+import { EXECUTOR_IDS, executorIdFor } from "@thaodangspace/argos-core/rpc";
 
 import { flag, flagValues, hasFlag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";
@@ -35,6 +37,7 @@ const FIELD_FLAGS = [
   "cwd",
   "input",
   "isolation",
+  "executor",
   "overlap",
   "catch-up",
   "keep",
@@ -48,6 +51,8 @@ interface Fields {
   readonly tz?: string;
   readonly inputs?: Record<string, Scalar>;
   readonly isolation?: "none" | "worktree";
+  /** FR10: canonical — the CLI normalizes an alias and refuses an unknown id without a request. */
+  readonly executor?: ExecutorId;
   readonly overlap?: "skip" | "allow";
   readonly catchUp?: CatchUpField;
   readonly keep?: number | "all";
@@ -106,6 +111,17 @@ function readFields(args: ParsedArgs): FieldsResult {
     return { ok: false, message: '--keep must be "all" or a whole number from 1 to 1000' };
   }
 
+  // FR10: like `--isolation`, a value this CLI cannot resolve is a usage error (exit 1, no
+  // request); an alias such as `herdr-core` is normalized so only `paseo`/`hc` reach the server.
+  const rawExecutor = flag(args, "executor");
+  const executor = rawExecutor === undefined ? undefined : executorIdFor(rawExecutor);
+  if (rawExecutor !== undefined && executor === undefined) {
+    return {
+      ok: false,
+      message: `--executor ${JSON.stringify(rawExecutor)} is unknown: use one of ${EXECUTOR_IDS.join(", ")}`,
+    };
+  }
+
   const rawCatchUp = flag(args, "catch-up");
   const tz = flag(args, "tz");
   const cwd = flag(args, "cwd");
@@ -116,6 +132,7 @@ function readFields(args: ParsedArgs): FieldsResult {
       ...(tz === undefined ? {} : { tz }),
       ...(rawInputs.length === 0 ? {} : { inputs }),
       ...(isolation === undefined ? {} : { isolation }),
+      ...(executor === undefined ? {} : { executor }),
       ...(overlap === undefined ? {} : { overlap }),
       ...(rawCatchUp === undefined ? {} : { catchUp: catchUpValue(rawCatchUp) }),
       ...(keep === undefined ? {} : { keep }),
@@ -192,7 +209,9 @@ function detailHuman(schedule: ScheduleDetail): string {
     `  last      ${fireSummary(schedule.lastFire)}`,
     `  policy    overlap ${schedule.overlap}; catch-up ${catchUpLabel(schedule.catchUp)};` +
       ` keep ${keepLabel(schedule.keep)}` +
-      (schedule.isolation === undefined ? "" : `; isolation ${schedule.isolation}`),
+      (schedule.isolation === undefined ? "" : `; isolation ${schedule.isolation}`) +
+      // FR10: only a non-default pin is named, so a plain schedule's line is unchanged.
+      (schedule.executor === undefined ? "" : `; executor ${schedule.executor}`),
     `  failures  ${schedule.consecutiveFailures}`,
     `  fires     ${schedule.fires.length}; recent runs ` +
       (schedule.recentRunIds.length === 0 ? "none" : schedule.recentRunIds.join(", ")),
@@ -251,6 +270,7 @@ async function addScheduleCommand(
     cwd: fields.cwd === undefined ? process.cwd() : resolve(fields.cwd),
     ...(fields.inputs === undefined ? {} : { inputs: fields.inputs }),
     ...(fields.isolation === undefined ? {} : { isolation: fields.isolation }),
+    ...(fields.executor === undefined ? {} : { executor: fields.executor }),
     cron,
     tz: fields.tz ?? cliTimeZone(),
     ...(fields.overlap === undefined ? {} : { overlap: fields.overlap }),
@@ -321,6 +341,7 @@ async function editScheduleCommand(
     ...(fields.tz === undefined ? {} : { tz: fields.tz }),
     ...(fields.inputs === undefined ? {} : { inputs: fields.inputs }),
     ...(fields.isolation === undefined ? {} : { isolation: fields.isolation }),
+    ...(fields.executor === undefined ? {} : { executor: fields.executor }),
     ...(cron === undefined ? {} : { cron }),
     ...(fields.overlap === undefined ? {} : { overlap: fields.overlap }),
     ...(fields.catchUp === undefined ? {} : { catchUp: fields.catchUp }),
@@ -329,7 +350,7 @@ async function editScheduleCommand(
   if (Object.keys(request).length === 0) {
     return usage(
       io,
-      "schedule edit needs at least one of --cron, --tz, --cwd, --input, --isolation, --overlap, --catch-up, --keep",
+      "schedule edit needs at least one of --cron, --tz, --cwd, --input, --isolation, --executor, --overlap, --catch-up, --keep",
     );
   }
 
