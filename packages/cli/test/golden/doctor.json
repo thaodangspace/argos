@@ -39,6 +39,31 @@
       ]
     }
   ],
+  "executors": [
+    {
+      "id": "paseo",
+      "default": true,
+      "reachable": true,
+      "capabilities": {
+        "structuredOutput": true,
+        "quota": true,
+        "interactiveBlocked": false,
+        "scheduleSafe": true
+      }
+    },
+    {
+      "id": "hc",
+      "default": false,
+      "reachable": true,
+      "version": "0.9.1",
+      "capabilities": {
+        "structuredOutput": false,
+        "quota": false,
+        "interactiveBlocked": true,
+        "scheduleSafe": true
+      }
+    }
+  ],
   "pendingGates": [
     {
       "runId": "run-1",

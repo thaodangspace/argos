@@ -61,6 +61,7 @@ import {
   SSE_SNAPSHOT_EVENT,
   StartRunRequestSchema,
   StartRunResponseSchema,
+  normalizeExecutorId,
   statusForCode,
   type ErrorResponse,
   type PaseoInfo,
@@ -411,6 +412,9 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
       uptimeMs: Date.now() - startedAt,
       paseo,
       providers,
+      // FR9: the registry, from the host's own view (so `--default-executor`, the registered set,
+      // and any injected descriptor are what the operator reads). Read-only and synchronous.
+      executors: [...options.host.executors],
       pendingGates: summaries.flatMap((run) =>
         run.gates.filter((gate) => gate.status === "pending"),
       ),
@@ -745,6 +749,11 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         }
         const body = StartRunRequestSchema.parse(await readJson(req, maxBodyBytes));
         const cwd = body.cwd ?? options.cwd ?? process.cwd();
+        // FR3: the request-level executor gate. A value that does not normalize to a known id is
+        // `400 invalid_request` here — before the loader runs and before the host is called — while
+        // a canonical id the server has no adapter for is the host's `422 executor_unavailable`.
+        // The canonical id is what travels, so a record/read model only ever holds `paseo`/`hc`.
+        const executor = body.executor === undefined ? undefined : normalizeExecutorId(body.executor);
         // FR6.1: a bad cwd is refused before the loader runs, so no task, worktree, or run exists.
         // FR4.1: the resolve half is shared with a schedule fire, so the two paths cannot drift.
         // The host's home is where `argos serve` was opened, so global playbooks under
@@ -762,6 +771,7 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
           ...(body.isolation === undefined
             ? {}
             : { isolation: body.isolation as IsolationIR }),
+          ...(executor === undefined ? {} : { executor }),
           ...(body.clientRequestId === undefined
             ? {}
             : { clientRequestId: body.clientRequestId }),

@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ArgosHost } from "../../src/durable/host.js";
+import { ArgosHost, type ArgosHostOptions } from "../../src/durable/host.js";
 import type { Clock } from "../../src/durable/context.js";
 import { createRpcServer, type RpcServer } from "../../src/rpc/server.js";
 import {
@@ -16,6 +16,7 @@ import {
   RPC_ERROR_STATUS,
   RunSummarySchema,
   statusForCode,
+  type ExecutorId,
   type RunDetail,
   type RunSummary,
   type ServerInfo,
@@ -50,13 +51,21 @@ interface Harness {
   base: string;
   home: ReturnType<typeof makeTempHome>;
   executor: FakeExecutor;
+  /** FR2: the extra registered substrates, so a test can assert which fake a run reached. */
+  executors: Readonly<Partial<Record<ExecutorId, FakeExecutor>>>;
 }
 
 const openHarnesses: Harness[] = [];
 
 async function startHarness(
   executor: FakeExecutor,
-  options: { readonly clock?: Clock; readonly enablePaseo?: boolean } = {},
+  options: {
+    readonly clock?: Clock;
+    readonly enablePaseo?: boolean;
+    readonly executors?: Partial<Record<ExecutorId, FakeExecutor>>;
+    readonly defaultExecutor?: ExecutorId;
+    readonly executorInfo?: ArgosHostOptions["executorInfo"];
+  } = {},
 ): Promise<Harness> {
   const home = makeTempHome();
   const host = await ArgosHost.open({
@@ -64,6 +73,9 @@ async function startHarness(
     home: home.home,
     executor,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.executors === undefined ? {} : { executors: options.executors }),
+    ...(options.defaultExecutor === undefined ? {} : { defaultExecutor: options.defaultExecutor }),
+    ...(options.executorInfo === undefined ? {} : { executorInfo: options.executorInfo }),
   });
   const server = await createRpcServer({
     host,
@@ -87,7 +99,7 @@ async function startHarness(
         }
       : {}),
   });
-  const harness = { host, server, base: server.url, home, executor };
+  const harness = { host, server, base: server.url, home, executor, executors: options.executors ?? {} };
   openHarnesses.push(harness);
   return harness;
 }
@@ -384,6 +396,166 @@ describe("GET /runs (FR26)", () => {
     expect(list.text.toLowerCase()).not.toContain("transcript");
     expect(list.text).not.toContain(secretPrompt);
     expect(detail.steps[0]).not.toHaveProperty("prompt");
+  });
+});
+
+describe("executor selection over HTTP (FR3, FR8, FR9)", () => {
+  /** A one-step playbook that completes on its first poll, and a temp repo that holds it. */
+  async function repoForSingleStep(): Promise<string> {
+    return await makeRepoWith(singleStepPlaybook("single"));
+  }
+
+  it("answers 400 for an id that is not an executor at all, creating no run", async () => {
+    const paseo = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(paseo);
+    const repo = await repoForSingleStep();
+
+    for (const executor of ["nope", "  ", "paseo2"]) {
+      const response = await call(harness.base, "POST", "/runs", {
+        body: { playbookId: "single", cwd: repo, executor },
+      });
+      // An empty value never reaches the normalizer: the strict body schema rejects it first, and
+      // both paths are the same `invalid_request` (400) with no run behind it.
+      expect(response.status, `${executor}: ${response.text}`).toBe(400);
+      expect(errorCode(response.body), executor).toBe("invalid_request");
+    }
+
+    expect(paseo.creations).toEqual([]);
+    expect((await call(harness.base, "GET", "/runs")).body).toEqual({ runs: [] });
+  });
+
+  it("answers 422 for a known id the server has not registered", async () => {
+    const paseo = new FakeExecutor({ completeAfterPolls: 1 });
+    // `hc` is a canonical executor, but this host registered only paseo.
+    const harness = await startHarness(paseo);
+    const repo = await repoForSingleStep();
+
+    const response = await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo, executor: "hc" },
+    });
+    expect(response.status, response.text).toBe(422);
+    expect(errorCode(response.body)).toBe("executor_unavailable");
+    expect(response.text).toContain("paseo");
+
+    expect(paseo.creations).toEqual([]);
+    expect((await call(harness.base, "GET", "/runs")).body).toEqual({ runs: [] });
+  });
+
+  it("creates the run on the named substrate and names it in the read model", async () => {
+    const paseo = new FakeExecutor({ completeAfterPolls: 1 });
+    const hc = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(paseo, { executors: { hc } });
+    const repo = await repoForSingleStep();
+
+    const started = await call(harness.base, "POST", "/runs", {
+      // An alias, to prove the route normalizes: only `hc` may be stored or rendered.
+      body: { playbookId: "single", cwd: repo, executor: "herdr-core" },
+    });
+    expect(started.status, started.text).toBe(201);
+    const { runId } = started.body as { runId: string };
+
+    const detail = await waitForStatus(harness, runId, "completed");
+    expect(detail.executor).toBe("hc");
+    // The explicit assertion behind "the run went to the right fake": one agent on hc, none on paseo.
+    expect(hc.creationsByStep()).toEqual({ a: 1 });
+    expect(paseo.creations).toEqual([]);
+
+    const listed = (await call(harness.base, "GET", "/runs")).body as { runs: RunSummary[] };
+    expect(listed.runs.find((run) => run.id === runId)?.executor).toBe("hc");
+    // The summary schema (strict) accepts the projection as the route sent it.
+    expect(RunSummarySchema.parse(listed.runs[0]).executor).toBe("hc");
+  });
+
+  it("keeps a paseo run's summary and detail free of any executor key", async () => {
+    const paseo = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(paseo);
+    const repo = await repoForSingleStep();
+
+    // No `executor` in the body at all: the server default (`paseo`) is the substrate.
+    const started = await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "single", cwd: repo },
+    });
+    expect(started.status, started.text).toBe(201);
+    const { runId } = started.body as { runId: string };
+
+    const detail = await waitForStatus(harness, runId, "completed");
+    expect(detail).not.toHaveProperty("executor");
+    expect(JSON.stringify(detail)).not.toContain('"executor"');
+
+    const summary = ((await call(harness.base, "GET", "/runs")).body as { runs: RunSummary[] }).runs[0];
+    expect(summary).not.toHaveProperty("executor");
+    expect(JSON.stringify(summary)).not.toContain('"executor"');
+    expect(paseo.creationsByStep()).toEqual({ a: 1 });
+  });
+
+  it("publishes every registered executor in GET /info, with the default marked", async () => {
+    const paseo = new FakeExecutor({ completeAfterPolls: 1 });
+    // A paseo-only server gained exactly one key: `executors`.
+    const solo = await startHarness(paseo);
+    const soloInfo = (await call(solo.base, "GET", "/info")).body as ServerInfo;
+    expect(soloInfo.executors).toEqual([
+      {
+        id: "paseo",
+        default: true,
+        reachable: true,
+        capabilities: {
+          structuredOutput: true,
+          quota: true,
+          interactiveBlocked: false,
+          scheduleSafe: true,
+        },
+      },
+    ]);
+    for (const key of [
+      "name",
+      "rpcVersion",
+      "schemaVersion",
+      "pid",
+      "port",
+      "home",
+      "node",
+      "startedAt",
+      "uptimeMs",
+      "paseo",
+      "providers",
+      "pendingGates",
+      "runs",
+    ]) {
+      expect(soloInfo, key).toHaveProperty(key);
+    }
+
+    const hc = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(paseo, {
+      executors: { hc },
+      executorInfo: {
+        hc: { reachable: false, version: "0.9.1", error: "no hc socket", capabilities: { quota: true } },
+      },
+    });
+    const info = (await call(harness.base, "GET", "/info")).body as ServerInfo;
+    expect(info.executors?.map((executor) => executor.id)).toEqual(["paseo", "hc"]);
+
+    const [serverDefault, other] = info.executors ?? [];
+    expect(serverDefault).toMatchObject({ id: "paseo", default: true, reachable: true });
+    expect(serverDefault?.capabilities).toEqual({
+      structuredOutput: true,
+      quota: true,
+      interactiveBlocked: false,
+      scheduleSafe: true,
+    });
+    // The injected descriptor wins where it speaks and the documented default fills the rest.
+    expect(other).toMatchObject({
+      id: "hc",
+      default: false,
+      reachable: false,
+      version: "0.9.1",
+      error: "no hc socket",
+    });
+    expect(other?.capabilities).toEqual({
+      structuredOutput: false,
+      quota: true,
+      interactiveBlocked: true,
+      scheduleSafe: true,
+    });
   });
 });
 

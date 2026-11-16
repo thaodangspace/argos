@@ -934,6 +934,8 @@ export interface RunView {
   /** `manual`, or `schedule <id>` (FR8.2 provenance). */
   readonly triggerLabel: string;
   readonly scheduleId?: string;
+  /** FR8: the non-default substrate this run used (`hc`); absent when it ran on `paseo`. */
+  readonly executor?: string;
   readonly cwd: string;
   readonly worktree?: string;
   readonly inputs: readonly { readonly name: string; readonly value: string }[];
@@ -1463,6 +1465,8 @@ export function runView(
     durationLabel: formatDuration((active ? now : run.updatedAt) - run.createdAt),
     triggerLabel: triggerLabel(run),
     ...(run.trigger === undefined ? {} : { scheduleId: run.trigger.scheduleId }),
+    // FR8: the list carries it only for a non-default substrate, so a paseo row renders as before.
+    ...(run.executor === undefined ? {} : { executor: run.executor }),
     cwd: run.cwd,
     ...(run.worktree === undefined ? {} : { worktree: run.worktree.path }),
     inputs: Object.entries(run.inputs).map(([name, value]) => ({

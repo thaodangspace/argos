@@ -163,7 +163,8 @@ export const USAGE = `argos — durable YAML playbooks for Paseo agents
 
 Usage:
   argos validate [path] [--home dir] [--json]
-  argos run <playbook> [--input k=v ...] [--cwd dir] [--isolation none|worktree] [--json]
+  argos run <playbook> [--input k=v ...] [--cwd dir] [--isolation none|worktree]
+                  [--executor paseo|hc] [--json]
   argos ls [--schedule <id>] [--json]
   argos status <runId> [--json]
   argos gates [--json]
@@ -181,12 +182,13 @@ Usage:
                      [--isolation none|worktree] [--overlap skip|allow]
                      [--catch-up all|0|<n>(s|m|h|d)] [--keep <n>|all] [--json]
   argos schedule ls|show <id>|pause <id>|resume <id>|run <id>|rm <id> [--json]
-  argos serve [--port N] [--home dir] [--json]
+  argos serve [--port N] [--home dir] [--default-executor paseo|hc] [--json]
   argos doctor [--home dir] [--port N] [--json]
 
 Environment:
   ARGOS_HOME      state directory (default ~/.argos)
   ARGOS_PORT      RPC port on 127.0.0.1 (default 7676)
+  ARGOS_EXECUTOR  default substrate for argos serve (flag wins; default paseo)
   ARGOS_PASEO_URL Paseo daemon URL (argos serve only)
   ARGOS_FAKE_PASEO=1  test-only deterministic executor (argos serve only)
 

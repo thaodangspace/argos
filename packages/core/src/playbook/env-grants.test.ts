@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { isArgosError } from "../errors.js";
+import { SCRIPT_ENV_DENY } from "../engine/env.js";
 import { loadPlaybook, type LoadWarning } from "./load.js";
 
 interface TempTree {
@@ -176,7 +177,8 @@ describe("a deny-listed name warns env_denied (FR2.4)", () => {
       const { warnings } = load(tree, "denied-prefix", scriptPlaybook(["ARGOS_*"]));
       expect(warnings.every((warning) => warning.code === "env_denied")).toBe(true);
       expect(warnings.map((warning) => warning.message).join("\n")).toContain("ARGOS_PASEO_PASSWORD");
-      expect(warnings).toHaveLength(8);
+      // One warning per deny-listed name: the count follows the list, not a magic number.
+      expect(warnings).toHaveLength(SCRIPT_ENV_DENY.length);
     } finally {
       tree.cleanup();
     }

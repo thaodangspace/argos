@@ -10,6 +10,7 @@ import type { RunRecord, StepRecord } from "../engine/index.js";
 import { aggregateUsage, attemptUsage, isSecretEnvName, isTerminalRunStatus } from "../engine/index.js";
 import type { HistoryDocValue, RunDoc } from "../durable/mirror.js";
 import type { FireEntry, ScheduleDoc } from "../durable/schedule-docs.js";
+import { DEFAULT_EXECUTOR_ID } from "../executor/model.js";
 import {
   SCHEDULE_RECENT_RUN_LIMIT,
   STEP_OUTPUT_VALUE_LIMIT,
@@ -191,6 +192,11 @@ export function toRunSummary(
     ...(record.trigger === undefined ? {} : { trigger: record.trigger }),
     // Fork provenance: same rule — a normally started run omits the key, so goldens hold.
     ...(record.forkedFrom === undefined ? {} : { forkedFrom: record.forkedFrom }),
+    // FR8: only a non-default substrate is named. A paseo record omits the key, and a record that
+    // spelled `paseo` explicitly is filtered here too, so the summary never carries it.
+    ...(record.executor === undefined || record.executor === DEFAULT_EXECUTOR_ID
+      ? {}
+      : { executor: record.executor }),
     // Workflow total: every main step's aggregate. Absent when nothing reported accounting, so a
     // run without usage keeps the JSON byte-identical to before this field existed.
     ...(usage === undefined ? {} : { usage }),

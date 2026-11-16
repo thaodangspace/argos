@@ -36,6 +36,35 @@ import {
   MISSED_COUNT_OVERFLOW,
   OverlapSchema,
 } from "../schedule/model.js";
+/**
+ * FR1/FR3/FR8/FR9: the executor vocabulary, re-exported here for the same reason the schedule
+ * vocabulary is imported from `schedule/model.ts` — `executor/model.ts` imports only zod and the
+ * error type, so the CLI and the Paseo plugin share one normalizer and one info schema without
+ * importing the core root, the durable host, or an adapter.
+ */
+import {
+  DEFAULT_EXECUTOR_ID,
+  EXECUTOR_IDS,
+  ExecutorCapabilitiesSchema,
+  ExecutorIdSchema,
+  ExecutorInfoSchema,
+  executorIdFor,
+  normalizeExecutorId,
+  type ExecutorCapabilities,
+  type ExecutorId,
+  type ExecutorInfo,
+} from "../executor/model.js";
+
+export {
+  DEFAULT_EXECUTOR_ID,
+  EXECUTOR_IDS,
+  ExecutorCapabilitiesSchema,
+  ExecutorIdSchema,
+  ExecutorInfoSchema,
+  executorIdFor,
+  normalizeExecutorId,
+};
+export type { ExecutorCapabilities, ExecutorId, ExecutorInfo };
 
 /** Version of the RPC contract; bumped only for a breaking change. */
 export const ARGOS_RPC_VERSION = 1;
@@ -167,6 +196,12 @@ export const StartRunRequestSchema = z.strictObject({
   /** Repository root the loader reads (and the run works in). Default: the server's cwd. */
   cwd: z.string().min(1).optional(),
   isolation: IsolationSchema.optional(),
+  /**
+   * FR3: the substrate for this run (`paseo`, `hc`, or an alias such as `herdr-core`). Normalized by
+   * the route: a value that is not an executor at all is `400 invalid_request` before the host is
+   * called, and a canonical id the server has no adapter for is `422 executor_unavailable`.
+   */
+  executor: z.string().min(1).optional(),
   /** D15 idempotency key: a repeat returns the first run instead of starting a second. */
   clientRequestId: z.string().min(1).optional(),
 });
@@ -386,6 +421,12 @@ export const RunSummarySchema = z.strictObject({
   /** Fork provenance: present only on a run started by `argos fork`. */
   forkedFrom: ForkedFromSchema.optional(),
   /**
+   * FR8: the substrate this run actually used, when it is not `paseo`. A `paseo` run omits the key
+   * entirely, so every existing summary/detail and golden stays byte-identical; the value is the
+   * canonical id frozen in the run record (never re-resolved from config).
+   */
+  executor: ExecutorIdSchema.optional(),
+  /**
    * Workflow total of provider/token accounting: every main step's {@link StepSummarySchema.usage}
    * aggregated (counters summed, gauges peaked). Absent when no step reported any. After tasks are
    * separate runs and are not counted here.
@@ -603,6 +644,11 @@ export const ServerInfoSchema = z.strictObject({
   uptimeMs: z.number().min(0),
   paseo: PaseoInfoSchema,
   providers: z.array(ProviderInfoSchema),
+  /**
+   * FR9: every registered executor, `paseo` first. The only key this response gained for the
+   * executor registry; every existing key keeps its meaning.
+   */
+  executors: z.array(ExecutorInfoSchema).optional(),
   pendingGates: z.array(GateSummarySchema),
   runs: RunCountsSchema,
 });
@@ -647,6 +693,11 @@ export const DoctorReportSchema = z.strictObject({
   server: DoctorServerSchema,
   paseo: PaseoInfoSchema,
   providers: z.array(ProviderInfoSchema),
+  /**
+   * FR9: the executor registry as the server published it (absent when no server answered). The
+   * report's other fields keep their meaning, so a doctor reading an older server is unaffected.
+   */
+  executors: z.array(ExecutorInfoSchema).optional(),
   pendingGates: z.array(GateSummarySchema),
   runs: RunCountsSchema,
   checks: z.array(DoctorCheckSchema),

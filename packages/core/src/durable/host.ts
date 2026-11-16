@@ -37,9 +37,12 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 
 import { ArgosError, type ArgosIssue } from "../errors.js";
 import {
+  DEFAULT_EXECUTOR_CAPABILITIES,
   DEFAULT_EXECUTOR_ID,
+  EXECUTOR_IDS,
   executorIdFor,
   type ExecutorId,
+  type ExecutorInfo,
 } from "../executor/model.js";
 import type { GitRunner } from "../git/exec.js";
 import { createRunWorktree, assertRunBaseClean, reattachRunWorktree, runWorktreeBranch } from "../git/worktree.js";
@@ -69,6 +72,7 @@ import type {
   CommitRunOptions,
   DecideGateOptions,
   EditScheduleInput,
+  ExecutorDescriptor,
   ForkRunOptions,
   GateDecisionReceipt,
   PreparedRun,
@@ -132,6 +136,17 @@ import { ulid } from "./ulid.js";
 /** D4 extension name that groups the Argos tasks. */
 export const ARGOS_EXTENSION_NAME = "argos";
 
+/**
+ * FR6/FR16: the registered set, rendered for a refusal. It names ids only — never a value, a path,
+ * or a secret — and `(none)` keeps the sentence readable for an empty registry.
+ */
+function registeredExecutorList(
+  executors: Readonly<Partial<Record<ExecutorId, StepExecutor>>>,
+): string {
+  const registered = EXECUTOR_IDS.filter((id) => executors[id] !== undefined);
+  return registered.length === 0 ? "(none)" : registered.join(", ");
+}
+
 // ------------------------------------------------------------------ host
 
 export class ArgosHost {
@@ -144,6 +159,8 @@ export class ArgosHost {
   readonly #defaultExecutor: ExecutorId;
   /** FR24/FR18: per-executor target catalogs; `paseo` falls back to `#modelCatalog`. */
   readonly #catalogs: Readonly<Partial<Record<ExecutorId, TargetCatalog>>>;
+  /** FR9: the operator-supplied reachability/capability overrides `GET /info` publishes. */
+  readonly #executorInfo: Readonly<Partial<Record<ExecutorId, ExecutorDescriptor>>>;
   readonly #clock: Clock;
   readonly #models: Models;
   readonly #modelCatalog: TargetCatalog | undefined;
@@ -167,6 +184,7 @@ export class ArgosHost {
     executors: Readonly<Partial<Record<ExecutorId, StepExecutor>>>;
     defaultExecutor: ExecutorId;
     catalogs: Readonly<Partial<Record<ExecutorId, TargetCatalog>>>;
+    executorInfo: Readonly<Partial<Record<ExecutorId, ExecutorDescriptor>>>;
     clock: Clock;
     models: Models;
     modelCatalog?: TargetCatalog;
@@ -184,6 +202,7 @@ export class ArgosHost {
     this.#executors = init.executors;
     this.#defaultExecutor = init.defaultExecutor;
     this.#catalogs = init.catalogs;
+    this.#executorInfo = init.executorInfo;
     this.#clock = init.clock;
     this.#models = init.models;
     this.#modelCatalog = init.modelCatalog;
@@ -240,6 +259,18 @@ export class ArgosHost {
     };
     const defaultExecutor: ExecutorId = options.defaultExecutor ?? DEFAULT_EXECUTOR_ID;
     const catalogs: Partial<Record<ExecutorId, TargetCatalog>> = { ...options.catalogs };
+    const executorInfo: Partial<Record<ExecutorId, ExecutorDescriptor>> = {
+      ...options.executorInfo,
+    };
+    // FR16: a default the registry cannot run is a startup failure naming the id and the set. It is
+    // checked here — before the pid file, the database, and any resume — so `argos serve
+    // --default-executor <unknown>` leaves nothing behind, and never falls back to paseo silently.
+    if (executors[defaultExecutor] === undefined) {
+      throw new ArgosError(
+        "executor_unavailable",
+        `default executor ${JSON.stringify(defaultExecutor)} is not registered; registered executors: ${registeredExecutorList(executors)}`,
+      );
+    }
 
     // `$ARGOS_HOME` is known before any task exists: the run task threads it to script children,
     // so a global script under `<home>/scripts` resolves without touching the run record.
@@ -316,6 +347,7 @@ export class ArgosHost {
       executors,
       defaultExecutor,
       catalogs,
+      executorInfo,
       clock,
       models,
       ...(options.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
@@ -349,6 +381,29 @@ export class ArgosHost {
   /** Injected executor, exposed for assertions in tests. */
   get executor(): StepExecutor {
     return this.#executor;
+  }
+
+  /**
+   * FR9: every registered executor as `GET /info` publishes it — its canonical id, whether it is the
+   * server default, whether it is reachable, its documented capabilities (with any injected
+   * override), and the adapter's error when it is not reachable.
+   *
+   * Ordered by {@link EXECUTOR_IDS} (`paseo` first) rather than by registration, so the line an
+   * operator reads is stable. Read-only and side-effect free: `argos serve` prints it at startup and
+   * `argos doctor` reads it over `/info`.
+   */
+  get executors(): readonly ExecutorInfo[] {
+    return EXECUTOR_IDS.filter((id) => this.#executors[id] !== undefined).map((id) => {
+      const descriptor = this.#executorInfo[id];
+      return {
+        id,
+        default: id === this.#defaultExecutor,
+        reachable: descriptor?.reachable ?? true,
+        ...(descriptor?.version === undefined ? {} : { version: descriptor.version }),
+        capabilities: { ...DEFAULT_EXECUTOR_CAPABILITIES[id], ...descriptor?.capabilities },
+        ...(descriptor?.error === undefined ? {} : { error: descriptor.error }),
+      };
+    });
   }
 
   /** The D6 stub (or the injected override). */
@@ -524,12 +579,11 @@ export class ArgosHost {
 
   /** The one refusal shape: names the id and the registered set, never a value or a secret. */
   #refuseExecutor(requested: string): never {
-    const registered = Object.keys(this.#executors);
     throw new ArgosError(
       "executor_unavailable",
-      `executor ${JSON.stringify(requested)} is not registered; registered executors: ${
-        registered.length === 0 ? "(none)" : registered.join(", ")
-      }`,
+      `executor ${JSON.stringify(requested)} is not registered; registered executors: ${registeredExecutorList(
+        this.#executors,
+      )}`,
     );
   }
 

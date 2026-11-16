@@ -2,7 +2,12 @@
 
 import { resolve } from "node:path";
 
-import type { Scalar, StartRunRequest } from "@thaodangspace/argos-core/rpc";
+import {
+  EXECUTOR_IDS,
+  executorIdFor,
+  type Scalar,
+  type StartRunRequest,
+} from "@thaodangspace/argos-core/rpc";
 
 import { flag, flagValues, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import { EXIT_RUNTIME, type CliIo } from "../output.js";
@@ -23,6 +28,7 @@ export async function runCommand(args: ParsedArgs, io: CliIo): Promise<number> {
     "input",
     "cwd",
     "isolation",
+    "executor",
     "client-request-id",
   ]);
   if (unknown !== undefined) {
@@ -48,6 +54,18 @@ export async function runCommand(args: ParsedArgs, io: CliIo): Promise<number> {
     io.stderr("argos: --isolation must be none or worktree\n");
     return EXIT_RUNTIME;
   }
+  // FR3: an id that is not an executor at all is refused locally — exit 1, no request sent — so a
+  // typo never costs a round trip. The canonical id travels; an alias such as `herdr-core` is
+  // normalized here, so storage and the read model only ever hold `paseo`/`hc`. Whether the server
+  // has an adapter for that id is the server's answer (`executor_unavailable`, 422).
+  const executorFlag = flag(args, "executor");
+  const executor = executorFlag === undefined ? undefined : executorIdFor(executorFlag);
+  if (executorFlag !== undefined && executor === undefined) {
+    io.stderr(
+      `argos: --executor ${JSON.stringify(executorFlag)} is unknown: use one of ${EXECUTOR_IDS.join(", ")}\n`,
+    );
+    return EXIT_RUNTIME;
+  }
   const cwdFlag = flag(args, "cwd");
   const clientRequestId = flag(args, "client-request-id");
 
@@ -58,6 +76,7 @@ export async function runCommand(args: ParsedArgs, io: CliIo): Promise<number> {
     // long-lived `argos serve` process was started.
     cwd: cwdFlag === undefined ? process.cwd() : resolve(cwdFlag),
     ...(isolation === undefined ? {} : { isolation: { mode: isolation } }),
+    ...(executor === undefined ? {} : { executor }),
     ...(clientRequestId === undefined ? {} : { clientRequestId }),
   };
 

@@ -194,6 +194,7 @@ describe("baseline and deny helpers (FR2.1/FR2.4)", () => {
 
   it("keeps the deny list to Argos' own configuration", () => {
     expect([...SCRIPT_ENV_DENY].sort()).toStrictEqual([
+      "ARGOS_EXECUTOR",
       "ARGOS_FAKE_PASEO",
       "ARGOS_FAKE_PASEO_BLOCK_STEP",
       "ARGOS_FAKE_PASEO_DIR",

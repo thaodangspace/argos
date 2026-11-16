@@ -144,6 +144,14 @@ describe("projections", () => {
     });
     expect(runView(run).detail).toBe("0/1 steps · step_timeout");
   });
+
+  it("carries the executor only when the run used a non-default substrate (FR8)", () => {
+    const paseo = runView(makeRun({ id: "run-paseo" }));
+    expect(paseo).not.toHaveProperty("executor");
+
+    const hc = runView(makeRun({ id: "run-hc", executor: "hc" }));
+    expect(hc.executor).toBe("hc");
+  });
 });
 
 describe("decideGateOnce", () => {

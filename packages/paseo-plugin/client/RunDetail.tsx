@@ -405,6 +405,10 @@ export function RunDetailPage({
         </Txt>
         <RunId theme={theme} id={run.id} />
         <Pill theme={theme} label={run.statusLabel} tone={run.tone} />
+        {/* FR8: the substrate, when the run did not use the default one. */}
+        {run.executor === undefined ? null : (
+          <Pill theme={theme} label={`executor ${run.executor}`} tone="neutral" />
+        )}
         <Row wrap style={{ marginLeft: "auto" }}>
           {run.active ? (
             <Button
