@@ -332,6 +332,8 @@ function detailRun(): RunDetail {
     inputs: { ticket: "VP-7" },
     createdAt: 1_000,
     updatedAt: 4_500,
+    // FR8: a non-default substrate carries the badge; a paseo run leaves the key out.
+    executor: "hc",
     steps: DETAIL_STEPS,
     gates: [makeGate({ gateId: "gate:1", runId: "run-1" })],
     after: [{ id: "notify", title: "Notify", trigger: "auto", status: "completed" }],
@@ -357,6 +359,8 @@ function listRuns() {
       status: index === 0 ? "failed" : "completed",
       createdAt: 10_000 - index * 100,
       updatedAt: 10_000 - index * 100,
+      // FR8: rows of a non-default substrate carry the badge; the other groups stay paseo.
+      ...(index === 0 ? { executor: "hc" } : {}),
       steps: [
         makeStep({ id: "fetch", status: "completed", attemptCount: 1 }),
         makeStep({ id: "push", status: index === 0 ? "failed" : "completed", attemptCount: 1 }),
@@ -416,6 +420,8 @@ describe("panel renders with React Native primitives only", () => {
     expectNative(renderer);
     expect(textOf(renderer)).toContain("hourly-sync");
     expect(textOf(renderer)).toContain("release");
+    // FR8: one row of the open group runs on the non-default substrate, so it shows the badge.
+    expect(textOf(renderer)).toContain("executor hc");
 
     await press(renderer, "older");
     expectNative(renderer);
@@ -459,6 +465,8 @@ describe("panel renders with React Native primitives only", () => {
     expect(text).toContain("Notify");
     // FR26: the run header shows the workflow total, and the step row shows its own cost.
     expect(text).toContain("usage $0.42 · 120 in · 3k out");
+    // FR8: an hc run names its substrate in the header badge.
+    expect(text).toContain("executor hc");
 
     await press(renderer, "Pick spec");
     expectNative(renderer);
@@ -471,6 +479,18 @@ describe("panel renders with React Native primitives only", () => {
     await press(renderer, "Remove");
     expectNative(renderer);
     expect(textOf(renderer)).toContain("Confirm remove");
+  });
+
+  it("a run page without the executor badge when the run used the default substrate", async () => {
+    const withExecutor = detailRun();
+    const { executor: _executor, ...paseoDetail } = withExecutor;
+    const { history: _history, ...summary } = paseoDetail;
+    const panel = createPanel({ client: fakeRpc({ runs: [summary], detail: paseoDetail }) });
+    await panel.load();
+    await panel.selectRun("run-1");
+    const renderer = await render(<ArgosScreenView theme={THEME} panel={panel} />);
+    expectNative(renderer);
+    expect(textOf(renderer)).not.toContain("executor ");
   });
 
   it("the sidebar row and the screen through the client contribution", async () => {

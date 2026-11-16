@@ -10,7 +10,7 @@ import type { Conversation, Storage, Tx } from "@earendil-works/pi-durable";
 
 import type { RunRecord, WorktreeRecord } from "../engine/index.js";
 import type { RunTrigger } from "../engine/record.js";
-import type { ExecutorId } from "../executor/model.js";
+import type { ExecutorCapabilities, ExecutorId } from "../executor/model.js";
 import type { GitRunner } from "../git/exec.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
 import type { IsolationIR, PlaybookIR, Scalar } from "../playbook/ir.js";
@@ -18,6 +18,23 @@ import type { CatchUpInput, KeepInput, Overlap } from "../schedule/model.js";
 import type { Clock, StepExecutor } from "./context.js";
 import type { RunDoc } from "./mirror.js";
 import type { ScheduleDoc } from "./schedule-docs.js";
+
+/**
+ * FR9: the observability half of one executor, as the operator (not the host) knows it.
+ *
+ * Everything here is optional over the documented defaults so a test or a not-yet-probed adapter
+ * says nothing rather than lying: an omitted descriptor means "registered, assumed reachable".
+ */
+export interface ExecutorDescriptor {
+  /** Whether the adapter can connect right now. Phase 7 supplies the real probes. */
+  readonly reachable: boolean;
+  /** The adapter's protocol/daemon version, when it reports one. */
+  readonly version?: string;
+  /** Overrides over `DEFAULT_EXECUTOR_CAPABILITIES` (`executor/model.ts`) for this id. */
+  readonly capabilities?: Partial<ExecutorCapabilities>;
+  /** Why `reachable` is false; never a credential (the adapters redact). */
+  readonly error?: string;
+}
 
 export interface ArgosHostOptions {
   /** `$ARGOS_HOME`; default `argosHome()`. Ignored when `storage` is supplied. */
@@ -42,6 +59,13 @@ export interface ArgosHostOptions {
    * existing wiring and every test that passes only `modelCatalog` behave exactly as before.
    */
   readonly catalogs?: Partial<Record<ExecutorId, TargetCatalog>>;
+  /**
+   * FR9: reachability, version, and capability overrides for `GET /info` and `argos doctor`, keyed
+   * by canonical id. Additive: an executor without a descriptor reports `reachable: true` and its
+   * documented `DEFAULT_EXECUTOR_CAPABILITIES` entry, which is the honest default for a plain
+   * {@link StepExecutor} (a fake in a test, or `paseo`). Phase 7 supplies the real probes.
+   */
+  readonly executorInfo?: Partial<Record<ExecutorId, ExecutorDescriptor>>;
   /** Injected clock; default wall time. The harness clock and every timeout use it. */
   readonly clock?: Clock;
   /** Override the D6 stub (tests only; production leaves it unset). */

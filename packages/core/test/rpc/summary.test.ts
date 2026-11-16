@@ -134,6 +134,21 @@ describe("toRunDetail (step logs)", () => {
     expect(RunDetailSchema.safeParse(toRunDetail({ taskId: "43", record: { ...settledRecord(), forkedFrom } }, { events: [] })).success).toBe(true);
   });
 
+  it("projects a non-default executor and drops an explicit paseo (FR8)", () => {
+    const record = settledRecord();
+    // A paseo run names nothing: the key is absent, not `"paseo"`.
+    expect(toRunSummary({ taskId: "42", record })).not.toHaveProperty("executor");
+    expect(JSON.stringify(toRunSummary({ taskId: "42", record }))).not.toContain('"executor"');
+
+    const hc = toRunSummary({ taskId: "43", record: { ...record, executor: "hc" } });
+    expect(hc.executor).toBe("hc");
+    expect(RunDetailSchema.safeParse(detail({ ...record, executor: "hc" })).success).toBe(true);
+
+    // A record that spelled the default out is filtered here too, so the wire shape is uniform.
+    const explicit = toRunSummary({ taskId: "44", record: { ...record, executor: "paseo" } });
+    expect(explicit).not.toHaveProperty("executor");
+  });
+
   it("aggregates a step's attempts and the run total (FR26)", () => {
     const record = settledRecord();
     const summary = toRunSummary({ taskId: "42", record });

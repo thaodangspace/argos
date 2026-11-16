@@ -12,6 +12,13 @@ import { resolve } from "node:path";
 
 import { argosHome, isArgosError } from "@thaodangspace/argos-core";
 import {
+  DEFAULT_EXECUTOR_ID,
+  EXECUTOR_IDS,
+  executorIdFor,
+  type ExecutorId,
+  type ExecutorInfo,
+} from "@thaodangspace/argos-core/rpc";
+import {
   ArgosHost,
   createRpcServer,
   type ArgosHostOptions,
@@ -61,6 +68,15 @@ export function formatScheduleFireLine(event: ScheduleFireEvent): string {
   return `${head}${tail}\n`;
 }
 
+/**
+ * FR9/NFR: the one stderr line `argos serve` prints at startup listing the registry, e.g.
+ * `[argos] executors: paseo (default), hc`. Ids only — never a path, a token, or an input value.
+ */
+export function formatExecutorLine(executors: readonly ExecutorInfo[]): string {
+  const listed = executors.map((executor) => (executor.default ? `${executor.id} (default)` : executor.id));
+  return `[argos] executors: ${listed.length === 0 ? "(none)" : listed.join(", ")}\n`;
+}
+
 function configuredPort(value: string | undefined): number {
   const raw = value ?? process.env["ARGOS_PORT"];
   if (raw === undefined) return 7676;
@@ -99,7 +115,11 @@ async function openHost(options: ArgosHostOptions): Promise<ArgosHost> {
   try {
     return await ArgosHost.open(options);
   } catch (error) {
-    if (isArgosError(error) && error.code === "storage_locked") throw error;
+    // Neither an owned home nor an unusable default executor gets better by trying again: both are
+    // decided before anything is opened/created, and a retry would only delay the same refusal.
+    if (isArgosError(error) && (error.code === "storage_locked" || error.code === "executor_unavailable")) {
+      throw error;
+    }
     await delay(250);
     return ArgosHost.open(options);
   }
@@ -111,7 +131,11 @@ interface Dependencies {
   readonly close: () => Promise<void>;
 }
 
-async function buildDependencies(home: string, io: CliIo): Promise<Dependencies> {
+async function buildDependencies(
+  home: string,
+  io: CliIo,
+  defaultExecutor: ExecutorId,
+): Promise<Dependencies> {
   if (process.env["ARGOS_FAKE_PASEO"] === "1") {
     io.stderr("[argos] ARGOS_FAKE_PASEO=1: using the deterministic test-only executor\n");
     const catalog = ModelCatalog.fromSnapshot(fakeProviderCatalog());
@@ -124,6 +148,7 @@ async function buildDependencies(home: string, io: CliIo): Promise<Dependencies>
         statePath: fakeDir === undefined ? home : resolve(fakeDir),
       }),
       modelCatalog: catalog,
+      defaultExecutor,
       // FR10.4: registered before the first tick, so a catch-up fire during `open()` still prints.
       onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
     });
@@ -151,6 +176,7 @@ async function buildDependencies(home: string, io: CliIo): Promise<Dependencies>
     home,
     executor,
     ...(catalog === undefined ? {} : { modelCatalog: catalog }),
+    defaultExecutor,
     onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
   });
   return {
@@ -165,7 +191,7 @@ async function buildDependencies(home: string, io: CliIo): Promise<Dependencies>
 }
 
 export async function serveCommand(args: ParsedArgs, io: CliIo): Promise<number> {
-  const unknown = rejectUnknownFlags(args, ["port", "home"]);
+  const unknown = rejectUnknownFlags(args, ["port", "home", "default-executor"]);
   if (unknown !== undefined) {
     io.stderr(`argos: ${unknown}\n`);
     return EXIT_RUNTIME;
@@ -185,9 +211,26 @@ export async function serveCommand(args: ParsedArgs, io: CliIo): Promise<number>
   }
   const port = configuredPort(portFlag);
 
+  // FR16: `--default-executor`, else `ARGOS_EXECUTOR`, else `paseo` (the flag wins). A value that is
+  // not an executor at all is refused here, before anything is opened; a known id the registry does
+  // not carry is refused by `ArgosHost.open` with `executor_unavailable`, naming the id and the
+  // registered set. Either way no home, pid file, or database is touched.
+  const executorValue = flag(args, "default-executor") ?? process.env["ARGOS_EXECUTOR"];
+  const resolvedExecutor = executorValue === undefined ? DEFAULT_EXECUTOR_ID : executorIdFor(executorValue);
+  if (resolvedExecutor === undefined) {
+    io.stderr(
+      `argos: --default-executor ${JSON.stringify(executorValue ?? "")} is unknown: use one of ${EXECUTOR_IDS.join(", ")}\n`,
+    );
+    return EXIT_RUNTIME;
+  }
+  const defaultExecutor: ExecutorId = resolvedExecutor;
+
   let dependencies: Dependencies | undefined;
   try {
-    dependencies = await buildDependencies(home, io);
+    dependencies = await buildDependencies(home, io, defaultExecutor);
+    // FR9/NFR Observability: one stderr line naming the registry and the default. `--json` keeps
+    // stdout to its single receipt line, so this never disturbs the startup contract.
+    io.stderr(formatExecutorLine(dependencies.host.executors));
     const server = await createRpcServer({
       host: dependencies.host,
       home,

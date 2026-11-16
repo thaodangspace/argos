@@ -8,8 +8,10 @@
 
 import { describe, expect, it } from "vitest";
 
-import { formatScheduleFireLine, type ScheduleFireEvent } from "../src/commands/serve.js";
-import { SCHEDULE_ID, SCHEDULE_SUMMARY } from "./support/fixtures.js";
+import { formatExecutorLine, formatScheduleFireLine, type ScheduleFireEvent } from "../src/commands/serve.js";
+import { runCli } from "../src/main.js";
+import { capture, makeTempHome, withEnv } from "./support/cli.js";
+import { HC_EXECUTOR, PASEO_EXECUTOR, SCHEDULE_ID, SCHEDULE_SUMMARY } from "./support/fixtures.js";
 
 const fireAt = Date.parse("2026-11-12T07:00:00.000Z");
 const iso = "2026-11-12T07:00:00.000Z";
@@ -70,6 +72,60 @@ describe("argos serve fire line (FR10.4)", () => {
     }
     for (const name of Object.keys(SCHEDULE_SUMMARY.inputs)) {
       expect(line).not.toContain(name);
+    }
+  });
+});
+
+describe("argos serve executor startup (FR9, FR16)", () => {
+  it("prints one line naming the registry and the default", () => {
+    expect(formatExecutorLine([PASEO_EXECUTOR, HC_EXECUTOR])).toBe(
+      "[argos] executors: paseo (default), hc\n",
+    );
+    // The default is whatever the server resolved, never hard-coded to paseo.
+    expect(
+      formatExecutorLine([{ ...PASEO_EXECUTOR, default: false }, { ...HC_EXECUTOR, default: true }]),
+    ).toBe("[argos] executors: paseo, hc (default)\n");
+    expect(formatExecutorLine([])).toBe("[argos] executors: (none)\n");
+  });
+
+  it("refuses an unknown --default-executor before opening anything", async () => {
+    const home = makeTempHome();
+    const restore = withEnv({ ARGOS_HOME: home.home, ARGOS_FAKE_PASEO: "1" });
+    try {
+      const captured = capture();
+      const code = await runCli(
+        ["serve", "--default-executor", "nope", "--json", "--home", home.home],
+        captured.io,
+      );
+      expect(code).toBe(1);
+      expect(captured.stderr()).toContain("--default-executor");
+      expect(captured.stderr()).toContain("paseo, hc");
+      // Nothing was served, so stdout stayed empty.
+      expect(captured.stdout()).toBe("");
+    } finally {
+      restore();
+      home.cleanup();
+    }
+  });
+
+  it("refuses a known executor this build does not register", async () => {
+    const home = makeTempHome();
+    const restore = withEnv({ ARGOS_HOME: home.home, ARGOS_FAKE_PASEO: "1" });
+    try {
+      const captured = capture();
+      // Only `paseo` is registered in this phase; `hc` arrives with its adapter (Phase 7).
+      const code = await runCli(
+        ["serve", "--default-executor", "hc", "--json", "--home", home.home],
+        captured.io,
+      );
+      expect(code).toBe(1);
+      expect(captured.stderr()).toContain("executor_unavailable");
+      expect(captured.stderr()).toContain("default executor");
+      expect(captured.stderr()).toContain("registered executors: paseo");
+      expect(captured.stdout()).toBe("");
+    } finally {
+      restore();
+      home.cleanup();
     }
   });
 });

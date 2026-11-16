@@ -34,9 +34,11 @@ function lsHuman(runs: readonly RunSummary[]): string {
       run.forkedFrom === undefined
         ? ""
         : `  [fork ${run.forkedFrom.runId.slice(0, 8)}@${run.forkedFrom.stepId}]`;
+    // FR8: only a run on a non-default substrate says so; a paseo run's line stays byte-identical.
+    const executor = run.executor === undefined ? "" : `  [executor ${run.executor}]`;
     const cost = withCost ? `  ${(costs[index] ?? "-").padStart(7)}` : "";
     lines.push(
-      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${cost}${schedule}${fork}`,
+      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${cost}${schedule}${fork}${executor}`,
     );
   }
   return lines.join("\n");
@@ -62,6 +64,9 @@ function statusHuman(run: RunDetail): string {
     `run ${run.id}`,
     `  status    ${run.status}`,
     `  playbook  ${run.playbookId} (${run.playbookHash.slice(0, 12)})`,
+    // FR8: the substrate, spelled out (`paseo` when the record does not name one), so an operator
+    // overriding the playbook default can see which one ran.
+    `  executor  ${run.executor ?? "paseo"}`,
     `  cwd       ${run.cwd}`,
   ];
   if (run.worktree !== undefined) {

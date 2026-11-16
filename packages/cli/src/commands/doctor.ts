@@ -18,6 +18,7 @@ import {
   RpcClientError,
   type DoctorCheck,
   type DoctorReport,
+  type ExecutorInfo,
   type ScheduleSummary,
   type ServerInfo,
 } from "@thaodangspace/argos-core/rpc";
@@ -63,6 +64,26 @@ function describePaseo(report: DoctorReport): string {
     : `not reachable (${report.paseo.error})`;
 }
 
+/**
+ * FR9: every registered executor with its reachability, its version when it reports one, and the
+ * adapter's error when it is down. `paseo (default, reachable), hc (not reachable: …)`.
+ */
+function describeExecutors(executors: readonly ExecutorInfo[]): string {
+  if (executors.length === 0) return "none";
+  return executors
+    .map((executor) => {
+      const flags = [
+        ...(executor.default ? ["default"] : []),
+        executor.reachable
+          ? "reachable"
+          : `not reachable${executor.error === undefined ? "" : `: ${executor.error}`}`,
+        ...(executor.version === undefined ? [] : [`v${executor.version}`]),
+      ];
+      return `${executor.id} (${flags.join(", ")})`;
+    })
+    .join(", ");
+}
+
 function humanReport(report: DoctorReport): string {
   const homeMode = report.storage.homeMode === undefined ? "" : ` (${octal(report.storage.homeMode)})`;
   const dbMode =
@@ -77,9 +98,15 @@ function humanReport(report: DoctorReport): string {
     `  server     ${describeServer(report)}`,
     `  paseo      ${describePaseo(report)}`,
     `  providers  ${report.providers.map((provider) => provider.provider).join(", ") || "none"}`,
+  ];
+  // FR9: the executor line only exists when the server answered (it owns the registry).
+  if (report.executors !== undefined) {
+    lines.push(`  executors  ${describeExecutors(report.executors)}`);
+  }
+  lines.push(
     `  gates      ${report.pendingGates.length} pending`,
     `  runs       ${report.runs.total} total (${report.runs.active} active)`,
-  ];
+  );
   // FR10.3: the schedules line only exists when the server answered.
   const schedules = report.checks.find((check) => check.name === "schedules");
   if (schedules !== undefined) lines.push(`  schedules  ${schedules.detail}`);
@@ -208,6 +235,9 @@ export async function doctorCommand(args: ParsedArgs, io: CliIo): Promise<number
     },
     paseo: info?.paseo ?? { reachable: false, error: serverError ?? "argos serve is not running" },
     providers: info?.providers ?? [],
+    // FR9: absent (not `[]`) without a server, so an unreachable-server report does not claim the
+    // registry is empty; the key's presence means "a server answered".
+    ...(info?.executors === undefined ? {} : { executors: info.executors }),
     pendingGates: info?.pendingGates ?? [],
     runs: info?.runs ?? { total: 0, active: 0 },
     checks,

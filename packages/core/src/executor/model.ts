@@ -38,6 +38,71 @@ const EXECUTOR_ALIASES: Readonly<Record<string, ExecutorId>> = {
   "herdr-core": "hc",
 };
 
+// ------------------------------------------------------------------ info (FR9)
+
+/**
+ * FR9: what an executor can do, as `GET /info` and `argos doctor` publish it.
+ *
+ * The four flags are deliberately coarse — a UI or an operator reads them, nothing branches on them
+ * in the control path:
+ *
+ * - `structuredOutput`: the adapter can hand back a schema-validated result (Paseo's
+ *   `outputSchema`); `false` means a playbook that declares `outputs` relies on the fenced-JSON
+ *   fallback only.
+ * - `quota`: the substrate reports provider quota, so a usage-limit hit becomes a target hop
+ *   (`provider_exhausted` when every target is blocked).
+ * - `interactiveBlocked`: the substrate can park a step on a human answer instead of finishing, so
+ *   the step deadline is what ends it.
+ * - `scheduleSafe`: the substrate can run unattended (no prompt, no terminal attached).
+ */
+export const ExecutorCapabilitiesSchema = z.strictObject({
+  structuredOutput: z.boolean(),
+  quota: z.boolean(),
+  interactiveBlocked: z.boolean(),
+  scheduleSafe: z.boolean(),
+});
+export type ExecutorCapabilities = z.infer<typeof ExecutorCapabilitiesSchema>;
+
+/**
+ * FR9: one registered executor, with its identity, reachability, and capabilities.
+ *
+ * `default` marks the substrate a run without an override starts on. `error` carries the adapter's
+ * own message when `reachable` is false (never a credential — the adapters redact).
+ */
+export const ExecutorInfoSchema = z.strictObject({
+  id: ExecutorIdSchema,
+  default: z.boolean(),
+  reachable: z.boolean(),
+  version: z.string().min(1).optional(),
+  capabilities: ExecutorCapabilitiesSchema,
+  error: z.string().optional(),
+});
+export type ExecutorInfo = z.infer<typeof ExecutorInfoSchema>;
+
+/**
+ * FR9: the documented capability default per substrate, used when the host was opened without a
+ * descriptor for that id (and as the base a descriptor overrides).
+ *
+ * Paseo: native structured output, provider quota, one-shot agents (nothing to answer), safe under
+ * a schedule. `hc` (herdr-core): terminals, so declared outputs go through the fenced-JSON
+ * fallback, no provider counters, an agent can ask for input (`blocked`), and a schedule is as safe
+ * as the step deadline — its terminal program must report status to finish early.
+ */
+export const DEFAULT_EXECUTOR_CAPABILITIES: Readonly<Record<ExecutorId, ExecutorCapabilities>> = {
+  paseo: {
+    structuredOutput: true,
+    quota: true,
+    interactiveBlocked: false,
+    scheduleSafe: true,
+  },
+  hc: {
+    structuredOutput: false,
+    quota: false,
+    interactiveBlocked: true,
+    scheduleSafe: true,
+  },
+};
+
 /**
  * FR1: the canonical id for a supplied value, or `undefined` when it is not an executor at all.
  *

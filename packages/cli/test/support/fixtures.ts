@@ -1,6 +1,7 @@
 /** Deterministic contract fixtures shared by the CLI golden tests and their stub server. */
 
 import type {
+  ExecutorInfo,
   GateSummary,
   RunDetail,
   RunSummary,
@@ -230,6 +231,15 @@ export const FORKED_RUN_SUMMARY: RunSummary = {
   },
 };
 
+/**
+ * FR8: the same run on the non-default substrate. Kept out of the committed goldens, so `ls.json`
+ * still proves a paseo run carries no `executor` key at all.
+ */
+export const HC_RUN_SUMMARY: RunSummary = {
+  ...RUN_SUMMARY,
+  executor: "hc",
+};
+
 /** A schedule whose last fire was refused; FR10.3 turns the doctor entry red for it. */
 export const REFUSED_SCHEDULE_SUMMARY: ScheduleSummary = {
   ...SCHEDULE_SUMMARY,
@@ -261,7 +271,35 @@ export function serverInfo(port: number): ServerInfo {
       { provider: "claude", enabled: true, models: ["claude/opus", "claude/sonnet"] },
       { provider: "codex", enabled: true, models: ["codex/gpt"] },
     ],
+    executors: [PASEO_EXECUTOR, HC_EXECUTOR],
     pendingGates: [PENDING_GATE],
     runs: { total: 1, active: 1 },
   };
 }
+
+/** FR9: the registry a stub server advertises — paseo is the default, hc is also reachable. */
+export const PASEO_EXECUTOR: ExecutorInfo = {
+  id: "paseo",
+  default: true,
+  reachable: true,
+  capabilities: {
+    structuredOutput: true,
+    quota: true,
+    interactiveBlocked: false,
+    scheduleSafe: true,
+  },
+};
+
+export const HC_EXECUTOR: ExecutorInfo = {
+  id: "hc",
+  default: false,
+  reachable: true,
+  version: "0.9.1",
+  capabilities: {
+    structuredOutput: false,
+    quota: false,
+    interactiveBlocked: true,
+    scheduleSafe: true,
+  },
+};
+

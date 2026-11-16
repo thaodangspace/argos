@@ -53,6 +53,10 @@ function RunRow({
         </Txt>
         <RunId theme={theme} id={run.runIdShort} />
         <Pill theme={theme} label={run.statusLabel} tone={run.tone} />
+        {/* FR8: only a run on a non-default substrate carries the badge. */}
+        {run.executor === undefined ? null : (
+          <Pill theme={theme} label={`executor ${run.executor}`} tone="neutral" />
+        )}
         <Txt theme={theme} color={muted} size={11} lines={1} style={{ marginLeft: "auto" }}>
           {run.durationLabel}
         </Txt>

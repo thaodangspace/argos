@@ -19,7 +19,9 @@ import { capture, makeTempHome, scrubVolatile, withEnv, type TempHome } from "./
 import {
   FORKED_RUN_DETAIL,
   FORKED_RUN_SUMMARY,
+  HC_RUN_SUMMARY,
   REFUSED_SCHEDULE_SUMMARY,
+  RUN_DETAIL,
   RUN_ID,
   SCHEDULE_ID,
   SCHEDULED_RUN_SUMMARY,
@@ -132,6 +134,31 @@ describe("argos run --json", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("unknown option --nope");
   });
+
+  it("sends --executor as the canonical id, and no key at all by default (FR3)", async () => {
+    const before = current().stub.requests.length;
+    // An alias is normalized by the CLI, so only `paseo`/`hc` ever reaches the server.
+    expect(await invoke(["run", "gated", "--executor", "herdr-core", "--json"])).toMatchObject({
+      code: 0,
+    });
+    const sent = current().stub.requests.slice(before).find((request) => request.path === "/runs");
+    expect(sent?.body).toMatchObject({ playbookId: "gated", executor: "hc" });
+
+    // The default path is byte-identical to before this field existed.
+    const plain = await invoke(["run", "gated", "--json"]);
+    expect(plain.code).toBe(0);
+    expect(current().stub.requests.at(-1)?.body).not.toHaveProperty("executor");
+  });
+
+  it("refuses an unknown --executor locally, with no request sent", async () => {
+    const before = current().stub.requests.length;
+    const result = await invoke(["run", "gated", "--executor", "nope", "--json"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--executor");
+    expect(result.stderr).toContain("paseo, hc");
+    expect(result.stdout).toBe("");
+    expect(current().stub.requests.length).toBe(before);
+  });
 });
 
 describe("read commands", () => {
@@ -140,6 +167,41 @@ describe("read commands", () => {
     expect(result.code).toBe(0);
     expectGolden("ls.json", result.json);
     expect((result.json as RunListResponse).runs).toHaveLength(1);
+    // FR8: a paseo run's JSON carries no `executor` key at all (the golden is unchanged).
+    expect(result.stdout).not.toContain('"executor"');
+  });
+
+  it("names a non-default executor in the human ls line (FR8)", async () => {
+    // The primary stub serves a paseo run: its line carries no marker at all.
+    const plain = capture();
+    expect(await runCli(["ls"], plain.io)).toBe(0);
+    expect(plain.stdout()).not.toContain("[executor");
+    // A record without the key still renders a substrate: the default one.
+    const plainStatus = capture();
+    expect(await runCli(["status", RUN_ID], plainStatus.io)).toBe(0);
+    expect(plainStatus.stdout()).toContain("executor  paseo");
+
+    const alternate = await startStubServer(undefined, {
+      runs: [HC_RUN_SUMMARY],
+      detail: { ...RUN_DETAIL, executor: "hc" },
+    });
+    const restore = withEnv({
+      ARGOS_HOME: current().home.home,
+      ARGOS_PORT: String(alternate.port),
+    });
+    try {
+      const listed = capture();
+      expect(await runCli(["ls"], listed.io)).toBe(0);
+      expect(listed.stdout()).toContain("[executor hc]");
+
+      // `argos status` spells the substrate out, defaulting to paseo when the record omits it.
+      const status = capture();
+      expect(await runCli(["status", RUN_ID], status.io)).toBe(0);
+      expect(status.stdout()).toContain("executor  hc");
+    } finally {
+      restore();
+      await alternate.close();
+    }
   });
 
   it("argos status --json", async () => {
@@ -291,6 +353,10 @@ describe("argos doctor --json", () => {
     expect(report.providers.map((provider) => provider.provider)).toEqual(["claude", "codex"]);
     expect(report.pendingGates).toHaveLength(1);
     expect(report.checks.find((check) => check.name === "server")?.ok).toBe(true);
+    // FR9: the executor registry, with the default marked.
+    expect(report.executors?.map((executor) => executor.id)).toEqual(["paseo", "hc"]);
+    expect(report.executors?.find((executor) => executor.default)?.id).toBe("paseo");
+    expect(report.executors?.find((executor) => executor.id === "hc")?.reachable).toBe(true);
     // FR10.3: the schedules entry, from the same live server.
     const schedules = report.checks.find((check) => check.name === "schedules");
     expect(schedules?.ok).toBe(true);
@@ -314,6 +380,20 @@ describe("argos doctor --json", () => {
     expect(captured.stdout()).toContain(
       "schedules  1 enabled, 0 paused, 0 refused; next 2026-11-13T07:00:00.000Z",
     );
+    // FR9: the executor line names the registry, the default, and each adapter's version.
+    expect(captured.stdout()).toContain("executors  paseo (default, reachable), hc (reachable, v0.9.1)");
+  });
+
+  it("omits the executors line when no server answered", async () => {
+    const { stub } = current();
+    await stub.close();
+    const result = await invoke(["doctor", "--json"]);
+    expect(result.code).toBe(0);
+    expect((result.json as DoctorReport).executors).toBeUndefined();
+
+    const human = capture();
+    expect(await runCli(["doctor"], human.io)).toBe(0);
+    expect(human.stdout()).not.toContain("executors");
   });
 
   it("fails the schedules check when an enabled schedule last fire was refused", async () => {
