@@ -1,0 +1,30 @@
+title: Demo — three steps on herdr-core
+description: |
+  A runnable demo of the multi-provider executor registry: the playbook pins
+  `executor: hc`, so the two agent steps run on herdr-core terminals (opencode)
+  and the third step is an ordinary Argos script step.
+
+  Prerequisites (see .argos/demo/README.md):
+    ~/.config/herdr-core/templates/opencode.md  (herdr-core template)
+    ~/.config/hc-demo/opencode/opencode.json    (isolated opencode config)
+
+executor: hc
+
+steps:
+  - id: hello_one
+    agent: { provider: hc, model: opencode }
+    prompt: "Say hello and nothing else. Do not use tools or read files."
+    timeout: 5m
+
+  - id: hello_two
+    agent: { provider: hc, model: opencode }
+    prompt: "Say hello again and nothing else. Do not use tools or read files."
+    needs: [hello_one]
+    timeout: 5m
+
+  - id: announce
+    script: hello.sh
+    needs: [hello_two]
+    # A script exposes stdout/stderr/exitCode only when the step declares them.
+    outputs:
+      stdout: { type: string }
