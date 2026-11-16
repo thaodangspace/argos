@@ -12,12 +12,12 @@ argos CLI ─────────────── HTTP ──┐
                                  ├──► argos serve (one process, one writer)
 Paseo plugin (panel + tools) ────┘        ├── $ARGOS_HOME/argos.sqlite   (pi-durable)
                                           ├── engine tasks: run / step / gate / script
-                                          └── Paseo adapter ──► Paseo daemon ──► agents
+                                          └── executor registry ──► Paseo daemon / herdr-core
 ```
 
 | Process | Owns | Never does |
 |---|---|---|
-| `argos serve` | SQLite, the pi-durable harness, the schedule runner (one timer over durable schedule documents), the Paseo client, the loopback RPC server, the bearer token | nothing outside its home; no agent work itself |
+| `argos serve` | SQLite, the pi-durable harness, the schedule runner (one timer over durable schedule documents), the executor registry (the Paseo client plus an optional herdr-core client), the loopback RPC server, the bearer token | nothing outside its home; no agent work itself |
 | `argos` CLI | argument parsing, HTTP calls, human/JSON rendering | open SQLite, import the durable host, launch agents |
 | Paseo plugin (`id: argos`) | a sidebar row, a run/gate panel, four chat tools | open SQLite, hold run state, keep a run alive, touch schedules |
 
@@ -51,14 +51,32 @@ server is created with an allow-list.
 │ playbook          discovery · schema · resolve · expand · validate · │
 │                   canonical hash · frozen JSON IR                    │
 ├──────────────────────────────────────────────────────────────────────┤
-│ adapters          Paseo port · fake · git (execFile) · script env    │
+│ adapters          Paseo port · hc port · fakes · git · script env    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 The arrows only point down. The engine imports no I/O, no timers, no durable or Paseo code, and
 `packages/core/src/engine/purity.test.ts` enforces it. `src/durable/` is the only importer of
-`@earendil-works/*`; `src/paseo/client.ts` is the only importer of `@getpaseo/*`; `src/git/` and
-`durable/tasks/script.ts` are the only places that spawn a process.
+`@earendil-works/*`; `src/paseo/client.ts` is the only importer of `@getpaseo/*`; `src/hc/client.ts`
+is the only user of `node:net`; `src/git/` and `durable/tasks/script.ts` are the only places that
+spawn a process.
+
+### Executor registry
+
+`argos serve` assembles one registry: `paseo` always, `hc` (herdr-core) when a real core answers
+its `hello`/`server.status` probe inside 5 s or when the test-only `ARGOS_FAKE_EXECUTOR=hc` selects
+the deterministic fake. `--default-executor <id>` (or `ARGOS_EXECUTOR`) picks the substrate a run
+without an override starts on.
+
+A run resolves its substrate once — request (`argos run --executor`, `POST /runs {executor}`) >
+schedule document > playbook (`executor:`, `defaults.executor`, `defaults/main.yaml`) > server
+default — and the resolved id is **frozen** in `RunRecord.executor` (omitted for `paseo`, so every
+older record is byte-identical). The child `argos.step` task commits the same id and looks it up in
+the registry, so a restart with a different `--default-executor` cannot move an in-flight run to
+another substrate. An id the registry does not carry is `executor_unavailable` before any task, run
+index entry, or worktree exists; `GET /info` and `argos doctor` list every registered executor with
+its reachability, version, and capabilities, and `argos serve` prints one startup line naming the
+registry.
 
 ### Playbook definition
 
@@ -318,6 +336,66 @@ are declared.
 The `ARGOS_FAKE_PASEO=1` executor is test-only. It can persist its agent registry and creation
 ledger in `$ARGOS_HOME` so an E2E restart adopts instead of duplicating.
 
+### herdr-core (`hc`)
+
+`src/hc/port.ts` is the port; `client.ts` is the only socket. herdr-core is a **terminal host**:
+JSON-RPC 2.0 over its Unix socket (a named pipe on Windows), plain mode — one JSON object per line
+in both directions, params by name. `hello {generation: 1}` is the handshake: a core that speaks
+another generation (or answers `incompatible`, `unsupported_generation`, `needs_update`,
+`hc_missing`, or nothing at all) is simply not registered, and `argos serve` prints one warning
+instead of failing to start. `HC_SOCKET`/`HC_SESSION` and the documented endpoint chain resolve the
+socket; Argos never spawns an `hc` CLI.
+
+A playbook targets hc the same way it targets Paseo — `agent: { provider: hc, model: <template> }`
+— and the canonical target is `hc/<template>`. `templates.list` is the catalog, so a template the
+core does not offer is the existing `model_unavailable` before any task exists; `herdr` and
+`herdr-core` are accepted spellings. `executor: hc` at the playbook top level, in `defaults.executor`,
+or in `defaults/main.yaml` pins the substrate, while `argos run --executor hc`, `POST /runs
+{executor}`, and `argos schedule add --executor hc` override it for one run or one schedule.
+
+One step is one `terminal.run` (argv = template + rendered prompt) with a deterministic
+`argos-<16 hex of the request id>` name and `argos/launch|run|step|attempt|home` labels. `launch`
+adopts before it creates: a label-filtered `terminal.list {all: true, labels: {argos/launch}}` finds
+a terminal a crashed lifetime made, and a `name_taken` reply adopts that name instead of retrying —
+so a restart never runs the step twice. `rm` is never passed at launch (the crash window needs the
+record), and the terminal is removed on settle, killed first when hc still calls it live.
+
+The prompt is delivered exactly once with no extra checkpoint state: `terminal.run` reports
+`first_message.sent`, and while hc still says "not sent, `turn === 0`" a `terminal.send {if:
+"idle"}` types it in — hc's own record is the durable fact. `status()` is one `terminal.get` per
+existing poll tick (`poll_ms`), never an event subscription: `working`/`idle`/`blocked` keep the
+step running (`blocked` carries a `blocked: <msg>` detail and the deadline still governs), and a
+`done` status or a finished terminal settles it with its exit code. Declared outputs are read from
+the terminal text with the shared fenced-JSON parser (see `docs/compat.md` row 37). A terminal that
+disappears gets exactly one handover relaunch (new name, `argos/handover=1`, a handover note), then
+`agent_missing`.
+
+| Port error | Argos code | HTTP |
+|---|---|---|
+| `HcTransportError` (connect/read/write/timeout/closed) | `executor_unreachable` | 503 |
+| `unreachable` kind | `executor_unreachable` | 503 |
+| `hc_missing`, `incompatible`, `unsupported_generation`, `needs_update`, `unavailable`, an unknown kind | `executor_unavailable` | 422 |
+| `not_found`, `machine_unknown` | `agent_missing` after one handover | 409 |
+| `name_taken` with no adoptable terminal | `launch_uncertain` | 409 |
+| `blocked`, `status_mismatch`, `finished`, `live`, `invalid_params`, `spawn_failed`, `conflict` | `step_failed` | 502 |
+
+**Completion depends on the program.** hc learns that work finished from the program's own OSC 7501
+status report. A template whose command never reports status never looks done, so its step runs to
+its deadline (`step_timeout`); the step deadline, not the adapter, is the bound. A launch-time
+transport failure fails the step (`executor_unreachable`) while poll-time unreachability parks it
+until the deadline, exactly as Paseo does. hc has no structured-output channel and no provider
+counters, so `usage`/cost stays absent for its steps.
+
+**Trust boundary.** hc runs the template's command as the same user, with that user's filesystem
+access, in the run's `cwd`/worktree. The socket is same-user trust: whoever can connect to it can
+start a terminal. Argos never passes an `env` block to `terminal.run`, so the program inherits the
+core's environment and never an `ARGOS_*` name; prompts and labels carry no token. Choosing `hc` is
+opt-in per run, per playbook, or per schedule.
+
+The `ARGOS_FAKE_EXECUTOR=hc` port is test-only (`src/hc/fake.ts`, file-backed under
+`ARGOS_FAKE_HC_DIR`): it opens no socket, settles every terminal with exit code 0, and can hold one
+step until a release file appears so the E2E can `SIGKILL` a server mid-step.
+
 ### Scripts, worktrees, read-only
 
 A script step is a real child process (`shell: false`), looked up under `.argos/scripts/` then the
@@ -346,6 +424,13 @@ lookup and create share one commit, so a retried request returns the same run. `
 commit-driven SSE with a snapshot frame and reconnecting clients; the plugin re-fetches on
 reconnect.
 
+The substrate is selected per run (`argos run --executor`, `POST /runs {executor}`), per schedule
+(`argos schedule add|edit --executor`) or per server (`argos serve --default-executor`), and a
+playbook can pin it with `executor:`. `GET /info` publishes the registry (`{id, default, reachable,
+version?, capabilities}`), which is what `argos doctor`'s `executors` line and the `argos ls` /
+`argos status` output render; `RunSummary.executor` is present only when the run is not on
+`paseo`.
+
 The scheduler's operator surface is `argos schedule add|ls|show|edit|pause|resume|run|rm` and
 `argos ls --schedule <id>`. A schedule's `cwd` (resolved `--cwd`, else the CLI's cwd) and `tz`
 (`--tz`, else the CLI process zone) come from that invocation, never from the server, so an
@@ -373,7 +458,7 @@ something*, not about containing what the run does.
 
 | Trusted | Untrusted / out of scope |
 |---|---|
-| The operator's account, `$ARGOS_HOME` (`0700`), the token file (`0600`), the `argos serve` process | A repository's playbook or script contents (they are code, reviewed like code), a compromised Paseo daemon or agent, a process running as the same user |
+| The operator's account, `$ARGOS_HOME` (`0700`), the token file (`0600`), the `argos serve` process | A repository's playbook or script contents (they are code, reviewed like code), a compromised Paseo daemon or agent, a local herdr-core core, a process running as the same user |
 | The local loopback listener | Remote network peers (the server binds `127.0.0.1` and never advertises itself) |
 | The CLI/plugin as the operator | Agents the run launches: they inherit only the granted environment and act inside the run `cwd`/worktree, but they are not kernel-isolated |
 
@@ -416,8 +501,9 @@ A script is deny-by-default (FR2). It inherits only the baseline (`PATH`, `HOME`
 like a credential), a `PREFIX_*` prefix (which never covers a name matching
 `/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i`), or `"*"` (every non-secret name — the old
 inherit-everything behavior, which `argos validate` warns about as `env_inherit_all`). The deny list
-(`ARGOS_PASEO_PASSWORD`, `ARGOS_HOME`, `ARGOS_PORT`, `ARGOS_PASEO_URL`, the `ARGOS_FAKE_PASEO*`
-knobs) is never passed, even when named. `NODE_OPTIONS`, `SSH_AUTH_SOCK`, and `GIT_*` are absent
+(`ARGOS_PASEO_PASSWORD`, `ARGOS_HOME`, `ARGOS_PORT`, `ARGOS_EXECUTOR`, `ARGOS_PASEO_URL`, and the
+`ARGOS_FAKE_PASEO*`/`ARGOS_FAKE_EXECUTOR`/`ARGOS_FAKE_HC_*` test knobs) is never passed, even when
+named. `NODE_OPTIONS`, `SSH_AUTH_SOCK`, and `GIT_*` are absent
 unless granted; a run cannot "inherit" a credential by accident. Agents launched by a step see the
 same filtered environment.
 
@@ -509,3 +595,6 @@ tool, so an agent cannot register, edit, or run one.
 - The approved spec and plan in `brain/spec/2026/Nov/11/03_*`.
 - `brain/spec/2026/Nov/13/01_spec_argos_fork_at_step.md` and `01_impl_argos_fork_at_step.md` —
   fork-at-step: the problem, the closure rule, and the phase plan it was built from.
+- `brain/spec/2026/Nov/16/01_spec_argos_multi_provider_runs.md` and
+  `01_impl_argos_multi_provider_runs.md` — the executor registry, the frozen per-run substrate, and
+  the herdr-core adapter.
