@@ -1,0 +1,8 @@
+# FR4 fixture: a playbook that pins its substrate. Loaded by explicit file
+# (`loadPlaybook(FIXTURES, "_with-executor", { file })`) so the flat directory does not need to be
+# a discovery root; `argos validate` is run against this file too.
+title: Runs on herdr-core
+executor: hc
+steps:
+  - id: work
+    prompt: Do the work.

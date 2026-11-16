@@ -4,6 +4,8 @@
  * be JSON round-tripped byte-for-byte and its `hash` is stable across machines.
  */
 
+import type { ExecutorId } from "../executor/model.js";
+
 /** Agent settings after tier expansion and precedence resolution. */
 export interface AgentSettingsIR {
   readonly provider: string;
@@ -227,6 +229,11 @@ export interface ProvidersIR {
 export interface DefaultsIR {
   readonly agent?: AgentSettingsIR;
   readonly isolation?: IsolationIR;
+  /**
+   * FR4: the playbook's default substrate, resolved from `defaults.executor` and the repository
+   * `defaults/main.yaml`. Omitted when it is `paseo`, exactly like `PlaybookIR.executor`.
+   */
+  readonly executor?: ExecutorId;
   readonly labels: Readonly<Record<string, string>>;
 }
 
@@ -242,6 +249,12 @@ export interface PlaybookIR {
   readonly outputs: Readonly<Record<string, OutputDefIR>>;
   readonly concurrency?: number;
   readonly isolation?: IsolationIR;
+  /**
+   * FR4: the substrate this playbook runs on by default (FR2 puts a request/schedule override
+   * above it and the server default below). Absent when nothing names a non-default executor, so
+   * every playbook that does not declare one keeps its IR bytes and hash.
+   */
+  readonly executor?: ExecutorId;
   readonly steps: readonly StepIR[];
   /** How the playbook can end when used as a sub-playbook (FR10). Empty = implicit success/failure. */
   readonly outcomes: readonly string[];
