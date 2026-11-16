@@ -1,11 +1,14 @@
 # Argos
 
-Durable YAML playbook engine for [Paseo](https://github.com/getpaseo) agents.
+Durable YAML playbook engine for [Paseo](https://github.com/getpaseo) agents — or herdr-core (`hc`)
+terminals.
 
 A repository declares its workflow as YAML (`.argos/playbooks/*.yaml`); a deterministic engine
-executes it against agents launched through Paseo, with parallel steps, human gates, loops,
-script steps, crash-safe resumption, and cron schedules that fire playbooks unattended. **No LLM
-decides control flow** — models only do the work inside a step.
+executes it against agents launched through a named **executor**, with parallel steps, human gates,
+loops, script steps, crash-safe resumption, and cron schedules that fire playbooks unattended.
+Paseo is the default and unchanged; `hc` runs the same playbook on herdr-core terminals, and the
+substrate a run started on is frozen in its run record. **No LLM decides control flow** — models
+only do the work inside a step.
 
 - [docs/architecture.md](docs/architecture.md) — processes, layers, durability model, scheduler.
 - [docs/compat.md](docs/compat.md) — compatibility with paseo-playbooks and its limits.
@@ -13,9 +16,12 @@ decides control flow** — models only do the work inside a step.
 ## Requirements
 
 - Node `>=22.13` (Argos uses the built-in `node:sqlite`, which needs no flag from 22.13 on).
-- A running Paseo daemon (`ws://127.0.0.1:6767/ws` by default) with at least one provider ready.
+- A running Paseo daemon (`ws://127.0.0.1:6767/ws` by default) with at least one provider ready —
+  only for Paseo runs; an `hc` run never touches it.
 - `git` for worktree isolation and the read-only guard.
 - Paseo `>=0.15.3` for the panel/chat-tool plugin.
+- Optional: a running herdr-core core (`hc`, protocol generation 1) for `executor: hc` runs. Argos
+  talks to its socket (`HC_SOCKET`, or `HC_SESSION`'s socket) and never spawns `hc` itself.
 
 ## Install
 
@@ -26,8 +32,8 @@ npx @thaodangspace/argos --help
 ```
 
 Both published packages are public on npm: `@thaodangspace/argos` (the CLI) and
-`@thaodangspace/argos-core` (the library: loader, engine, durable host, RPC server, Paseo
-adapter). The Paseo plugin is installed from a checkout, not through npm (see
+`@thaodangspace/argos-core` (the library: loader, engine, durable host, RPC server, Paseo and
+herdr-core adapters). The Paseo plugin is installed from a checkout, not through npm (see
 [Paseo plugin](#paseo-plugin)).
 
 ## Build from source
@@ -73,8 +79,15 @@ reopens/resumes any interrupted runs.
 ```sh
 argos serve                 # 127.0.0.1:7676
 argos serve --port 7800     # explicit port
-argos doctor                # storage, schema, port, Paseo, providers, pending gates
+argos serve --default-executor hc   # paseo and hc are registered; hc is the default
+argos doctor                # storage, schema, port, Paseo, providers, executors, gates
 ```
+
+`argos serve` builds the executor registry at startup: `paseo` always, `hc` when a core answers
+`hello`/`server.status` within 5 s (otherwise one warning and `hc` is left out). It prints one line
+naming the registry, `[argos] executors: paseo (default), hc`, and `argos doctor` reports each
+executor's reachability and version. (The default is `--default-executor`, else `ARGOS_EXECUTOR`,
+else `paseo`.)
 
 The CLI and plugin talk HTTP to this process; they never open the database. If the server is not
 running, `argos run` tells you to start it and exits with code `3`.
@@ -148,6 +161,66 @@ The wake time is computed once and stored durably, so restarting `argos serve` n
 nor shortens the pause (a `sleep` script is killed by a restart and starts over). A delay step
 has no step timeout and takes no `timeout`, `retries`, `prompt`, `script`, or `outputs`.
 
+## Executors: Paseo or herdr-core
+
+A run executes on exactly one **executor**. Paseo is the default and behaves exactly as before;
+`hc` runs the same playbook on herdr-core terminals. The id is resolved once, at start:
+
+`argos run --executor` / `POST /runs {executor}` → the schedule's `executor` → the playbook's
+`executor` → the server's default.
+
+```yaml
+# .argos/playbooks/hello.yaml — or `executor:` in defaults or defaults/main.yaml
+executor: hc
+
+steps:
+  - id: hello
+    agent: { provider: hc, model: opencode }   # target = hc/<template>
+    prompt: "Say hello and nothing else."
+  - id: announce
+    needs: [hello]
+    script: announce.sh
+```
+
+`herdr`/`herdr-core` normalize to `hc`. The resolved id is written into the run record (the key is
+omitted for `paseo`, so older records stay byte-identical), which means a restart with a different
+`--default-executor` cannot move an in-flight run, `argos retry` keeps it, and `argos fork` inherits
+it. An id the server does not carry is `executor_unavailable` (422) **before** any task, worktree,
+or run-index entry exists.
+
+```sh
+argos run hello --executor hc        # override for one run (an unknown id exits 1, no request)
+argos schedule add nightly --cron "0 3 * * *" --executor hc   # pin an unattended run
+argos ls                             # appends `[executor hc]` for a non-default run
+```
+
+### herdr-core targets and terminals
+
+An `hc` step targets a **template**: `agent: { provider: hc, model: <name> }` → `hc/<name>`. The
+catalog is `templates.list`, so a template the core does not offer is `model_unavailable` before any
+terminal exists. Templates are Markdown files with YAML frontmatter (`name`, `description`,
+`command`) under `~/.config/herdr-core/templates/<name>.md`; `hc templates` lists them.
+
+Argos creates one terminal per step attempt (name `argos-<16 hex>`, labels `argos/launch`,
+`argos/run`, `argos/step`, `argos/attempt`, `argos/home`), types the prompt into it, and removes it
+when the step settles. Terminals are **headless**: they belong to the core, not to a Herdr
+window/tab, so during a run they appear in `hc ls` (and can be watched with
+`hc attach --observe <name>`) but not as a tab in the app.
+
+- Completion comes from the program's own OSC 7501 status (or its exit code). A program that never
+  reports status never looks finished and the step runs to its `timeout` (`step_timeout`), so a
+  template whose agent does not report status needs a small wrapper that emits `state=working` /
+  `state=done`.
+- `blocked` is reported as still running (`detail: "blocked: <msg>"`), never as a gate in v1; the
+  step deadline still governs.
+- Declared `outputs` use the same fenced-JSON fallback as Paseo; `usage`/cost stays absent.
+- A lost terminal gets one handover relaunch, then `agent_missing`; a transport failure is
+  `executor_unreachable` (503) — failing the step at launch, parking it until the deadline at poll
+  time.
+
+A runnable example lives in [`.argos/demo/README.md`](.argos/demo/README.md) (two opencode agent
+steps and one script step, all on `hc`).
+
 ## Schedules
 
 `argos serve` can fire a playbook on a cron expression, so recurring work is one normal run per
@@ -155,13 +228,14 @@ fire instead of an endless loop run:
 
 ```sh
 argos schedule add nightly --cron "0 7 * * *" --cwd ~/code/repo
+argos schedule add nightly --cron "0 3 * * *" --cwd ~/code/repo --executor hc
 argos schedule ls                     # state, cron, tz, next fire, last fire
 argos schedule show nightly           # policy, fire log, recent runs
 argos schedule run nightly            # fire now, without touching nextFireAt
 argos schedule pause nightly          # and `resume <id>` to re-arm
 argos schedule rm nightly
 argos ls --schedule nightly           # only the runs that schedule started
-argos doctor                          # storage, providers, gates, schedules
+argos doctor                          # storage, providers, executors, gates, schedules
 ```
 
 The playbook id is the default schedule id (`--id` overrides it), and `--tz` defaults to the CLI's
@@ -170,7 +244,9 @@ IANA zone are validated when the schedule is added, together with the same dry s
 `argos run` performs — a broken playbook, a missing script, or a bad `cwd` is refused immediately.
 Each fire creates a separate, normal run whose record carries
 `trigger: {kind: "schedule", scheduleId, fireAt, reason}`, so it shows up in `argos ls` /
-`argos status` like any other run.
+`argos status` like any other run. `--executor` pins the substrate for every fire (the same dry
+check refuses one the server cannot run); without it, each fire resolves the playbook then the
+server default, so changing the default moves an unpinned schedule.
 
 `--catch-up` decides what happens after a gap (a closed laptop, a stopped server): `all` (default)
 fires once for the latest missed fire time, `0` only within two minutes, and a duration such as
@@ -234,20 +310,20 @@ the step runs (see [docs/compat.md](docs/compat.md)).
 ## Development
 
 ```sh
-npm test            # build + 600+ loader/engine/host/RPC/plugin tests, no external processes
+npm test            # build + 900+ loader/engine/host/adapters/RPC/plugin tests, no external processes
 npm run typecheck   # tsc for every workspace and test graph
-npm run test:e2e    # build + real `argos serve`, SIGKILL, restart (step, gate, schedule)
+npm run test:e2e    # build + real `argos serve`, SIGKILL, restart (step, gate, schedule, delay, hc)
 ```
 
 `npm test` intentionally excludes `test/e2e`: that suite spawns real processes and runs in its own
-CI job. It uses `ARGOS_FAKE_PASEO=1` (test-only; never for real work) so no daemon or model is
-needed.
+CI job. It uses `ARGOS_FAKE_PASEO=1` and `ARGOS_FAKE_EXECUTOR=hc` (test-only; never for real work)
+so no daemon, opencode or model is needed.
 
 ## Layout
 
 | Workspace | Package | Contents |
 |---|---|---|
-| `packages/core` | `@thaodangspace/argos-core` | loader/IR, pure engine, durable host, RPC server, Paseo adapter (npm) |
+| `packages/core` | `@thaodangspace/argos-core` | loader/IR, pure engine, durable host, RPC server, Paseo and herdr-core adapters (npm) |
 | `packages/cli` | `@thaodangspace/argos` | `argos` CLI (HTTP client of `argos serve`; npm, `bin: argos`) |
 | `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel and chat tools (HTTP client; private, installed by path) |
 

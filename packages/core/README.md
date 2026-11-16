@@ -1,8 +1,8 @@
 # @thaodangspace/argos-core
 
 Library core of [Argos](https://github.com/thaodangspace/argos) — the durable YAML playbook engine
-for [Paseo](https://github.com/getpaseo) agents. Most users want the CLI instead:
-`npm i -g @thaodangspace/argos`.
+for [Paseo](https://github.com/getpaseo) agents and herdr-core (`hc`) terminals. Most users want the
+CLI instead: `npm i -g @thaodangspace/argos`.
 
 This package has no entry in the playbook control path that consults a model: readiness,
 transitions, loop limits, gates, retries, and timeouts are decided by a pure reducer. A model only
@@ -11,20 +11,25 @@ does the work inside a step.
 ## Subpaths
 
 Everything is opt-in — the package root exports the error codes, the path helpers, and the
-`playbook`/`engine` barrels, but never `durable`/`paseo`/`git`/`rpc`. A consumer therefore cannot
-accidentally pull the SQLite owner into the wrong process.
+`playbook`/`engine` barrels, but never `durable`/`paseo`/`hc`/`git`/`rpc`. A consumer therefore
+cannot accidentally pull the SQLite owner or a socket into the wrong process.
 
 | Import | Contains |
 |---|---|
 | `@thaodangspace/argos-core` | error codes, `$ARGOS_HOME` paths, plus `playbook` and `engine` |
 | `@thaodangspace/argos-core/playbook` | YAML loader, resolver, sub-playbook expansion, validation, hashing, frozen IR |
 | `@thaodangspace/argos-core/engine` | the pure decision layer (`next(record, event)` → record + effects); no I/O, no timers |
-| `@thaodangspace/argos-core/durable` | `ArgosHost`: the one SQLite owner, run lifecycle, schedules, worktrees, scripts |
+| `@thaodangspace/argos-core/durable` | `ArgosHost`: the one SQLite owner, run lifecycle, executor registry, schedules, worktrees, scripts |
 | `@thaodangspace/argos-core/paseo` | Paseo adapter, target/quota policy, deterministic fake |
+| `@thaodangspace/argos-core/hc` | herdr-core adapter (JSON-RPC over its socket, `hc/<template>` targets, deterministic fake) |
 | `@thaodangspace/argos-core/git` | the only `node:child_process` user (worktrees, snapshots) |
 | `@thaodangspace/argos-core/rpc` | HTTP contracts + client; safe for CLIs and plugins |
 | `@thaodangspace/argos-core/rpc/contracts` | Node-free contracts only |
 | `@thaodangspace/argos-core/rpc/server` | the RPC server that wraps the durable host (serve-only) |
+
+`src/executor/model.ts` (the canonical executor ids and their normalizer) and
+`src/executor/output.ts` (the shared structured-result parser) are internal to the package: they are
+imported by the durable host and both adapters, not published as their own subpaths.
 
 ## Example
 
