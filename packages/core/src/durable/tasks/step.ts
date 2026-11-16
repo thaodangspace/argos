@@ -30,6 +30,7 @@
 import { defineTask } from "@earendil-works/pi-durable";
 
 import { isArgosError, type ArgosErrorCode } from "../../errors.js";
+import { DEFAULT_EXECUTOR_ID, type ExecutorId } from "../../executor/model.js";
 import type { OutputDefIR, Scalar } from "../../playbook/ir.js";
 import { retryBackoffMs } from "../../engine/index.js";
 import type { GitRunner } from "../../git/exec.js";
@@ -68,6 +69,12 @@ export interface StepTaskInput {
   readonly attempt: number;
   readonly requestId: string;
   readonly cwd: string;
+  /**
+   * FR7: the substrate the run froze at start (`RunRecord.executor`, `paseo` when absent). The
+   * task commits it to its checkpoint in `locate`, so a restart resumes the same executor even
+   * when the server's default changed.
+   */
+  readonly executor?: string;
   /** D3 step poll default 3000 ms (resolved by the run task from the frozen IR). */
   readonly pollMs: number;
   readonly timeoutMs: number;
@@ -99,6 +106,11 @@ export interface StepTaskInput {
 
 export interface StepCheckpointFields {
   readonly requestId: string;
+  /**
+   * FR7: the executor this attempt runs on, copied from the task input in `locate`. Optional, so
+   * a checkpoint written before the registry existed keeps working and means `paseo`.
+   */
+  readonly executor?: string;
   /** Current local attempt (may exceed the input attempt after a retry). */
   readonly attempt: number;
   readonly label: string;
@@ -326,6 +338,9 @@ function retryCheckpoint(
     polls: 0,
     launchAttempted: false,
     exhausted: checkpoint.exhausted,
+    // FR7: a local retry stays on the run's frozen substrate; a fresh checkpoint must not fall
+    // back to the server default.
+    ...(checkpoint.executor === undefined ? {} : { executor: checkpoint.executor }),
     // D8: the "before" snapshot belongs to the whole read-only step, not to one attempt, so a retry
     // must not forget it (every attempt has to leave the tree alone).
     ...(checkpoint.snapshotBefore === undefined ? {} : { snapshotBefore: checkpoint.snapshotBefore }),
@@ -386,7 +401,12 @@ function quotaWait(
 // ------------------------------------------------------------------ definition
 
 export interface StepTaskOptions {
-  readonly executor: StepExecutor;
+  /**
+   * FR2: every registered executor, keyed by canonical id. `paseo` is always present; a
+   * checkpoint naming an id that is not here settles the step `executor_unavailable` (FR6) instead
+   * of crashing the task.
+   */
+  readonly executors: Readonly<Partial<Record<ExecutorId, StepExecutor>>>;
   /** Injected git port for the D8 snapshots (tests); defaults to the `execFile` runner. */
   readonly git?: GitRunner;
 }
@@ -395,9 +415,25 @@ export interface StepTaskOptions {
 export type StepTaskDefinition = ReturnType<typeof createStepTaskDefinition>;
 
 export function createStepTaskDefinition(options: StepTaskOptions) {
-  const { executor } = options;
+  const { executors } = options;
   const snapshot = (cwd: string): Promise<GitSnapshot> =>
     takeSnapshot(cwd, { ...(options.git === undefined ? {} : { git: options.git }) });
+
+  /** FR7: the executor a checkpoint names; `undefined` when this host cannot run it. */
+  const executorFor = (checkpoint: StepCheckpoint): StepExecutor | undefined =>
+    executors[(checkpoint.executor ?? DEFAULT_EXECUTOR_ID) as ExecutorId];
+
+  /**
+   * FR6: the checkpoint of a step whose substrate is gone. It settles as a **completed** task with
+   * `executor_unavailable` (a step failure), exactly like `step_timeout`; the task never faults
+   * and the run record keeps the stable code.
+   */
+  const executorUnavailable = (checkpoint: StepCheckpoint): StepCheckpoint => ({
+    ...doneCheckpoint(checkpoint, { state: "done", errorCode: "executor_unavailable" }),
+    detail: `executor ${JSON.stringify(
+      checkpoint.executor ?? DEFAULT_EXECUTOR_ID,
+    )} is not registered on this host`,
+  });
 
   return defineTask<StepTaskInput, StepCheckpoint, StepTaskResult>({
     name: "argos.step",
@@ -421,6 +457,9 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           ...task.state.checkpoint,
           phase: "launch",
           deadlineAt: now + task.input.timeoutMs,
+          // FR7: the substrate is frozen in the checkpoint here, before any executor call, so a
+          // crash/restart resumes the same one even if the server's default has changed.
+          ...(task.input.executor === undefined ? {} : { executor: task.input.executor }),
         };
         // D8: the "before" snapshot must be committed before the agent exists. A read-only step in
         // a directory that is not a git working tree cannot be verified, so it fails instead of
@@ -443,6 +482,15 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
       launch: async (task, runtime, context) => {
         let checkpoint = task.state.checkpoint;
         const now = runtime.now();
+        const executor = executorFor(checkpoint);
+        if (executor === undefined) {
+          // FR6: no adapter for the frozen id. A step failure, committed before any launch intent.
+          await runtime.commit(
+            () => ({ status: "running", checkpoint: executorUnavailable(checkpoint) }),
+            context,
+          );
+          return;
+        }
         // Commit the launch intent *before* any executor call. A re-entry (crash window) then
         // knows a create may already have happened; with an unsupported label filter the adapter
         // refuses to blind-relaunch (`launch_uncertain`).
@@ -490,6 +538,16 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
       await: async (task, runtime, context) => {
         const checkpoint = task.state.checkpoint;
         const now = runtime.now();
+        const executor = executorFor(checkpoint);
+        if (executor === undefined) {
+          // FR6: a restart on a host that no longer registers the frozen id fails the step with
+          // the stable code instead of polling an executor that does not exist.
+          await runtime.commit(
+            () => ({ status: "running", checkpoint: executorUnavailable(checkpoint) }),
+            context,
+          );
+          return;
+        }
         const agentId = checkpoint.agentId;
         if (agentId === undefined) {
           // Defensive: a checkpoint without an agent never polls.
@@ -590,6 +648,17 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
 
       collect: async (task, runtime, context) => {
         const checkpoint = task.state.checkpoint;
+        const executor = executorFor(checkpoint);
+        if (executor === undefined) {
+          // FR6: the adapter is gone between the poll and the collect. Report the stable code
+          // rather than a success nothing can substantiate.
+          const result = buildResult(task.input, checkpoint, { errorCode: "executor_unavailable" });
+          await runtime.commit(
+            () => ({ status: "terminal", outcome: { status: "completed", result } }),
+            context,
+          );
+          return;
+        }
         const base: CollectResult =
           checkpoint.status === undefined || checkpoint.status.state === "running"
             ? { ...(checkpoint.errorCode === undefined ? {} : { errorCode: checkpoint.errorCode }) }

@@ -20,6 +20,7 @@ import {
   type RunRecord,
 } from "../../engine/index.js";
 import { resolveTimeoutValue } from "../../engine/timeouts.js";
+import { DEFAULT_EXECUTOR_ID } from "../../executor/model.js";
 import type { ProvidersIR } from "../../playbook/ir.js";
 import {
   appendRunHistory,
@@ -283,6 +284,9 @@ function stepInputFor(record: RunRecord, effect: Extract<Effect, { type: "dispat
     attempt: effect.attempt,
     requestId: effect.requestId,
     cwd: record.worktree?.path ?? record.cwd,
+    // FR7: the frozen substrate travels with the child, so the step task commits the same executor
+    // to its checkpoint and a restart resumes on it.
+    executor: record.executor ?? DEFAULT_EXECUTOR_ID,
     pollMs: definition.pollMs,
     timeoutMs: stepTimeoutMs(definition, record.inputs),
     retries: definition.retries,

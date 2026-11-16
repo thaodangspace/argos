@@ -75,6 +75,9 @@ export function planAfterRun(parent: RunRecord, after: AfterIR, now: number): Pl
     cwd: parent.cwd,
     now,
     ...(parent.worktree === undefined ? {} : { worktree: parent.worktree }),
+    // FR14: an after-task runs on the parent's frozen substrate. Conditional, so a `paseo`
+    // parent's child record keeps the key absent and stays byte-identical to before.
+    ...(parent.executor === undefined ? {} : { executor: parent.executor }),
     // FR3.5: an after-task runs the same pinned scripts as the run that spawned it, so a script
     // fixed in the parent's worktree cannot slip into an after-task unnoticed.
     ...(parent.scripts === undefined ? {} : { scripts: parent.scripts }),

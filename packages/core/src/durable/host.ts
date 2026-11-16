@@ -36,6 +36,11 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 import { ArgosError, type ArgosIssue } from "../errors.js";
+import {
+  DEFAULT_EXECUTOR_ID,
+  executorIdFor,
+  type ExecutorId,
+} from "../executor/model.js";
 import type { GitRunner } from "../git/exec.js";
 import { createRunWorktree, assertRunBaseClean, reattachRunWorktree, runWorktreeBranch } from "../git/worktree.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
@@ -133,6 +138,12 @@ export class ArgosHost {
   readonly #harness: Harness;
   readonly #context: Context;
   readonly #executor: StepExecutor;
+  /** FR2: every registered executor, keyed by canonical id (`paseo` always present). */
+  readonly #executors: Readonly<Partial<Record<ExecutorId, StepExecutor>>>;
+  /** FR2: the substrate a run without an override starts on. */
+  readonly #defaultExecutor: ExecutorId;
+  /** FR24/FR18: per-executor target catalogs; `paseo` falls back to `#modelCatalog`. */
+  readonly #catalogs: Readonly<Partial<Record<ExecutorId, TargetCatalog>>>;
   readonly #clock: Clock;
   readonly #models: Models;
   readonly #modelCatalog: TargetCatalog | undefined;
@@ -153,6 +164,9 @@ export class ArgosHost {
     harness: Harness;
     context: Context;
     executor: StepExecutor;
+    executors: Readonly<Partial<Record<ExecutorId, StepExecutor>>>;
+    defaultExecutor: ExecutorId;
+    catalogs: Readonly<Partial<Record<ExecutorId, TargetCatalog>>>;
     clock: Clock;
     models: Models;
     modelCatalog?: TargetCatalog;
@@ -167,6 +181,9 @@ export class ArgosHost {
     this.#harness = init.harness;
     this.#context = init.context;
     this.#executor = init.executor;
+    this.#executors = init.executors;
+    this.#defaultExecutor = init.defaultExecutor;
+    this.#catalogs = init.catalogs;
     this.#clock = init.clock;
     this.#models = init.models;
     this.#modelCatalog = init.modelCatalog;
@@ -215,6 +232,14 @@ export class ArgosHost {
     const clock: Clock = options.clock ?? systemClock;
     const context = BACKGROUND_CONTEXT;
     const models = options.models ?? createStubModels();
+    // FR2: the registry is assembled here, once. `executor` stays the `paseo` entry so every
+    // existing call site (and `ARGOS_FAKE_PASEO`) keeps its meaning; `executors` adds the rest.
+    const executors: Partial<Record<ExecutorId, StepExecutor>> = {
+      [DEFAULT_EXECUTOR_ID]: options.executor,
+      ...options.executors,
+    };
+    const defaultExecutor: ExecutorId = options.defaultExecutor ?? DEFAULT_EXECUTOR_ID;
+    const catalogs: Partial<Record<ExecutorId, TargetCatalog>> = { ...options.catalogs };
 
     // `$ARGOS_HOME` is known before any task exists: the run task threads it to script children,
     // so a global script under `<home>/scripts` resolves without touching the run record.
@@ -223,7 +248,7 @@ export class ArgosHost {
     let ownsPid = false;
 
     const stepTask = createStepTaskDefinition({
-      executor: options.executor,
+      executors,
       ...(options.git === undefined ? {} : { git: options.git }),
     });
     const gateTask = createGateTaskDefinition();
@@ -288,6 +313,9 @@ export class ArgosHost {
       harness,
       context,
       executor: options.executor,
+      executors,
+      defaultExecutor,
+      catalogs,
       clock,
       models,
       ...(options.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
@@ -469,14 +497,54 @@ export class ArgosHost {
   }
 
   /**
+   * FR2: which substrate this start uses. Today: the request override (which also carries a
+   * schedule's stored value), else the server default.
+   *
+   * Phase 2 inserts `PlaybookIR.executor` between the override and the default here — the seam is
+   * deliberate: the record is written once, from this one function, and never re-resolved.
+   */
+  #resolveExecutorId(input: StartRunInput): ExecutorId {
+    if (input.executor === undefined) return this.#defaultExecutor;
+    const id = executorIdFor(input.executor);
+    // FR6: anything the host cannot run is `executor_unavailable`; the request-level
+    // `invalid_request` nuance for an unnormalizable id belongs to the CLI/RPC surface (FR3).
+    if (id === undefined) this.#refuseExecutor(input.executor);
+    return id;
+  }
+
+  /** FR6/FR17: an id with no registered adapter refuses the start before anything exists. */
+  #assertExecutorRegistered(id: ExecutorId): void {
+    if (this.#executors[id] === undefined) this.#refuseExecutor(id);
+  }
+
+  /** The one refusal shape: names the id and the registered set, never a value or a secret. */
+  #refuseExecutor(requested: string): never {
+    const registered = Object.keys(this.#executors);
+    throw new ArgosError(
+      "executor_unavailable",
+      `executor ${JSON.stringify(requested)} is not registered; registered executors: ${
+        registered.length === 0 ? "(none)" : registered.join(", ")
+      }`,
+    );
+  }
+
+  /** FR24/FR18: one executor's target catalog; `paseo` keeps the injected `modelCatalog`. */
+  #catalogFor(id: ExecutorId): TargetCatalog | undefined {
+    return this.#catalogs[id] ?? (id === DEFAULT_EXECUTOR_ID ? this.#modelCatalog : undefined);
+  }
+
+  /**
    * The read-only front half of a start (FR4.1), in this exact order:
    *
-   * 1. the model-catalog check (FR24), before any task exists;
+   * 0. the executor (FR2/FR6) — resolved and checked for registration first, so an id that cannot
+   *    run leaves no task, no index entry, and no checkout behind (and the dry check inherits it);
+   * 1. the executor's model-catalog check (FR24), before any task exists;
    * 2. the D15 idempotency fast path, which may return the original receipt instead;
    * 3. the run id (`input.id`, else a fresh ULID);
    * 4. the FR3 script pins, before the worktree exists;
    * 5. the worktree (FR23/D9), or — for `dryRun` — the same dirtiness refusal without creating it;
-   * 6. the run record, with the optional schedule `trigger` (FR8.1).
+   * 6. the run record, with the frozen `executor` (FR5) and the optional schedule `trigger`
+   *    (FR8.1).
    *
    * It never writes. A refusal therefore leaves no task, no index entry, and no checkout behind.
    */
@@ -485,9 +553,12 @@ export class ArgosHost {
     options: { readonly dryRun: boolean },
   ): Promise<PrepareRunOutcome> {
     if (this.#closed) throw new ArgosError("storage_locked", "argos host is closed");
+    const executorId = this.#resolveExecutorId(input);
+    this.#assertExecutorRegistered(executorId);
     // FR24: refuse an off-catalog run before any task exists, naming every unknown target.
-    if (this.#modelCatalog !== undefined) {
-      const missing = this.#modelCatalog.missingTargets(input.ir, input.inputs);
+    const catalog = this.#catalogFor(executorId);
+    if (catalog !== undefined) {
+      const missing = catalog.missingTargets(input.ir, input.inputs);
       if (missing.length > 0) {
         throw new ArgosError(
           "model_unavailable",
@@ -523,6 +594,7 @@ export class ArgosHost {
       inputs: input.inputs,
       cwd: input.cwd,
       now,
+      executor: executorId,
       ...(worktree === undefined ? {} : { worktree }),
       ...(scripts === undefined ? {} : { scripts }),
       ...(input.deadline === undefined ? {} : { deadline: input.deadline }),
@@ -1163,8 +1235,11 @@ export class ArgosHost {
       parent.playbookId,
       options.home === undefined ? {} : { home: options.home },
     );
-    if (this.#modelCatalog !== undefined) {
-      const missing = this.#modelCatalog.missingTargets(ir, parent.inputs);
+    // Phase 4 owns the fork's executor validation/inheritance; the catalog lookup already follows
+    // the parent's frozen substrate so an `hc` fork is not checked against Paseo's providers.
+    const catalog = this.#catalogFor(parent.executor ?? DEFAULT_EXECUTOR_ID);
+    if (catalog !== undefined) {
+      const missing = catalog.missingTargets(ir, parent.inputs);
       if (missing.length > 0) {
         throw new ArgosError(
           "model_unavailable",
