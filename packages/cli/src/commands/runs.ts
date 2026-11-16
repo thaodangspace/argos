@@ -1,7 +1,7 @@
 /** `argos ls` (with `--schedule`), `argos status <runId>`, `argos gates` (FR25, FR8.4). */
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
-import { EXIT_RUNTIME, type CliIo } from "../output.js";
+import { EXIT_RUNTIME, formatCost, formatUsage, type CliIo } from "../output.js";
 import { withRpc } from "../rpc-command.js";
 import type { GateSummary, RunDetail, RunSummary } from "@thaodangspace/argos-core/rpc";
 
@@ -9,10 +9,23 @@ function when(at: number | undefined): string {
   return at === undefined ? "-" : new Date(at).toISOString();
 }
 
+/** The cost component of an aggregate usage record, if the executor reported one. */
+function costLabel(usage: Readonly<Record<string, number>> | undefined): string | undefined {
+  const total = usage?.["totalCostUsd"];
+  return total === undefined ? undefined : formatCost(total);
+}
+
 function lsHuman(runs: readonly RunSummary[]): string {
   if (runs.length === 0) return "no runs";
-  const lines = ["ID                               STATUS      PLAYBOOK                 UPDATED"];
-  for (const run of runs) {
+  const costs = runs.map((run) => costLabel(run.usage));
+  // The COST column appears only when at least one run reported accounting, so a deployment with
+  // no usage data keeps the old (shorter) line byte-for-byte.
+  const withCost = costs.some((cost) => cost !== undefined);
+  const header = withCost
+    ? "ID                               STATUS      PLAYBOOK                 UPDATED                     COST"
+    : "ID                               STATUS      PLAYBOOK                 UPDATED";
+  const lines = [header];
+  for (const [index, run] of runs.entries()) {
     // FR8.4: a scheduled run says so; a manual run's line stays byte-identical.
     const schedule = run.trigger === undefined ? "" : `  [schedule ${run.trigger.scheduleId}]`;
     // S-FR12: a forked run names its parent and fork point, after the schedule marker (a run can
@@ -21,8 +34,9 @@ function lsHuman(runs: readonly RunSummary[]): string {
       run.forkedFrom === undefined
         ? ""
         : `  [fork ${run.forkedFrom.runId.slice(0, 8)}@${run.forkedFrom.stepId}]`;
+    const cost = withCost ? `  ${(costs[index] ?? "-").padStart(7)}` : "";
     lines.push(
-      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${schedule}${fork}`,
+      `${run.id.padEnd(32)} ${run.status.padEnd(11)} ${run.playbookId.padEnd(24)} ${when(run.updatedAt)}${cost}${schedule}${fork}`,
     );
   }
   return lines.join("\n");
@@ -31,7 +45,8 @@ function lsHuman(runs: readonly RunSummary[]): string {
 function stepLine(step: RunDetail["steps"][number]): string {
   const attempts = step.attemptCount === 1 ? "1 attempt" : `${step.attemptCount} attempts`;
   const error = step.errorCode === undefined ? "" : `  ${step.errorCode}`;
-  return `  ${step.id.padEnd(20)} ${step.status.padEnd(10)} ${attempts}${error}`;
+  const cost = costLabel(step.usage);
+  return `  ${step.id.padEnd(20)} ${step.status.padEnd(10)} ${attempts}${error}${cost === undefined ? "" : `  ${cost}`}`;
 }
 
 function gateLine(gate: GateSummary): string {
@@ -59,6 +74,9 @@ function statusHuman(run: RunDetail): string {
         `(${run.forkedFrom.fromHash.slice(0, 12)} -> ${run.forkedFrom.toHash.slice(0, 12)})`,
     );
   }
+  // Workflow total: counters summed across every agent step; absent when nothing was reported.
+  const usage = formatUsage(run.usage);
+  if (usage !== null) lines.push(`  usage     ${usage}`);
   lines.push("steps:");
   for (const step of run.steps) lines.push(stepLine(step));
   if (run.gates.length > 0) {

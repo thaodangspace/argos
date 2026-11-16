@@ -311,6 +311,12 @@ export const StepSummarySchema = z.strictObject({
   attemptCount: z.number().int().min(0),
   startedAt: z.number().optional(),
   endedAt: z.number().optional(),
+  /**
+   * Aggregate provider/token accounting of this step's attempts (counters summed, gauges peaked).
+   * Absent for a step that never launched and for one whose executor reported nothing — a script
+   * or gate step has none. Only agent steps can carry numbers.
+   */
+  usage: z.record(z.string(), z.number()).optional(),
 });
 export type StepSummary = z.infer<typeof StepSummarySchema>;
 
@@ -376,6 +382,12 @@ export const RunSummarySchema = z.strictObject({
   trigger: RunTriggerSchema.optional(),
   /** Fork provenance: present only on a run started by `argos fork`. */
   forkedFrom: ForkedFromSchema.optional(),
+  /**
+   * Workflow total of provider/token accounting: every main step's {@link StepSummarySchema.usage}
+   * aggregated (counters summed, gauges peaked). Absent when no step reported any. After tasks are
+   * separate runs and are not counted here.
+   */
+  usage: z.record(z.string(), z.number()).optional(),
   steps: z.array(StepSummarySchema),
   /** Every gate of the run, pending and decided; the CLI/panel filters pending ones. */
   gates: z.array(GateSummarySchema),

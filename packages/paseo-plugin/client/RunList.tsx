@@ -60,6 +60,7 @@ function RunRow({
       <Row>
         <Txt theme={theme} color={muted} size={11} lines={1} style={{ flexShrink: 1 }}>
           {run.triggerLabel} · {run.updatedRelative} · {run.detail}
+          {run.costLabel === null ? "" : ` · ${run.costLabel}`}
         </Txt>
         <Row style={{ marginLeft: "auto" }}>
           <StepProgress theme={theme} segments={run.progress} />

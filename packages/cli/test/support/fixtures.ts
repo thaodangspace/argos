@@ -105,6 +105,66 @@ export const RUN_DETAIL: RunDetail = {
   ],
 };
 
+/**
+ * Accounting fixture (FR26): two agent steps that reported cost/tokens, one gate step that did not.
+ * Kept out of the committed goldens so `ls.json`/`status.json` stay byte-identical.
+ */
+export const USAGE_RUN_SUMMARY: RunSummary = {
+  ...RUN_SUMMARY,
+  status: "completed",
+  usage: {
+    contextWindowMaxTokens: 200_000,
+    contextWindowUsedTokens: 4_096,
+    inputTokens: 240,
+    outputTokens: 6_000,
+    totalCostUsd: 0.67,
+  },
+  steps: [
+    {
+      id: "draft",
+      title: "Draft the change",
+      kind: "agent",
+      status: "completed",
+      attemptCount: 1,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      usage: {
+        contextWindowMaxTokens: 200_000,
+        contextWindowUsedTokens: 2_048,
+        inputTokens: 120,
+        outputTokens: 3_000,
+        totalCostUsd: 0.25,
+      },
+    },
+    {
+      id: "verify",
+      title: "Verify",
+      kind: "agent",
+      status: "completed",
+      attemptCount: 1,
+      startedAt: 2_000,
+      endedAt: 3_000,
+      usage: {
+        contextWindowMaxTokens: 200_000,
+        contextWindowUsedTokens: 4_096,
+        inputTokens: 120,
+        outputTokens: 3_000,
+        totalCostUsd: 0.42,
+      },
+    },
+    { id: "review", title: "Review", kind: "gate", status: "completed", attemptCount: 0 },
+  ],
+  gates: [DECIDED_GATE],
+  updatedAt: DECIDED_AT,
+};
+
+/** The same run as `argos status` sees it: every step carries its (empty) attempt list. */
+export const USAGE_RUN_DETAIL: RunDetail = {
+  ...USAGE_RUN_SUMMARY,
+  steps: USAGE_RUN_SUMMARY.steps.map((step) => ({ ...step, attempts: [] })),
+  history: [],
+};
+
 export const LAST_FIRE: ScheduleFire = {
   fireAt: FIRE_AT,
   at: FIRE_AT,

@@ -63,7 +63,9 @@ function trimZero(text: string): string {
   return text.replace(/\.?0+$/, "");
 }
 
-function formatCost(usd: number): string {
+/** `3.017` -> "$3.02"; `0.0042` -> "$0.0042"; `0` -> "$0". */
+export function formatCostUsd(usd: number): string {
+  if (!Number.isFinite(usd)) return "—";
   if (usd === 0) return "$0";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   return `$${usd.toFixed(2)}`;
@@ -77,7 +79,7 @@ export function formatUsage(usage: Readonly<Record<string, number>> | undefined)
   if (usage === undefined) return null;
   const parts: string[] = [];
   const cost = usage["totalCostUsd"];
-  if (cost !== undefined) parts.push(formatCost(cost));
+  if (cost !== undefined) parts.push(formatCostUsd(cost));
   const input = usage["inputTokens"];
   const output = usage["outputTokens"];
   const cached = usage["cachedInputTokens"];

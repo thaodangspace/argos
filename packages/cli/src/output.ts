@@ -101,6 +101,64 @@ export function classifyFailure(error: unknown): {
   };
 }
 
+/** `3.017` -> "$3.02"; `0.0042` -> "$0.0042"; `0` -> "$0". */
+export function formatCost(usd: number): string {
+  if (!Number.isFinite(usd)) return "—";
+  if (usd === 0) return "$0";
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+/** `6_322_750` -> "6.32M"; `35_982` -> "35.9k"; `130` -> "130". */
+export function formatTokens(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  if (abs < 1_000) return `${Math.round(value)}`;
+  if (abs < 1_000_000) return `${trimZero((value / 1_000).toFixed(1))}k`;
+  if (abs < 1_000_000_000) return `${trimZero((value / 1_000_000).toFixed(2))}M`;
+  return `${trimZero((value / 1_000_000_000).toFixed(2))}B`;
+}
+
+function trimZero(text: string): string {
+  return text.replace(/\.?0+$/, "");
+}
+
+/**
+ * One aggregate usage record as the CLI prints it: `$3.02 · 130 in · 35.9k out · 6.32M cached`.
+ * Mirrors the plugin's `shared/format.ts` (the plugin cannot import the CLI package); unknown keys
+ * are kept as `key=value`, so a new provider counter is visible without a code change.
+ */
+export function formatUsage(usage: Readonly<Record<string, number>> | undefined): string | null {
+  if (usage === undefined) return null;
+  const parts: string[] = [];
+  const cost = usage["totalCostUsd"];
+  if (cost !== undefined) parts.push(formatCost(cost));
+  const input = usage["inputTokens"];
+  const output = usage["outputTokens"];
+  const cached = usage["cachedInputTokens"];
+  if (input !== undefined) parts.push(`${formatTokens(input)} in`);
+  if (output !== undefined) parts.push(`${formatTokens(output)} out`);
+  if (cached !== undefined) parts.push(`${formatTokens(cached)} cached`);
+  const context = usage["contextWindowUsedTokens"];
+  const contextMax = usage["contextWindowMaxTokens"];
+  if (context !== undefined && contextMax !== undefined) {
+    parts.push(`ctx ${formatTokens(context)}/${formatTokens(contextMax)}`);
+  }
+  const known = new Set([
+    "totalCostUsd",
+    "inputTokens",
+    "outputTokens",
+    "cachedInputTokens",
+    "contextWindowUsedTokens",
+    "contextWindowMaxTokens",
+  ]);
+  for (const [name, value] of Object.entries(usage)) {
+    if (known.has(name)) continue;
+    parts.push(`${name}=${formatTokens(value)}`);
+  }
+  return parts.length === 0 ? null : parts.join(" · ");
+}
+
 export const USAGE = `argos — durable YAML playbooks for Paseo agents
 
 Usage:

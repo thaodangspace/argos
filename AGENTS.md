@@ -309,6 +309,11 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
   optional `now`, and the record's `updatedAt` is the event time, never the wall clock.
 - Effects: `dispatchStep`, `openGate`, `finishRun`, `startAfterTask`, `decisionRejected`,
   `scheduleWake`. The reducer never performs them.
+- Usage aggregation (FR26) is pure and lives in `engine/usage.ts`: `attemptUsage(attempts)` and
+  `aggregateUsage(sources)` sum counters, keep the peak of the gauges
+  (`USAGE_GAUGE_KEYS`: `contextWindowUsedTokens`, `contextWindowMaxTokens`), skip non-finite
+  readings, sort keys, and return `undefined` when nothing was reported (the key then stays absent
+  rather than becoming `{}`). A provider counter Argos has never seen is treated as additive.
 - Readiness: a step is ready when it is `pending`/`ready`, every `needs` dependency is completed
   or skipped, `notBefore <= now`, and `when` holds. Steps whose dependencies are satisfied but
   `when` is false are skipped (and do not block). Conditions read
@@ -730,7 +735,11 @@ Contract highlights: `StartRunRequest`, `DecideGateRequest`, `RunSummary`, `RunD
 list projection stays lean; `RunDetail.steps` use `StepDetailSummary` instead of `StepSummary` and
 add each step's `attempts` (`n`, timing, `target`, `usage`, `outcome`, `errorCode`), its `outcome`,
 and its declared `outputs` (credential-shaped names dropped, values cut at
-`STEP_OUTPUT_VALUE_LIMIT` = 4,000) — that is what the panel renders as a step log. All
+`STEP_OUTPUT_VALUE_LIMIT` = 4,000) — that is what the panel renders as a step log. Each
+`StepSummary.usage` aggregates that step's attempts and `RunSummary.usage` is the workflow total
+over every main step (counters summed, `contextWindow*` gauges peaked, absent when nothing was
+reported); `argos ls` adds a COST column and `argos status` a `usage` line when there is one, and
+the panel shows the run total in its meta row and each agent step's cost on its row. All
 bodies are strict zod schemas; `RPC_ERROR_STATUS` is the single code → HTTP map; bodies are capped
 at 1 MiB. `ScheduleSummary` is the document without `uid`, `runIds`, and `fires` (inputs filtered
 by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunIds`.
