@@ -304,6 +304,12 @@ export interface AddScheduleInput {
   readonly cwd: string;
   readonly inputs?: Readonly<Record<string, Scalar>>;
   readonly isolation?: "none" | "worktree";
+  /**
+   * FR10: pin the substrate this schedule fires on (`argos schedule add --executor`,
+   * `POST /schedules {executor}`). Normalized and stored canonical; an unknown id is
+   * `invalid_request` and an id the server cannot run is `executor_unavailable` at add time (FR12).
+   */
+  readonly executor?: string;
   readonly cron: string;
   readonly tz?: string;
   readonly overlap?: Overlap;
@@ -321,6 +327,8 @@ export interface EditScheduleInput {
   readonly cwd?: string;
   readonly inputs?: Readonly<Record<string, Scalar>>;
   readonly isolation?: "none" | "worktree";
+  /** FR10: move the pinned substrate; omitted keeps the stored one (absent stays absent). */
+  readonly executor?: string;
   readonly cron?: string;
   readonly tz?: string;
   readonly overlap?: Overlap;

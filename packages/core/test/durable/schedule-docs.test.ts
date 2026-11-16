@@ -153,6 +153,35 @@ describe("schedule documents (FR1.1/FR1.4)", () => {
     expect(hydrateScheduleDoc(seed).id).toBe("nightly");
   });
 
+  it("round-trips a pinned executor and keeps an absent one absent (FR10)", () => {
+    const pinned = sampleDoc({ executor: "hc" });
+    const value = toScheduleDocValue(pinned);
+    expect(value.executor).toBe("hc");
+    expect(toScheduleDoc(value).executor).toBe("hc");
+    expect(hydrateScheduleDoc(value).executor).toBe("hc");
+
+    // The document convention: storage holds `null`, the typed shape has no key at all.
+    const unpinned = sampleDoc();
+    const bareValue = toScheduleDocValue(unpinned);
+    expect(bareValue.executor).toBeNull();
+    expect("executor" in toScheduleDoc(bareValue)).toBe(false);
+    expect("executor" in hydrateScheduleDoc(bareValue)).toBe(false);
+  });
+
+  it("refuses a hand-edited executor that is not canonical (FR10, FR12)", () => {
+    const base = toScheduleDocValue(sampleDoc());
+    // Storage is canonical (`paseo`/`hc`) only: an alias normalizes on input, never on read, and a
+    // typo is a corrupt row — refusing it is what keeps a fire from running the wrong substrate.
+    for (const executor of ["typo", "herdr-core", "Herdr", "Paseo", ""]) {
+      const hand = { ...base, executor };
+      expect(codeOf(() => hydrateScheduleDoc(hand)), executor).toBe("invalid_request");
+    }
+    // A *missing* key is not corruption: a schedule document written before `executor` existed
+    // must still hydrate (absence means unpinned), or an upgrade would refuse a live schedule.
+    const { executor: _omit, ...withoutExecutor } = base;
+    expect("executor" in hydrateScheduleDoc(withoutExecutor)).toBe(false);
+  });
+
   it("keeps the fire log newest-first and capped (NFR)", () => {
     const fires: FireEntry[] = [];
     for (let index = 0; index < FIRE_LOG_LIMIT + 10; index += 1) pushFire(fires, fireAt(index));

@@ -1207,6 +1207,9 @@ export class ArgosHost {
         `run ${runId}: step "${stepId}" is not part of playbook ${record.playbookId}`,
       );
     }
+    // FR15: a retry is the same run on the same frozen record, so it keeps the record's executor —
+    // and FR6 refuses here, before any task exists, when this host no longer registers it.
+    this.#assertExecutorRegistered(record.executor ?? DEFAULT_EXECUTOR_ID);
     // FR4.7: `argos worktree rm` keeps the branch, so a retry re-attaches it instead of re-cutting
     // the checkout from the base. A branch that is gone refuses the retry before any task exists.
     await this.#reattachWorktreeIfMissing(record);
@@ -1294,9 +1297,12 @@ export class ArgosHost {
       parent.playbookId,
       options.home === undefined ? {} : { home: options.home },
     );
-    // Phase 4 owns the fork's executor validation/inheritance; the catalog lookup already follows
-    // the parent's frozen substrate so an `hc` fork is not checked against Paseo's providers.
-    const catalog = this.#catalogFor(parent.executor ?? DEFAULT_EXECUTOR_ID);
+    // Phase 4: the fork continues on the parent's frozen substrate (FR13). A host that no longer
+    // registers it refuses before anything is written — never a fallback to the server default
+    // (FR6) — and the catalog follows the same id, so an `hc` fork is not checked against Paseo.
+    const executorId = parent.executor ?? DEFAULT_EXECUTOR_ID;
+    this.#assertExecutorRegistered(executorId);
+    const catalog = this.#catalogFor(executorId);
     if (catalog !== undefined) {
       const missing = catalog.missingTargets(ir, parent.inputs);
       if (missing.length > 0) {
@@ -1327,6 +1333,11 @@ export class ArgosHost {
     draft.loopAllowance = {};
     delete draft.trigger;
     delete draft.deadline;
+    // FR13: the clone already carries `executor`, and restating it keeps the propagation explicit:
+    // a playbook edit that changes `executor` was refused above (`definition_conflict`), so the
+    // inherited id can never disagree with the definition the fork freezes.
+    if (parent.executor === undefined) delete draft.executor;
+    else draft.executor = parent.executor;
     draft.createdAt = now;
     draft.updatedAt = now;
     draft.seq = 0;
