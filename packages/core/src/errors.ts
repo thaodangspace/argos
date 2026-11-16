@@ -40,6 +40,12 @@ export const ARGOS_ERROR_CODES = [
   // Fork: the reloaded definition differs outside the set the fork is about to re-run, or changes
   // a surface a fork cannot survive (`inputs`, `isolation`, `after`, the step set). HTTP 409.
   "definition_conflict",
+  // FR17: the resolved executor has no registered adapter (HTTP 422). Raised before any task, run
+  // index entry, or worktree exists; not a validation code, so the CLI exit stays 1.
+  "executor_unavailable",
+  // FR17: the registered executor's transport cannot connect (HTTP 503). Paseo keeps
+  // `paseo_unreachable`; this is the adapter-neutral code for every other substrate.
+  "executor_unreachable",
 ] as const;
 
 export type ArgosErrorCode = (typeof ARGOS_ERROR_CODES)[number];

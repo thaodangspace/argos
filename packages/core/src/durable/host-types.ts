@@ -10,6 +10,7 @@ import type { Conversation, Storage, Tx } from "@earendil-works/pi-durable";
 
 import type { RunRecord, WorktreeRecord } from "../engine/index.js";
 import type { RunTrigger } from "../engine/record.js";
+import type { ExecutorId } from "../executor/model.js";
 import type { GitRunner } from "../git/exec.js";
 import type { TargetCatalog } from "../paseo/model-catalog.js";
 import type { IsolationIR, PlaybookIR, Scalar } from "../playbook/ir.js";
@@ -23,7 +24,24 @@ export interface ArgosHostOptions {
   readonly home?: string;
   /** Injected storage (MemoryStorage in fast unit tests). Skips the home/pid setup. */
   readonly storage?: Storage;
+  /**
+   * The `paseo` executor. Kept as its own option (rather than folded into `executors`) so every
+   * existing call site and test keeps working; it is the `paseo` entry of the registry.
+   */
   readonly executor: StepExecutor;
+  /**
+   * FR2: the other registered executors, keyed by canonical id. A run whose resolved id is not in
+   * `{ paseo: executor, ...executors }` is refused with `executor_unavailable` before any task,
+   * run index entry, or worktree exists.
+   */
+  readonly executors?: Partial<Record<ExecutorId, StepExecutor>>;
+  /** FR2: the substrate a run without an override starts on; default `paseo`. */
+  readonly defaultExecutor?: ExecutorId;
+  /**
+   * FR24/FR18: one target catalog per executor. `paseo` falls back to {@link modelCatalog}, so the
+   * existing wiring and every test that passes only `modelCatalog` behave exactly as before.
+   */
+  readonly catalogs?: Partial<Record<ExecutorId, TargetCatalog>>;
   /** Injected clock; default wall time. The harness clock and every timeout use it. */
   readonly clock?: Clock;
   /** Override the D6 stub (tests only; production leaves it unset). */
@@ -54,6 +72,12 @@ export interface StartRunInput {
   readonly cwd: string;
   readonly worktree?: WorktreeRecord;
   readonly deadline?: number;
+  /**
+   * FR2/FR3: the substrate override for this run (`argos run --executor`, `POST /runs {executor}`,
+   * or a schedule's stored executor). Normalized by the host; an id it cannot run is
+   * `executor_unavailable` before anything is created.
+   */
+  readonly executor?: string;
   /** Explicit run id (tests / idempotent callers); default `ulid()`. */
   readonly id?: string;
   /**

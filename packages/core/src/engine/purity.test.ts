@@ -33,7 +33,7 @@ describe("engine purity", () => {
     });
   }
 
-  it("only imports local modules, zod, and the frozen playbook/errors contract", () => {
+  it("only imports local modules, zod, and the frozen playbook/errors/executor-model contract", () => {
     for (const file of SOURCES) {
       const source = readFileSync(join(ENGINE_DIR, file), "utf8");
       for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) {
@@ -42,7 +42,10 @@ describe("engine purity", () => {
           specifier === "zod" ||
           specifier.startsWith("./") ||
           specifier === "../errors.js" ||
-          specifier.startsWith("../playbook/");
+          specifier.startsWith("../playbook/") ||
+          // `executor/model.ts` is zod-only and Node-free by the same rule as `schedule/model.ts`;
+          // the record needs the executor id for its schema, nothing else from that layer.
+          specifier.startsWith("../executor/");
         expect(allowed, `${file} imports ${specifier}`).toBe(true);
       }
     }

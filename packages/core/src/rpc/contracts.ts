@@ -133,6 +133,9 @@ export const RPC_ERROR_STATUS: Readonly<Record<string, number>> = {
   run_active: 409,
   // Fork: the edited definition cannot be applied at the fork point.
   definition_conflict: 409,
+  // FR17: the executor registry. `unavailable` is a refusal, `unreachable` is a transport failure.
+  executor_unavailable: 422,
+  executor_unreachable: 503,
   // FR1.6/FR1.7: the schedule registry.
   schedule_unknown: 404,
   schedule_exists: 409,

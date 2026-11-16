@@ -15,6 +15,11 @@
 import { z } from "zod";
 
 import { ARGOS_ERROR_CODES } from "../errors.js";
+import {
+  DEFAULT_EXECUTOR_ID,
+  ExecutorIdSchema,
+  type ExecutorId,
+} from "../executor/model.js";
 import type { GateIR, PlaybookIR, Scalar, StepIR, StepKind } from "../playbook/ir.js";
 import { deepFreeze } from "../playbook/ir.js";
 
@@ -215,6 +220,12 @@ export interface RunRecord {
   readonly inputs: Readonly<Record<string, Scalar>>;
   readonly status: RunStatus;
   readonly cwd: string;
+  /**
+   * FR5: the substrate this run was started on, frozen at start. Absent means `paseo`, so every
+   * record written before the registry existed stays byte-identical; a resume, retry, after-task,
+   * or fork reads this field and never re-resolves it from configuration.
+   */
+  readonly executor?: ExecutorId;
   readonly worktree?: WorktreeRecord;
   /**
    * FR8.1: the schedule fire that created this run. Absent on a manual run, and absent on a
@@ -360,6 +371,7 @@ export const RunRecordSchema = z.strictObject({
   inputs: z.record(z.string(), ScalarSchema),
   status: z.enum(RUN_STATUSES),
   cwd: z.string().min(1),
+  executor: ExecutorIdSchema.optional(),
   worktree: WorktreeSchema.optional(),
   trigger: RunTriggerSchema.optional(),
   forkedFrom: ForkedFromSchema.optional(),
@@ -402,6 +414,8 @@ export interface CreateRunRecordInput {
   readonly cwd: string;
   /** Event time of creation; also the initial `updatedAt`. */
   readonly now: number;
+  /** FR5: the substrate this run starts on; omitted (or `paseo`) keeps the key out of the record. */
+  readonly executor?: ExecutorId;
   readonly worktree?: WorktreeRecord;
   /** FR8.1: the schedule fire this run belongs to. Only the scheduler sets it. */
   readonly trigger?: RunTrigger;
@@ -435,6 +449,11 @@ export function createRunRecord(input: CreateRunRecordInput): RunRecord {
     status: "pending" satisfies RunStatus,
     cwd: input.cwd,
   };
+  // FR5: only a non-default substrate is stored, so a paseo run's JSON stays byte-identical to a
+  // record written before the executor registry existed.
+  if (input.executor !== undefined && input.executor !== DEFAULT_EXECUTOR_ID) {
+    record["executor"] = input.executor;
+  }
   if (input.worktree !== undefined) record["worktree"] = input.worktree;
   // FR8.1: copied field by field so the record holds no alias into the caller's object. A manual
   // run (no trigger) omits the key entirely, so its JSON stays byte-identical to before.
