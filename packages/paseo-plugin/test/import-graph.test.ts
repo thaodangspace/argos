@@ -1,9 +1,10 @@
 /**
  * Import-graph guard (FR28, plan Phase 9 verification): the plugin is a thin RPC client.
  *
- * No file under `server/` or `shared/` (nor either entry point) may reach storage, git, the Paseo adapter, the durable
- * host, the RPC *server*, SQLite, or the filesystem API. The only `@thaodangspace\/argos-core` subpath allowed is
- * `@thaodangspace\/argos-core/rpc` (contracts + client), which itself imports no durable code.
+ * No file under `server/` or `shared/` (nor either entry point) may reach storage, git, the Paseo adapter, the hc
+ * transport, the durable host, the RPC *server*, SQLite, a socket, or the filesystem API. The only
+ * `@thaodangspace\/argos-core` subpath allowed is `@thaodangspace\/argos-core/rpc` (contracts + client), which itself imports no
+ * durable code.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -52,12 +53,15 @@ describe("plugin import graph", () => {
       /^@thaodangspace\/argos-core\/durable/,
       /^@thaodangspace\/argos-core\/git/,
       /^@thaodangspace\/argos-core\/paseo/,
+      // The hc transport opens a socket; the panel is an HTTP/RPC client.
+      /^@thaodangspace\/argos-core\/hc/,
       /^@thaodangspace\/argos-core\/engine/,
       /^@thaodangspace\/argos-core\/playbook/,
       /^@thaodangspace\/argos-core\/rpc\/server/,
       /^@thaodangspace\/argos-core$/,
       /^@earendil-works\//,
       /^node:sqlite$/,
+      /^node:net$/,
       /^node:child_process$/,
     ];
     const offenders: string[] = [];
