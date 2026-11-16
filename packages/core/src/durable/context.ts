@@ -135,7 +135,8 @@ export interface RawStepOutput {
  * failure, not a task failure: the run records it through `stepSettled`.
  *
  * `running` may carry a replacement `agentId` (the handover relaunch) plus `handover: true`, and
- * `exhausted` targets discovered while relaunching.
+ * `exhausted` targets discovered while relaunching. It may also carry a bounded `detail` note —
+ * hc reports `blocked: <msg>` (FR22) or a handover — which the step task keeps in its checkpoint.
  */
 export type StepAgentStatus =
   | {
@@ -144,6 +145,11 @@ export type StepAgentStatus =
       readonly target?: string;
       readonly handover?: boolean;
       readonly exhausted?: readonly ExhaustedTarget[];
+      /**
+       * Bounded, human-readable progress note (never a transcript, a prompt, or terminal text):
+       * `blocked: <msg>` while an hc program waits for a human, or a handover notice (FR22).
+       */
+      readonly detail?: string;
     }
   | {
       readonly state: "done";
@@ -153,6 +159,11 @@ export type StepAgentStatus =
       readonly usage?: Readonly<Record<string, number>>;
       readonly feedback?: string;
       readonly exhausted?: readonly ExhaustedTarget[];
+      /**
+       * Bounded reason the attempt ended the way it did (`exit code 3`, `signal 9`), carried into
+       * the task receipt. Never terminal text, a prompt, or a transcript.
+       */
+      readonly detail?: string;
       /** Raw provider result; `collect` re-validates it with the step schema. */
       readonly raw?: RawStepOutput;
     };
@@ -170,6 +181,11 @@ export interface CollectResult {
   readonly usage?: Readonly<Record<string, number>>;
   readonly feedback?: string;
   readonly exhausted?: readonly ExhaustedTarget[];
+  /**
+   * Bounded diagnostic the task receipt keeps (`StepTaskResult.detail`): hc's exit code / signal
+   * (FR23) or why the program ended. Never terminal text, a prompt, or a transcript.
+   */
+  readonly detail?: string;
 }
 
 /**
@@ -207,12 +223,16 @@ export interface StepTaskResult {
   /** Quota-exhausted targets observed by this attempt (merged into the run record, FR24). */
   readonly exhausted?: readonly ExhaustedTarget[];
   /**
-   * Script steps only (FR22): the last exit code, how many times the script ran (exit-75 loops
-   * included), and why the step failed. The run record keeps the stable `errorCode`; this is the
-   * diagnostic detail the task receipt preserves (a terminal task cannot carry a checkpoint).
+   * Script steps (FR22): the last exit code and how many times the script ran (exit-75 loops
+   * included). The run record keeps the stable `errorCode`; the task receipt preserves the
+   * diagnostic, because a terminal task cannot carry a checkpoint.
    */
   readonly exitCode?: number;
   readonly runs?: number;
+  /**
+   * Why this attempt ended, in one bounded line: a script's reason, or an agent executor's own note
+   * (hc's exit code or signal, FR23). Never a transcript, a prompt, or terminal text.
+   */
   readonly detail?: string;
 }
 

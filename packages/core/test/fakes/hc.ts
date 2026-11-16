@@ -8,9 +8,12 @@
  *
  * The two facts that make the adapter's crash story testable are modelled exactly:
  * `terminal.run` returns `first_message.sent` (so a test can force the later `terminal.send`), and
- * a name that already exists fails with `name_taken` (so a test can force adoption). `forget()`
- * removes a terminal without recording a `terminal.rm`, which is how a "lost terminal" — the
- * handover path (FR24) — is simulated.
+ * a name that already exists fails with `name_taken` (so a test can force adoption). A delivery
+ * that hc accepted marks a template's first message as sent, which is the durable fact FR20 derives
+ * exactly-once prompt delivery from (otherwise every poll would type the same prompt again).
+ * `forget()` removes a terminal without recording a `terminal.rm`, which is how a "lost terminal" —
+ * the handover path (FR24) — is simulated. `terminal.rm` refuses a live terminal (FR26), so a test
+ * can prove settle cleanup kills first.
  */
 
 import {
@@ -20,6 +23,7 @@ import {
   type HcErrorKind,
   type HcFirstMessage,
   type HcHello,
+  type HcKillResult,
   type HcListOptions,
   type HcPort,
   type HcReadOptions,
@@ -45,6 +49,7 @@ export type FakeHcMethod =
   | "terminal.list"
   | "terminal.send"
   | "terminal.read"
+  | "terminal.kill"
   | "terminal.rm";
 
 export interface FakeHcOptions {
@@ -144,6 +149,8 @@ export class FakeHcPort implements HcPort {
   readonly sends: HcSendInput[] = [];
   readonly reads: string[] = [];
   readonly removes: string[] = [];
+  /** Every `terminal.kill`, in order (settle cleanup of a still-live terminal). */
+  readonly kills: string[] = [];
   readonly gets: string[] = [];
   readonly lists: HcListOptions[] = [];
   helloCalls = 0;
@@ -310,6 +317,7 @@ export class FakeHcPort implements HcPort {
         "terminal.list",
         "terminal.send",
         "terminal.read",
+        "terminal.kill",
         "terminal.rm",
       ],
       features: ["status"],
@@ -407,6 +415,11 @@ export class FakeHcPort implements HcPort {
       throw new HcKindError("blocked", "terminal.send");
     }
     this.sends.push({ ...input });
+    // A message that went in is no longer "unsent": that is the durable fact FR20 derives
+    // exactly-once delivery from, so a later poll must not type the same prompt again.
+    if (terminal.first_message !== null) {
+      terminal.first_message = { ...terminal.first_message, sent: true };
+    }
     if (word === "idle") {
       terminal.status = {
         state: "working",
@@ -445,6 +458,22 @@ export class FakeHcPort implements HcPort {
     this.removes.push(stored.address);
     this.#terminals.delete(stored.address);
     return { removed: stored.address };
+  }
+
+  async killTerminal(terminal: string): Promise<HcKillResult> {
+    this.#assertReachable();
+    this.#throwInjected("terminal.kill");
+    const stored = this.#require(terminal, "terminal.kill");
+    if (stored.state === "finished") throw new HcKindError("finished", "terminal.kill");
+    this.kills.push(stored.address);
+    // hc: the program is signalled; the terminal stays until `terminal.rm` collects it.
+    stored.state = "finished";
+    stored.status = null;
+    stored.exit_code = null;
+    stored.signal = 15;
+    stored.reason = "killed";
+    stored.finished_ms = this.#now();
+    return { killed: stored.address };
   }
 
   // ---------------------------------------------------------------- internals

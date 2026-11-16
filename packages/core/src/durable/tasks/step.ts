@@ -60,6 +60,16 @@ const DEFAULT_QUOTA_WINDOW_MS = 15 * 60_000;
 /** Never re-poll a blocked provider in a tight loop. */
 const MIN_QUOTA_WAIT_MS = 30_000;
 
+/**
+ * Poll-time unreachability parks the step instead of failing it: the substrate is transiently
+ * down (Paseo's daemon, an hc core) and the durable deadline bounds the wait and owns retries.
+ * A *launch*-time unreachable is still a step failure (FR7/FR17).
+ */
+const POLL_RETRYABLE_CODES: ReadonlySet<ArgosErrorCode> = new Set<ArgosErrorCode>([
+  "paseo_unreachable",
+  "executor_unreachable",
+]);
+
 export type StepPhase = "locate" | "launch" | "await" | "collect";
 
 export interface StepTaskInput {
@@ -218,6 +228,7 @@ function buildResult(
   if (checkpoint.target !== undefined) result["target"] = checkpoint.target;
   if (collected.usage !== undefined) result["usage"] = collected.usage;
   if (collected.feedback !== undefined) result["feedback"] = collected.feedback;
+  if (collected.detail !== undefined) result["detail"] = collected.detail;
   if (exhausted.length > 0) result["exhausted"] = exhausted;
   return result as unknown as StepTaskResult;
 }
@@ -567,11 +578,11 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           );
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          // A transient poll error (daemon unreachable) behaves like "still running" and is
+          // A transient poll error (daemon/core unreachable) behaves like "still running" and is
           // bounded by the deadline (spec: the step parks and retries with backoff). A terminal
           // executor failure becomes a step failure with its stable code.
           status =
-            isArgosError(error) && error.code !== "paseo_unreachable"
+            isArgosError(error) && !POLL_RETRYABLE_CODES.has(error.code)
               ? failureStatus(error)
               : { state: "running" };
         }
@@ -616,6 +627,9 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           ...(status.agentId === undefined ? {} : { agentId: status.agentId }),
           ...(status.target === undefined ? {} : { target: status.target }),
           ...(status.handover === true ? { handoverAttempted: true } : {}),
+          // A poll may report a progress note (`blocked: <msg>` on hc, FR22); the last one stands
+          // until the next note arrives.
+          ...(status.detail === undefined ? {} : { detail: status.detail }),
           exhausted: mergeExhausted(checkpoint.exhausted, status.exhausted ?? []),
         };
 
@@ -668,6 +682,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
                 ...(checkpoint.status.errorCode === undefined ? {} : { errorCode: checkpoint.status.errorCode }),
                 ...(checkpoint.status.usage === undefined ? {} : { usage: checkpoint.status.usage }),
                 ...(checkpoint.status.feedback === undefined ? {} : { feedback: checkpoint.status.feedback }),
+                ...(checkpoint.status.detail === undefined ? {} : { detail: checkpoint.status.detail }),
                 ...(checkpoint.status.exhausted === undefined ? {} : { exhausted: checkpoint.status.exhausted }),
               };
 
@@ -690,6 +705,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
               ...(refined.errorCode === undefined ? {} : { errorCode: refined.errorCode }),
               ...(refined.usage === undefined ? {} : { usage: refined.usage }),
               ...(refined.feedback === undefined ? {} : { feedback: refined.feedback }),
+              ...(refined.detail === undefined ? {} : { detail: refined.detail }),
               ...(refined.exhausted === undefined ? {} : { exhausted: refined.exhausted }),
             };
           } catch (error) {
