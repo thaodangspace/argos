@@ -234,6 +234,8 @@ export const RawDefaultsSchema = z.strictObject({
   manager: RawAgentSchema.extend({ compact: z.unknown().optional() }).optional(),
   workspace: z.object({ archive: z.enum(["never", "on_end"]).optional(), keep_failed: z.boolean().optional() }).optional(),
   isolation: RawIsolationSchema.optional(),
+  /** FR4: the default substrate for every playbook of this repository (`paseo` when absent). */
+  executor: z.string().min(1).optional(),
   role: z
     .strictObject({ silence: z.string().optional(), archive_agents: z.boolean().optional() })
     .optional(),
@@ -258,6 +260,8 @@ export const RawPlaybookDefaultsSchema = z.strictObject({
   agent: RawAgentSchema.optional(),
   providers: RawProvidersSchema.optional(),
   isolation: RawIsolationSchema.optional(),
+  /** FR4: this playbook's own default substrate; a top-level `executor:` still wins. */
+  executor: z.string().min(1).optional(),
   labels: z.record(z.string(), z.string()).optional(),
 });
 export type RawPlaybookDefaults = z.infer<typeof RawPlaybookDefaultsSchema>;
@@ -269,6 +273,8 @@ export const RawPlaybookSchema = z.strictObject({
   defaults: RawPlaybookDefaultsSchema.optional(),
   labels: z.record(z.string(), z.string()).optional(),
   isolation: RawIsolationSchema.optional(),
+  /** FR4: the substrate this playbook runs on, normalized to a canonical id by `resolve.ts`. */
+  executor: z.string().min(1).optional(),
   inputs: z.record(z.string(), RawInputDefSchema.nullable()).optional(),
   outputs: z.record(z.string(), RawOutputDefSchema.nullable()).optional(),
   outcomes: z.array(z.string().min(1)).min(1).optional(),

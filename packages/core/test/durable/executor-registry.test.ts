@@ -28,6 +28,7 @@ import { createRunRecord, hydrateRunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import { isArgosError } from "../../src/errors.js";
 import { executorIdFor, normalizeExecutorId } from "../../src/executor/model.js";
+import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeClock } from "../fakes/clock.js";
 import { FakeExecutor } from "../fakes/executor.js";
 import {
@@ -81,6 +82,14 @@ function chainPlaybook() {
     id: "chain",
     steps: [step({ id: "a" }), step({ id: "b", needs: ["a"] })],
   });
+}
+
+/**
+ * A playbook that pins its own substrate (FR4/FR2). The IR is what the loader produces for
+ * `executor: hc`, so the host resolves the substrate from the definition rather than from a flag.
+ */
+function pinnedPlaybook(): PlaybookIR {
+  return { ...singleStepPlaybook(), executor: "hc" };
 }
 
 describe("executor ids (FR1)", () => {
@@ -210,6 +219,97 @@ describe("executor registry (FR2, FR6, FR7)", () => {
     } finally {
       await second.close();
       cleanup();
+    }
+  });
+
+  it("takes the playbook's executor above the server default (FR2, FR4)", async () => {
+    const clock = new FakeClock();
+    const paseo = new RecordingExecutor(new FakeExecutor());
+    const hc = new RecordingExecutor(new FakeExecutor());
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock,
+      executor: paseo,
+      executors: { hc },
+      defaultExecutor: "paseo",
+    });
+    try {
+      const runId = "run-playbook-executor";
+      await host.startRun({
+        ir: pinnedPlaybook(),
+        inputs: {},
+        cwd: "/tmp/argos-playbook-executor",
+        id: runId,
+      });
+      await drive(clock, () => hc.fake.agentsForStep("a").length === 1);
+
+      // The definition named `hc`, so the record says `hc` and the child went to the hc fake.
+      expect((await host.getRun(runId))?.record.executor).toBe("hc");
+      expect(hc.calls.launches).toBe(1);
+      expect(paseo.calls.launches).toBe(0);
+      expect(paseo.fake.agents.size).toBe(0);
+
+      hc.fake.completeAll();
+      await drive(
+        clock,
+        async () => (await host.getRun(runId))?.record.status === "completed",
+        { stepMs: 3_000, maxRounds: 20 },
+      );
+      expect((await host.getRun(runId))?.record.status).toBe("completed");
+      expect(hc.fake.creationsByStep()).toEqual({ a: 1 });
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("lets a request override the playbook's executor, and refuses one nobody registered", async () => {
+    const clock = new FakeClock();
+    const paseo = new RecordingExecutor(new FakeExecutor());
+    const hc = new RecordingExecutor(new FakeExecutor());
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock,
+      executor: paseo,
+      executors: { hc },
+      defaultExecutor: "hc",
+    });
+    try {
+      // The flag wins silently — the point of an override (spec "Edge Cases").
+      const runId = "run-override-playbook";
+      await host.startRun({
+        ir: pinnedPlaybook(),
+        inputs: {},
+        cwd: "/tmp/argos-override-playbook",
+        id: runId,
+        executor: "paseo",
+      });
+      await drive(clock, () => paseo.fake.agentsForStep("a").length === 1);
+      expect((await host.getRun(runId))?.record.executor).toBeUndefined();
+      expect(hc.calls.launches).toBe(0);
+    } finally {
+      await host.close();
+    }
+
+    // A host that never registered hc refuses the playbook's own substrate before anything exists.
+    const bare = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock: new FakeClock(clock.now()),
+      executor: paseo,
+    });
+    try {
+      const error = await errorOf(
+        bare.startRun({
+          ir: pinnedPlaybook(),
+          inputs: {},
+          cwd: "/tmp/argos-playbook-executor-missing",
+          id: "run-playbook-executor-missing",
+        }),
+      );
+      expect(isArgosError(error) && error.code).toBe("executor_unavailable");
+      expect(await bare.listRuns()).toEqual([]);
+      expect((await bare.inspect()).tasks).toEqual([]);
+    } finally {
+      await bare.close();
     }
   });
 

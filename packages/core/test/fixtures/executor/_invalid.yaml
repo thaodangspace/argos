@@ -1,0 +1,8 @@
+# FR4 fixture: `executor` is not an open string. An unknown value fails the load as
+# `playbook_invalid` naming the file, with the executor key as the issue path — never a warning,
+# and never a step id.
+title: Names an unknown executor
+executor: nope
+steps:
+  - id: work
+    prompt: Do the work.

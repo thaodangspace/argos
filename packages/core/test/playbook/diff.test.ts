@@ -3,7 +3,8 @@
  *
  * These tests pin the contract the fork guard depends on: a reformatted YAML is not a change, a
  * real definition edit names the steps it touched, and the playbook-level surfaces are exactly the
- * ones a fork cannot survive (`id`, `version`, `isolation`, `after`) plus input declarations.
+ * ones a fork cannot survive (`id`, `version`, `isolation`, `executor`, `after`) plus input
+ * declarations.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -202,6 +203,41 @@ inputs:
     expect(diffPlaybookIr(base(), { ...base(), version: 2 as unknown as 1 }).playbook).toEqual([
       "version",
     ]);
+  });
+
+  it("reports an executor change, and treats absent as paseo (FR13)", () => {
+    // `base()` carries no `executor` key: an absent key is what `paseo` means.
+    const hc: PlaybookIR = { ...base(), executor: "hc" };
+    const paseo: PlaybookIR = { ...base(), executor: "paseo" };
+
+    expect(diffPlaybookIr(base(), hc).playbook).toEqual(["executor"]);
+    expect(diffPlaybookIr(hc, base()).playbook).toEqual(["executor"]);
+    // `paseo` and absent are the same substrate, so neither side is a change.
+    expect(diffPlaybookIr(base(), paseo)).toEqual(NO_DIFF);
+    expect(diffPlaybookIr(paseo, base())).toEqual(NO_DIFF);
+    expect(diffPlaybookIr(paseo, hc).playbook).toEqual(["executor"]);
+  });
+
+  it("reports an executor edit in the YAML as the executor surface only", () => {
+    const repo = makeRepo({
+      pinned: `title: Pinned\nsteps:\n  - id: a\n    prompt: Draft the plan.\n  - id: b\n    needs: [a]\n    prompt: Review the plan.\n`,
+    });
+    const before = loadPlaybook(repo, "pinned");
+    writeFileSync(
+      join(repo, ".argos", "playbooks", "pinned.yaml"),
+      `title: Pinned\nexecutor: herdr-core\nsteps:\n  - id: a\n    prompt: Draft the plan.\n  - id: b\n    needs: [a]\n    prompt: Review the plan.\n`,
+    );
+    const after = loadPlaybook(repo, "pinned");
+
+    expect(after.executor).toBe("hc");
+    expect(diffPlaybookIr(before, after)).toEqual({
+      stepOrder: false,
+      playbook: ["executor"],
+      inputs: [],
+      steps: [],
+    });
+    // Nothing else in the document changed, so the hash moved for exactly this reason.
+    expect(after.hash).not.toBe(before.hash);
   });
 
   it("ignores the playbook-level surfaces a fork cannot observe", () => {

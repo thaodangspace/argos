@@ -22,7 +22,7 @@ import type { InputDefIR, PlaybookIR, StepIR } from "./ir.js";
  */
 
 /** A playbook-level surface the fork guard compares. `inputs` is reported by name instead. */
-export type PlaybookSurface = "id" | "version" | "isolation" | "after";
+export type PlaybookSurface = "id" | "version" | "isolation" | "executor" | "after";
 
 export interface IrDiff {
   /** Step ids were added, removed, or reordered: the graph is a different shape. */
@@ -45,6 +45,15 @@ export interface IrDiff {
 function isolationKey(isolation: PlaybookIR["isolation"]): string {
   if (isolation === undefined || isolation.mode === "none") return "none";
   return canonicalJson(isolation);
+}
+
+/**
+ * `executor` is optional in the IR and `paseo` is the default, so an absent key and an explicit
+ * `paseo` name the same substrate. Normalize both to `"paseo"` (FR13): only a real change of
+ * substrate may refuse a fork.
+ */
+function executorKey(executor: PlaybookIR["executor"]): string {
+  return executor ?? "paseo";
 }
 
 /**
@@ -95,6 +104,7 @@ export function diffPlaybookIr(before: PlaybookIR, after: PlaybookIR): IrDiff {
   if (before.id !== after.id) playbook.push("id");
   if (before.version !== after.version) playbook.push("version");
   if (isolationKey(before.isolation) !== isolationKey(after.isolation)) playbook.push("isolation");
+  if (executorKey(before.executor) !== executorKey(after.executor)) playbook.push("executor");
   if (canonicalJson(before.after) !== canonicalJson(after.after)) playbook.push("after");
 
   const beforeIds = before.steps.map((step) => step.id);

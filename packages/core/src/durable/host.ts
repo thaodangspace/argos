@@ -497,19 +497,24 @@ export class ArgosHost {
   }
 
   /**
-   * FR2: which substrate this start uses. Today: the request override (which also carries a
-   * schedule's stored value), else the server default.
+   * FR2: which substrate this start uses — the request override (which also carries a schedule's
+   * stored value), else the playbook's own `executor`, else the server default. Resolution happens
+   * once, here, and is frozen into the record (FR5), so a resume never re-resolves it.
    *
-   * Phase 2 inserts `PlaybookIR.executor` between the override and the default here — the seam is
-   * deliberate: the record is written once, from this one function, and never re-resolved.
+   * A request override always wins silently (the point of the flag), including over a playbook
+   * that names another substrate.
    */
   #resolveExecutorId(input: StartRunInput): ExecutorId {
-    if (input.executor === undefined) return this.#defaultExecutor;
-    const id = executorIdFor(input.executor);
-    // FR6: anything the host cannot run is `executor_unavailable`; the request-level
-    // `invalid_request` nuance for an unnormalizable id belongs to the CLI/RPC surface (FR3).
-    if (id === undefined) this.#refuseExecutor(input.executor);
-    return id;
+    if (input.executor !== undefined) {
+      const id = executorIdFor(input.executor);
+      // FR6: anything the host cannot run is `executor_unavailable`; the request-level
+      // `invalid_request` nuance for an unnormalizable id belongs to the CLI/RPC surface (FR3).
+      if (id === undefined) this.#refuseExecutor(input.executor);
+      return id;
+    }
+    // FR4: the playbook's default. An absent key means `paseo`, which is what `defaultExecutor`
+    // is when the operator never changed it; a declared id is checked for registration below.
+    return input.ir.executor ?? this.#defaultExecutor;
   }
 
   /** FR6/FR17: an id with no registered adapter refuses the start before anything exists. */
@@ -1578,6 +1583,7 @@ const FORK_SURFACE_HINTS: Readonly<Record<PlaybookSurface, string>> = {
   version: "the IR format version changed",
   isolation:
     "the isolation block changed; a fork continues in the parent run's execution context",
+  executor: "the executor changed; a fork continues on the parent run's substrate",
   after: "the after-tasks changed; start a new run to change them",
 };
 

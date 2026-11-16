@@ -1,5 +1,11 @@
 import { argosError } from "../errors.js";
 import { isDeniedEnvName, parseEnvGrant, SCRIPT_ENV_DENY } from "../engine/env.js";
+import {
+  DEFAULT_EXECUTOR_ID,
+  EXECUTOR_IDS,
+  normalizeExecutorId,
+  type ExecutorId,
+} from "../executor/model.js";
 import type {
   AfterIR,
   AgentSettingsIR,
@@ -892,6 +898,32 @@ function providersIR(raw: RawProviders | undefined, location: Location): Provide
 }
 
 /**
+ * FR4: the playbook's default substrate, layered bottom-up like `isolation` — top-level
+ * `executor` > `defaults.executor` > the repository `defaults/main.yaml`. `paseo` is the default,
+ * so it resolves to `undefined` and the IR omits the key: a playbook that does not name an
+ * executor keeps its bytes and its hash (FR5).
+ *
+ * An unknown value fails the load. `normalizeExecutorId` answers `invalid_request` for the
+ * caller-facing RPC/CLI gate (FR3), which is the wrong contract for a YAML document, so the
+ * `invalid_request` is caught and re-raised as `playbook_invalid` naming the file — never a step,
+ * which is why the issue path carries the file and the `executor` key instead of a step path.
+ */
+function resolveExecutor(raw: RawPlaybook, ctx: ResolveContext): ExecutorId | undefined {
+  const value = raw.executor ?? raw.defaults?.executor ?? ctx.defaults?.raw.executor;
+  if (value === undefined) return undefined;
+  let id: ExecutorId;
+  try {
+    id = normalizeExecutorId(value);
+  } catch {
+    const message = `unknown executor "${value}": use one of ${EXECUTOR_IDS.join(", ")}`;
+    throw argosError("playbook_invalid", { file: ctx.file }, message, undefined, {
+      issues: [{ path: `${ctx.file}: executor`, message }],
+    });
+  }
+  return id === DEFAULT_EXECUTOR_ID ? undefined : id;
+}
+
+/**
  * Normalize one playbook. Expansion (`expand.ts`) runs afterwards and may replace sub-playbook
  * steps; validation (`validate.ts`) runs on the fully expanded graph.
  */
@@ -933,6 +965,7 @@ export function resolvePlaybook(raw: RawPlaybook, ctx: ResolveContext): Unhashed
     normalizeIsolation(raw.isolation) ??
     normalizeIsolation(raw.defaults?.isolation) ??
     normalizeIsolation(ctx.defaults?.raw.isolation);
+  const executor = resolveExecutor(raw, ctx);
 
   const roles: Record<string, RoleIR> = {};
   for (const [id, role] of ctx.referencedRoles) roles[id] = role;
@@ -940,10 +973,12 @@ export function resolvePlaybook(raw: RawPlaybook, ctx: ResolveContext): Unhashed
   const defaults: DefaultsIR | undefined =
     defaultsAgent !== undefined ||
     isolation !== undefined ||
+    executor !== undefined ||
     Object.keys(ctx.defaults?.raw.labels ?? {}).length > 0
       ? plain<DefaultsIR>({
           agent: defaultsAgent,
           isolation,
+          executor,
           labels: { ...(ctx.defaults?.raw.labels ?? {}) },
         })
       : undefined;
@@ -957,6 +992,7 @@ export function resolvePlaybook(raw: RawPlaybook, ctx: ResolveContext): Unhashed
     outputs,
     concurrency: raw.concurrency,
     isolation,
+    executor,
     steps,
     outcomes: [...(raw.outcomes ?? [])],
     blocks: {} as Record<string, BlockIR>,
