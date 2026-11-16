@@ -17,6 +17,12 @@
  * once, so the restarted process finishes the step at the original instant instead of restarting
  * the pause (the `sleep`-script failure mode).
  *
+ * Scenario E runs a playbook pinned to herdr-core (`executor: hc`) against the deterministic fake hc
+ * port (`ARGOS_FAKE_EXECUTOR=hc`, ledger in `ARGOS_FAKE_HC_DIR`): the second step's terminal is
+ * held `working`, the server is `SIGKILL`ed, and the restarted process adopts that terminal instead
+ * of running it again — one `terminal.run` per step across both lifetimes, and no Paseo agent at
+ * all.
+ *
  * These tests spawn real processes and are deliberately **not** part of `npm test`; run them
  * with `npm run test:e2e` (which builds first).
  */
@@ -41,12 +47,25 @@ const cliRoot = fileURLToPath(new URL("../../../cli", import.meta.url));
 const distIndex = join(cliRoot, "dist", "index.js");
 
 const LEDGER = "fake-paseo-launches.jsonl";
+const HC_LEDGER = "fake-hc-launches.jsonl";
 
 interface LedgerLine {
   readonly requestId: string;
   readonly agentId: string;
   readonly stepId: string;
   readonly attempt: number;
+  readonly at: number;
+  readonly pid: number;
+}
+
+/** One `terminal.run` the fake herdr-core accepted (the hc creation ledger). */
+interface HcLedgerLine {
+  readonly requestId: string;
+  readonly stepId: string;
+  readonly attempt: number;
+  readonly name: string;
+  readonly address: string;
+  readonly template: string | null;
   readonly at: number;
   readonly pid: number;
 }
@@ -254,6 +273,39 @@ function writePlaybook(repo: string, name: string, yaml: string): void {
   writeFileSync(join(directory, `${name}.yaml`), yaml, "utf8");
 }
 
+/**
+ * Read the fake herdr-core creation ledger (`ARGOS_FAKE_HC_DIR/fake-hc-launches.jsonl`).
+ *
+ * It is append-only and written before the readable snapshot, so it is the creation evidence: the
+ * hc scenario asserts one `terminal.run` per step across both process lifetimes.
+ */
+function readHcLedger(directory: string): HcLedgerLine[] {
+  const file = join(directory, HC_LEDGER);
+  if (!existsSync(file)) return [];
+  const lines: HcLedgerLine[] = [];
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const text = line.trim();
+    if (text === "") continue;
+    try {
+      const parsed = JSON.parse(text) as Partial<HcLedgerLine>;
+      if (
+        typeof parsed.requestId === "string" &&
+        typeof parsed.stepId === "string" &&
+        typeof parsed.attempt === "number" &&
+        typeof parsed.name === "string" &&
+        typeof parsed.address === "string" &&
+        typeof parsed.at === "number" &&
+        typeof parsed.pid === "number"
+      ) {
+        lines.push(parsed as HcLedgerLine);
+      }
+    } catch {
+      // Ignore a torn tail line: the test only cares about complete creations.
+    }
+  }
+  return lines;
+}
+
 const THREE_STEPS = [
   "title: Kill restart",
   "steps:",
@@ -294,6 +346,27 @@ const SCHEDULED = [
   "  - id: only",
   '    prompt: "Run the scheduled work"',
   "    poll_ms: 50",
+  "",
+].join("\n");
+
+/**
+ * A playbook pinned to herdr-core (`executor: hc`), with an `hc/<template>` agent target so the
+ * catalog check and the adapter's template resolution both have something to resolve. Two steps:
+ * step 1 finishes, step 2 is held by the fake until the release file appears.
+ */
+const HC_STEPS = [
+  "title: herdr-core restart",
+  "executor: hc",
+  "steps:",
+  "  - id: step1",
+  '    prompt: "First hc step"',
+  "    poll_ms: 50",
+  "    agent: { provider: hc, model: claude }",
+  "  - id: step2",
+  "    needs: [step1]",
+  '    prompt: "Second hc step"',
+  "    poll_ms: 50",
+  "    agent: { provider: hc, model: claude }",
   "",
 ].join("\n");
 
@@ -791,6 +864,121 @@ describe("durability across a real SIGKILL (D17)", () => {
       expect(elapsed).toBeGreaterThanOrEqual(DELAY_MS);
       expect(elapsed).toBeLessThan(DELAY_MS * 1.4);
       console.info(`[e2e] D delay of ${DELAY_MS} ms finished ${elapsed} ms after it started, across a SIGKILL`);
+    },
+    120_000,
+  );
+
+  it(
+    "finishes an hc playbook after a kill mid-step with exactly one terminal per step",
+    async () => {
+      expect(existsSync(distIndex), "run `npm run build` before the E2E suite").toBe(true);
+
+      const home = tempDir("argos-e2e-hc-home-");
+      const repo = tempDir("argos-e2e-hc-repo-");
+      const hcDir = tempDir("argos-e2e-hc-state-");
+      writePlaybook(repo, "hc", HC_STEPS);
+      const releaseFile = join(hcDir, "release-step2");
+      // The paseo fake is on so `paseo` needs no daemon; the hc fake is selected explicitly and
+      // keeps its own state, so the hc ledger cannot be confused with the paseo one.
+      const fakeEnv = {
+        ARGOS_FAKE_EXECUTOR: "hc",
+        ARGOS_FAKE_HC_DIR: hcDir,
+        ARGOS_FAKE_HC_BLOCK_STEP: "step2",
+        ARGOS_FAKE_HC_RELEASE_FILE: releaseFile,
+      };
+
+      const first = await startServe(home, fakeEnv);
+      const firstPid = first.child.pid;
+      expect(firstPid).toBeTypeOf("number");
+      // FR9: one startup line naming the whole registry, `hc` included, with paseo still default.
+      expect(first.stderr()).toContain("[argos] executors: paseo (default), hc");
+
+      const started = await cliJson<{ runId: string; taskId: string }>(
+        ["run", "hc", "--cwd", repo],
+        clientEnv(home, first.port),
+      );
+
+      // Step 1 finishes on hc; step 2's terminal is created and then held `working` by the fake.
+      await waitFor(
+        () => readHcLedger(hcDir).some((line) => line.stepId === "step2"),
+        60_000,
+        "the step2 fake hc terminal to be created",
+      );
+      const before = await waitForStatus(
+        home,
+        first.port,
+        started.runId,
+        (detail) =>
+          detail.status === "running" &&
+          detail.steps.find((step) => step.id === "step2")?.status === "running",
+        "step2 to be running on hc",
+      );
+      expect(before.status).toBe("running");
+      expect(before.executor).toBe("hc");
+      expect(before.steps.find((step) => step.id === "step1")?.status).toBe("completed");
+      expect(before.steps.find((step) => step.id === "step2")?.attemptCount).toBe(1);
+      expect(readHcLedger(hcDir).map((line) => line.stepId).sort()).toEqual(["step1", "step2"]);
+      // Nothing ran on Paseo: the run's substrate is hc, and the paseo fake created no agent.
+      expect(readLedger(home)).toEqual([]);
+      console.info(
+        `[e2e] E before kill: pid=${String(firstPid)} executor=${String(before.executor)} status=${before.status} steps=${before.steps
+          .map((step) => `${step.id}:${step.status}`)
+          .join(",")} hc-ledger=${readHcLedger(hcDir).length}`,
+      );
+
+      // Kill the only writer mid-step, then release the held terminal before the restart so the
+      // new process can settle it (the terminal itself already exists on the fake core).
+      await killServe(first);
+      writeFileSync(releaseFile, "released\n", "utf8");
+
+      const second = await startServe(home, fakeEnv, first.port);
+      const secondPid = second.child.pid;
+      expect(secondPid).toBeTypeOf("number");
+      expect(secondPid).not.toBe(firstPid);
+      expect(second.stderr()).toContain("[argos] executors: paseo (default), hc");
+
+      const done = await waitForStatus(
+        home,
+        second.port,
+        started.runId,
+        (detail) => detail.status === "completed" || detail.status === "failed",
+        "the restarted hc run to finish",
+      );
+      expect(done.status, JSON.stringify(done.steps)).toBe("completed");
+      expect(done.id).toBe(started.runId);
+      expect(done.executor).toBe("hc");
+      expect(done.steps.map((step) => `${step.id}:${step.status}:${step.attemptCount}`)).toEqual([
+        "step1:completed:1",
+        "step2:completed:1",
+      ]);
+
+      // The durability claim for hc: one `terminal.run` per step across both lifetimes, adopted by
+      // the restarted process rather than re-created (the fake core was reloaded from disk).
+      const hcLedger = readHcLedger(hcDir);
+      expect(hcLedger).toHaveLength(2);
+      expect(hcLedger.map((line) => line.stepId).sort()).toEqual(["step1", "step2"]);
+      expect(new Set(hcLedger.map((line) => line.requestId)).size).toBe(2);
+      expect(new Set(hcLedger.map((line) => line.name)).size).toBe(2);
+      expect(new Set(hcLedger.map((line) => line.address)).size).toBe(2);
+      expect(hcLedger.every((line) => line.pid === firstPid)).toBe(true);
+      for (const line of hcLedger) {
+        // The deterministic name is derived from the request id (FR19), and `argos hc` never
+        // passes `rm` at launch (FR26).
+        expect(line.name).toMatch(/^argos-[0-9a-f]{16}$/);
+        expect(line.requestId).toBe(`argos:${started.runId}:${line.stepId}:${line.attempt}`);
+        expect(line.template).toBe("claude");
+      }
+      // Still no Paseo agent: the whole run, before and after the kill, stayed on hc.
+      expect(readLedger(home)).toEqual([]);
+      expect(second.child.exitCode).toBeNull();
+
+      console.info(
+        `[e2e] E after restart: pid=${String(secondPid)} status=${done.status} executor=${String(done.executor)} steps=${done.steps
+          .map((step) => `${step.id}:${step.status}:${step.attemptCount}`)
+          .join(",")} hc-ledger=${hcLedger.length} (${hcLedger
+          .map((line) => `${line.stepId}@pid${line.pid}`)
+          .join(",")})`,
+      );
     },
     120_000,
   );

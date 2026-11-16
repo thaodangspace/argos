@@ -1,11 +1,13 @@
 /**
  * `argos serve` (FR2/FR25) — the **only** process that opens `$ARGOS_HOME/argos.sqlite`.
  *
- * It builds the Paseo executor (or the deterministic `ARGOS_FAKE_PASEO=1` test executor), opens
+ * It builds the executor registry (`paseo` always, `hc` when a real herdr-core answers inside the
+ * 5 s probe or when the test-only `ARGOS_FAKE_EXECUTOR=hc` selects the deterministic fake), opens
  * `ArgosHost` (pid file + SQLite + `resume()`), ensures the bearer token, starts the loopback RPC
- * server, and waits for SIGINT/SIGTERM to close both gracefully. The host is retried once on a
- * transient open failure; `storage_locked` is never retried because another live process owns the
- * home.
+ * server, prints one stderr line naming the registry, and waits for SIGINT/SIGTERM to close both
+ * gracefully. The host is retried once on a transient open failure; `storage_locked` and
+ * `executor_unavailable` are never retried because another live process owns the home and a
+ * missing adapter does not appear by waiting.
  */
 
 import { resolve } from "node:path";
@@ -31,6 +33,14 @@ import {
   fakeProviderCatalog,
   type PaseoClientPort,
 } from "@thaodangspace/argos-core/paseo";
+import {
+  FAKE_HC_VERSION,
+  HC_PROTOCOL_GENERATION,
+  HcCatalog,
+  createFakeHcPort,
+  createHcClient,
+  createHcStepExecutor,
+} from "@thaodangspace/argos-core/hc";
 import type { PaseoProbe } from "@thaodangspace/argos-core/rpc/server";
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
@@ -131,63 +141,183 @@ interface Dependencies {
   readonly close: () => Promise<void>;
 }
 
+/** FR9: the same 5 s bound the provider catalog uses, so a down core never blocks startup. */
+const HC_PROBE_TIMEOUT_MS = 5_000;
+
+/** FR9: what `argos serve` needs from one `hc` registration. */
+interface HcRegistration {
+  readonly executor: ArgosHostOptions["executor"];
+  readonly catalog: HcCatalog;
+  /** FR9: the reachability/version the registry publishes (`GET /info`, `argos doctor`). */
+  readonly info: { readonly reachable: boolean; readonly version?: string; readonly error?: string };
+  readonly close: () => Promise<void>;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * FR9/FR16: the `hc` half of the executor registry.
+ *
+ * - `ARGOS_FAKE_EXECUTOR=hc` (test only) registers the deterministic fake port, file-backed under
+ *   `ARGOS_FAKE_HC_DIR` (else `$ARGOS_HOME`) so a restarted `argos serve` adopts the terminals its
+ *   predecessor created. No socket is opened and no real core is probed.
+ * - Otherwise a real core is probed inside {@link HC_PROBE_TIMEOUT_MS}: `hello` (protocol
+ *   generation 1) then `server.status`, then `templates.list` for the `hc/<template>` catalog. A
+ *   down/incompatible/missing core is a **warning**, never a startup failure: the registry simply
+ *   does not advertise `hc`, and every other substrate keeps working.
+ *
+ * With `ARGOS_FAKE_PASEO=1` and no `ARGOS_FAKE_EXECUTOR`, `hc` is deliberately absent: a test-only
+ * server must not depend on whatever core happens to run on the machine.
+ */
+async function buildHcRegistration(
+  home: string,
+  io: CliIo,
+): Promise<HcRegistration | undefined> {
+  if (process.env["ARGOS_FAKE_EXECUTOR"] === "hc") {
+    io.stderr(
+      "[argos] ARGOS_FAKE_EXECUTOR=hc: using the deterministic herdr-core test executor\n",
+    );
+    const fakeDir = process.env["ARGOS_FAKE_HC_DIR"];
+    const port = createFakeHcPort({ statePath: resolve(fakeDir ?? home) });
+    const catalog = HcCatalog.fromTemplates(await port.templatesList());
+    return {
+      executor: createHcStepExecutor({ port, catalog, home }),
+      catalog,
+      info: { reachable: true, version: FAKE_HC_VERSION },
+      close: async () => undefined,
+    };
+  }
+  if (process.env["ARGOS_FAKE_PASEO"] === "1") return undefined;
+
+  const client = createHcClient();
+  try {
+    const hello = await within(client.hello(), HC_PROBE_TIMEOUT_MS);
+    if (hello.generation !== HC_PROTOCOL_GENERATION) {
+      throw new Error(
+        `the core speaks protocol generation ${hello.generation}; Argos needs ${HC_PROTOCOL_GENERATION}`,
+      );
+    }
+    const status = await within(client.serverStatus(), HC_PROBE_TIMEOUT_MS);
+    const catalog = await within(HcCatalog.load(client), HC_PROBE_TIMEOUT_MS);
+    return {
+      executor: createHcStepExecutor({ port: client, catalog, home }),
+      catalog,
+      info: {
+        reachable: true,
+        ...(status.version.length === 0 ? {} : { version: status.version }),
+      },
+      close: () => client.close(),
+    };
+  } catch (error) {
+    io.stderr(
+      `[argos] warning: herdr-core is not available (${errorText(error)}); the hc executor is not registered\n`,
+    );
+    await client.close().catch(() => undefined);
+    return undefined;
+  }
+}
+
 async function buildDependencies(
   home: string,
   io: CliIo,
   defaultExecutor: ExecutorId,
 ): Promise<Dependencies> {
-  if (process.env["ARGOS_FAKE_PASEO"] === "1") {
-    io.stderr("[argos] ARGOS_FAKE_PASEO=1: using the deterministic test-only executor\n");
-    const catalog = ModelCatalog.fromSnapshot(fakeProviderCatalog());
-    // File-backed by default so a restarted `argos serve` adopts the fake agents it created in
-    // its previous lifetime (Phase 10 D17). `ARGOS_FAKE_PASEO_DIR` moves the state elsewhere.
-    const fakeDir = process.env["ARGOS_FAKE_PASEO_DIR"];
+  const hc = await buildHcRegistration(home, io);
+  // The registry additions of a registered `hc`: its executor, its template catalog, and the
+  // reachability `/info` reports. `paseo` stays `options.executor` and its own catalog option, so
+  // the two descriptors must be **merged**, not spread over each other.
+  const hcExecutors: NonNullable<ArgosHostOptions["executors"]> =
+    hc === undefined ? {} : { hc: hc.executor };
+  const hcCatalogs: NonNullable<ArgosHostOptions["catalogs"]> =
+    hc === undefined ? {} : { hc: hc.catalog };
+  const hcInfo: NonNullable<ArgosHostOptions["executorInfo"]> =
+    hc === undefined ? {} : { hc: hc.info };
+  const closeHc = hc === undefined ? async (): Promise<void> => undefined : hc.close;
+
+  try {
+    if (process.env["ARGOS_FAKE_PASEO"] === "1") {
+      io.stderr("[argos] ARGOS_FAKE_PASEO=1: using the deterministic test-only executor\n");
+      const catalog = ModelCatalog.fromSnapshot(fakeProviderCatalog());
+      // File-backed by default so a restarted `argos serve` adopts the fake agents it created in
+      // its previous lifetime (Phase 10 D17). `ARGOS_FAKE_PASEO_DIR` moves the state elsewhere.
+      const fakeDir = process.env["ARGOS_FAKE_PASEO_DIR"];
+      const host = await openHost({
+        home,
+        executor: createFakeStepExecutor({
+          statePath: fakeDir === undefined ? home : resolve(fakeDir),
+        }),
+        modelCatalog: catalog,
+        defaultExecutor,
+        executorInfo: { paseo: { reachable: true }, ...hcInfo },
+        executors: hcExecutors,
+        catalogs: hcCatalogs,
+        // FR10.4: registered before the first tick, so a catch-up fire during `open()` still prints.
+        onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
+      });
+      return {
+        host,
+        probe: { mode: "fake", snapshot: async () => fakeProviderCatalog() },
+        close: closeHc,
+      };
+    }
+
+    const paseo: PaseoClientPort = createPaseoPort();
+    let catalog: ModelCatalog | undefined;
+    let catalogError: string | undefined;
+    try {
+      catalog = await within(ModelCatalog.load(paseo), HC_PROBE_TIMEOUT_MS);
+    } catch (error) {
+      catalogError = errorText(error);
+      io.stderr(
+        `[argos] warning: could not load the provider catalog (${catalogError}); runs will fail until the daemon is reachable\n`,
+      );
+    }
+    const executor = createAgentStepExecutor({
+      port: paseo,
+      ...(catalog === undefined ? {} : { catalog }),
+    });
     const host = await openHost({
       home,
-      executor: createFakeStepExecutor({
-        statePath: fakeDir === undefined ? home : resolve(fakeDir),
-      }),
-      modelCatalog: catalog,
+      executor,
+      ...(catalog === undefined ? {} : { modelCatalog: catalog }),
       defaultExecutor,
-      // FR10.4: registered before the first tick, so a catch-up fire during `open()` still prints.
+      // FR9: paseo's own reachability, so `argos doctor` can show every registered substrate.
+      executorInfo: {
+        paseo:
+          catalog === undefined
+            ? {
+                reachable: false,
+                error: "the Paseo provider catalog could not be loaded",
+              }
+            : { reachable: true },
+        ...hcInfo,
+      },
+      executors: hcExecutors,
+      catalogs: hcCatalogs,
       onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
     });
     return {
       host,
-      probe: { mode: "fake", snapshot: async () => fakeProviderCatalog() },
-      close: async () => undefined,
+      probe: {
+        url: paseo.url,
+        mode: "live",
+        snapshot: () => paseo.providersSnapshot(),
+      },
+      close: async () => {
+        try {
+          await paseo.close();
+        } finally {
+          await closeHc();
+        }
+      },
     };
-  }
-
-  const paseo: PaseoClientPort = createPaseoPort();
-  let catalog: ModelCatalog | undefined;
-  try {
-    catalog = await within(ModelCatalog.load(paseo), 5_000);
   } catch (error) {
-    io.stderr(
-      `[argos] warning: could not load the provider catalog (${error instanceof Error ? error.message : String(error)}); runs will fail until the daemon is reachable\n`,
-    );
+    // A failed open must not leak the hc socket this process already opened.
+    await closeHc().catch(() => undefined);
+    throw error;
   }
-  const executor = createAgentStepExecutor({
-    port: paseo,
-    ...(catalog === undefined ? {} : { catalog }),
-  });
-  const host = await openHost({
-    home,
-    executor,
-    ...(catalog === undefined ? {} : { modelCatalog: catalog }),
-    defaultExecutor,
-    onScheduleFire: (event) => io.stderr(formatScheduleFireLine(event)),
-  });
-  return {
-    host,
-    probe: {
-      url: paseo.url,
-      mode: "live",
-      snapshot: () => paseo.providersSnapshot(),
-    },
-    close: () => paseo.close(),
-  };
 }
 
 export async function serveCommand(args: ParsedArgs, io: CliIo): Promise<number> {

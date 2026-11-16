@@ -7,10 +7,13 @@
  * module that opens a socket, and nothing here spawns a process.
  *
  * Phase 6 adds the two pieces the durable host consumes: `HcCatalog` (the `hc/<template>` targets,
- * FR18) and `createHcStepExecutor` (the `StepExecutor` over terminals, FR19–FR26).
+ * FR18) and `createHcStepExecutor` (the `StepExecutor` over terminals, FR19–FR26). Phase 7 adds
+ * `fake.ts`, the deterministic port `argos serve` selects with the test-only `ARGOS_FAKE_EXECUTOR=hc`
+ * (the unit suites keep driving the richer fake in `test/fakes/hc.ts`).
  */
 
 export * from "./port.js";
 export * from "./client.js";
 export * from "./catalog.js";
 export * from "./agent-step.js";
+export * from "./fake.js";
