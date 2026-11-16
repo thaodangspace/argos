@@ -201,9 +201,26 @@ export interface HcReadResult {
   readonly why: string | null;
 }
 
-/** `terminal.rm` result. hc 0.1.21 answers with the removed terminal's address. */
+/**
+ * `terminal.rm` result. hc 0.1.21 answers with the removed terminal's address. hc **refuses to
+ * remove a live terminal** (`kind: "live"`), so a caller that wants a still-running program gone
+ * kills it first ({@link HcPort.killTerminal}).
+ */
 export interface HcRemoveResult {
   readonly removed: string;
+}
+
+/**
+ * `terminal.kill` result: the terminal whose program was signalled.
+ *
+ * Settle cleanup (FR26) is the only caller: `argos.step` removes its terminal once the attempt is
+ * over, and a terminal hc still reports as `live` must be stopped before `terminal.rm` accepts it.
+ * The response is normalized defensively (hc answers with the terminal or its address), because
+ * this call is best effort: a core that cannot kill leaves the terminal behind, never a failed
+ * step.
+ */
+export interface HcKillResult {
+  readonly killed: string;
 }
 
 // ------------------------------------------------------------------ the port
@@ -219,6 +236,8 @@ export interface HcPort {
   listTerminals(options?: HcListOptions): Promise<HcTerminal[]>;
   sendText(input: HcSendInput): Promise<HcSendResult>;
   readTerminal(terminal: string, options?: HcReadOptions): Promise<HcReadResult>;
+  /** Stop a live terminal's program (settle cleanup, before {@link removeTerminal}). */
+  killTerminal(terminal: string): Promise<HcKillResult>;
   removeTerminal(terminal: string): Promise<HcRemoveResult>;
 }
 

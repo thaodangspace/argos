@@ -50,6 +50,7 @@ import {
   normalizeHcKind,
   type HcHello,
   type HcFirstMessage,
+  type HcKillResult,
   type HcListOptions,
   type HcPort,
   type HcReadOptions,
@@ -682,6 +683,13 @@ export function createHcClient(options: HcClientOptions = {}): HcClient {
         how: stringOr(raw["how"], ""),
         why: nullableString(raw["why"]),
       };
+    },
+
+    async killTerminal(terminal: string): Promise<HcKillResult> {
+      // hc answers with the terminal (or its address); settle cleanup only needs the address back.
+      const raw = await call("terminal.kill", { terminal });
+      const record = isRecord(raw) ? raw : {};
+      return { killed: stringOr(record["killed"], stringOr(record["address"], terminal)) };
     },
 
     async removeTerminal(terminal: string): Promise<HcRemoveResult> {
