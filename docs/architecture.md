@@ -447,7 +447,65 @@ panel's run meta/step rows render; after tasks are separate runs and are not cou
 parent. The plugin holds no durable state: teardown closes only its HTTP client and streams, and a
 new plugin instance reconnects to the same `argos serve` run.
 
+## Web UI (`/ui`)
+
+`argos serve` also hosts a SvelteKit SPA under `/ui` (same port, same origin). `GET /` answers a
+`302` to `/ui/` when the UI is present; without a UI directory the server is API-only and `/ui`
+answers `404`.
+
+- **Build and packaging.** `packages/web` is a private workspace (`@thaodangspace/argos-web`,
+  Svelte 5 runes, `@sveltejs/adapter-static`, `paths.base = "/ui"`). `npm run build:ui` writes
+  `packages/web/build/`; `packages/cli/scripts/copy-ui.mjs` copies it to `packages/cli/ui/` and
+  writes `build.json`, so the CLI tarball carries the UI (`files: ["dist", "ui", …]`). A development
+  checkout points at the build with `ARGOS_UI_DIR=packages/web/build`; an empty `ARGOS_UI_DIR`
+  disables the UI. `argos serve` logs one `[argos] ui <dir> (build <id>)` line, or one warning when
+  the directory has no `index.html`.
+- **Static rules.** Only `/ui` and `/ui/...` are UI paths, so the SPA route `/ui/runs/<id>` can never
+  shadow `GET /runs/:id`. An extension-less path falls back to `index.html` (deep links work); a
+  missing path **with** an extension is a `404` (a stale chunk never receives HTML). Path segments
+  are decoded, `..`/separator/NUL are rejected, and the resolved file's realpath must stay inside
+  the UI directory. `_app/immutable/*` is cached immutably; everything else is `no-store`.
+- **Browser session.** The bearer token never reaches the browser. Each server process mints one
+  random session id and hands it to the browser in an `HttpOnly; SameSite=Strict; Path=/` cookie on
+  HTML responses; every API route accepts either `Authorization: Bearer <token>` (unchanged) or that
+  cookie. A cookie-authenticated write additionally requires an `Origin` equal to the request's
+  `Host` (and refuses `Sec-Fetch-Site: cross-site`), because `SameSite` compares sites, not ports —
+  a page on another loopback port would otherwise be "same-site" with the server. A restart
+  invalidates every session; the SPA reloads once to obtain a fresh cookie.
+- **Data.** The UI is a projection of the same read model as the CLI and panel: `GET /runs`,
+  `GET /runs/:id` (attempts, declared outputs, bounded history), `GET /events` (SSE), gate decisions,
+  cancel/retry/fork, and `GET /playbooks?cwd=` for the "Run workflow" form. It renders steps, status,
+  duration, attempts, usage/cost, declared outputs, gates, and history — never prompts or agent
+  transcripts, which the contract does not expose.
+- **Shared view model.** Labels, tones, glyphs, filters, grouping, the step log and history text live
+  in `@thaodangspace/argos-core/view`; the Paseo panel re-exports them and the web UI imports them, so
+  a new status or history event is one edit for both clients (`core/test/view/purity.test.ts` keeps
+  that module free of Node, storage, and adapter imports).
+
+## Database maintenance (`/db/*`)
+
+`argos serve` is the only writer, so maintenance is not a second process that opens the file: it is
+a small route family on the same token and the same connection.
+
+| Route | Behavior |
+|---|---|
+| `GET /db/stats` | `argos db stats`: file and WAL size, SQLite page counters, and row counts over pi-durable's tables (`documents`/`document_revisions`, `tasks`, `entries`, `conversations`, `submissions`, live runs by status, idempotency receipts and how many are past the 24 h TTL). Read-only. |
+| `POST /db/purge` | `argos db purge --older-than <n>(s\|m\|h\|d) [--dry-run] [--vacuum]`: retires every **terminal** run whose `updatedAt` is older than the window through `removeRun`, retires expired idempotency receipts, and reclaims the terminal `tasks` rows of the runs it removed. A live run is skipped as `active`, a refused removal is reported with its stable code, and worktrees are **never** removed. `dry-run` reports the same counts and changes nothing. |
+| `POST /db/vacuum` | `argos db vacuum`: `VACUUM`, then a truncating WAL checkpoint (the order matters — the rewrite goes through the WAL, so checkpointing afterwards is what shrinks the on-disk total). |
+
+Why the task rows: `removeRun` / `argos rm` deliberately keep pi-durable's task records (nothing
+reads them once the mirror is gone, and the engine never mutates a terminal task), but they are
+the bulk of the file — a run's `argos.run` checkpoint duplicates the whole record. A purge deletes
+only rows that are already `terminal` **and** belong to a run it just removed, plus their
+`record_ids` claims; ids are minted from a monotonic counter, so dropping a claim cannot collide
+with a future row. Retired documents (`retired_at`) are left in place: they are small, and the
+document table is pi-durable's to read.
+
+Nothing runs on a timer. A purge or a vacuum is an operator action with an explicit window, the
+same posture as `argos worktree gc`.
+
 ## Security
+
 
 Argos is a **single-user, local** tool. It does not sandbox the work it starts: a playbook's scripts
 and agents run as the local user, with that user's files, environment, and credentials (whatever
@@ -478,8 +536,9 @@ Possession of the token means full control of that server:
   therefore equivalent to code execution as the operator, not a read-only status key.
 - `POST /runs/:id/gates/:gateId` approves human gates (including `max_loops` grants),
   `cancel`/`retry`/`DELETE /runs/:id` change or retire runs, and the worktree routes remove
-  checkouts. `GET` routes expose run metadata only: no prompts, transcripts, agent messages, or
-  playbook IR ever appear in `RunSummary`/`RunDetail`.
+  checkouts. `POST /db/purge` retires every old terminal run in one call (and its task rows) and
+  `POST /db/vacuum` rewrites the database file. `GET` routes expose run metadata only: no prompts,
+  transcripts, agent messages, or playbook IR ever appear in `RunSummary`/`RunDetail`.
 
 The token and `ARGOS_PASEO_PASSWORD` are never logged, never stored in the database, and never
 returned by a route.
@@ -526,6 +585,29 @@ paths are invisible). Worktree cleanup is manual (`argos worktree rm`, `argos wo
 **record-only**: the path and branch come from the stored run record, guarded against
 `<home>/worktrees/<runId>` and `argos/<runId>`, so an API caller cannot point removal at an
 arbitrary directory. gc only *reports* a directory that no run index entry claims.
+
+### Browser session (Web UI)
+
+The embedded UI (`/ui`) needs a credential a browser can use: the token file is `0600` and
+JavaScript must not hold the token, and `EventSource` cannot set an `Authorization` header. The
+server therefore mints one random **session id per process**, kept only in memory, and sets it in an
+`HttpOnly; SameSite=Strict; Path=/` cookie on HTML responses. Every route accepts the bearer token
+(unchanged) or that cookie; a restart invalidates all sessions.
+
+This is deliberately equivalent to the token in capability, not broader:
+
+- The cookie is unreadable from JavaScript (`HttpOnly`) and never leaves the process/filesystem
+  (not persisted, not logged).
+- `SameSite=Strict` stops cross-site sends, and `Sec-Fetch-Site: cross-site` is refused outright.
+- Because `SameSite` compares *sites* (scheme + registrable domain), two loopback ports are
+  "same-site"; a cookie-authenticated **write** therefore also requires `Origin` to equal the
+  request's `Host`. Reads are safe from another origin because no CORS headers are configured.
+- Setting the cookie on `GET /ui/...` means any local caller can obtain a session — exactly as any
+  local caller can already read `$ARGOS_HOME/token`; the threat model treats same-user processes as
+  trusted. The cookie grants nothing the token does not.
+- The static shell and its assets are served **before** authentication (they contain no run data,
+  and the shell is what delivers the cookie). Only `/ui*` is claimed that way; every API route keeps
+  the bearer/cookie check.
 
 ### Plugin confinement
 

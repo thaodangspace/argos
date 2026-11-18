@@ -44,6 +44,7 @@ import {
 import type { PaseoProbe } from "@thaodangspace/argos-core/rpc/server";
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
+import { inspectUi, resolveUiDir } from "../ui-dir.js";
 import {
   EXIT_RUNTIME,
   REQUIRED_NODE_VERSION,
@@ -361,13 +362,26 @@ export async function serveCommand(args: ParsedArgs, io: CliIo): Promise<number>
     // FR9/NFR Observability: one stderr line naming the registry and the default. `--json` keeps
     // stdout to its single receipt line, so this never disturbs the startup contract.
     io.stderr(formatExecutorLine(dependencies.host.executors));
+    // Spec FR18: `ARGOS_UI_DIR` → the UI copied into the package. A configured directory that is
+    // missing its shell is a warning (API-only), never a startup failure.
+    const uiDir = resolveUiDir(process.env);
+    const ui = inspectUi(uiDir);
+    if (uiDir !== undefined && ui === undefined) {
+      io.stderr(
+        `[argos] warning: no UI at ${uiDir} (missing index.html); serving the API only\n`,
+      );
+    }
     const server = await createRpcServer({
       host: dependencies.host,
       home,
       port,
       cwd: process.cwd(),
       paseo: dependencies.probe,
+      ...(ui === undefined ? {} : { ui: { dir: ui.dir } }),
     });
+    if (ui !== undefined) {
+      io.stderr(`[argos] ui ${ui.dir}${ui.buildId === undefined ? "" : ` (build ${ui.buildId})`}\n`);
+    }
 
     if (args.json) {
       io.stdout(

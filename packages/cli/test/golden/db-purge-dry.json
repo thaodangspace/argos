@@ -1,0 +1,39 @@
+{
+  "dryRun": true,
+  "olderThanMs": 2592000000,
+  "removed": [
+    {
+      "runId": "run-old-1",
+      "status": "completed",
+      "updatedAt": 1790000000000
+    },
+    {
+      "runId": "run-old-2",
+      "status": "failed",
+      "updatedAt": 1790100000000
+    },
+    {
+      "runId": "run-old-3",
+      "status": "cancelled",
+      "updatedAt": 1790200000000,
+      "worktree": "/home/worktrees/run-old-3"
+    }
+  ],
+  "skipped": [
+    {
+      "runId": "run-live",
+      "reason": "active"
+    }
+  ],
+  "tasksRemoved": 42,
+  "receiptsRetired": 4,
+  "vacuumed": false,
+  "before": {
+    "bytes": 12345678,
+    "walBytes": 4194304
+  },
+  "after": {
+    "bytes": 11010048,
+    "walBytes": 0
+  }
+}

@@ -10,3 +10,6 @@ coverage/
 .env
 .env.*
 .vitest/
+.svelte-kit/
+packages/web/build/
+packages/cli/ui/

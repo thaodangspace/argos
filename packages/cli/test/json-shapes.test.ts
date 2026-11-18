@@ -340,6 +340,60 @@ describe("argos worktree (FR4.6)", () => {
   });
 });
 
+describe("argos db", () => {
+  it("argos db stats --json is the read-only contract shape", async () => {
+    const result = await invoke(["db", "stats", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("db-stats.json", result.json);
+    const request = current().stub.requests.find(
+      (candidate) => candidate.method === "GET" && candidate.path === "/db/stats",
+    );
+    expect(request?.authorization).toBe(`Bearer ${current().stub.token}`);
+  });
+
+  it("argos db purge --json sends olderThan and keeps --dry-run/--vacuum boolean", async () => {
+    const dry = await invoke(["db", "purge", "--older-than", "30d", "--dry-run", "--json"]);
+    expect(dry.code).toBe(0);
+    expectGolden("db-purge-dry.json", dry.json);
+    const dryRequest = current().stub.requests.find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/db/purge",
+    );
+    expect(dryRequest?.body).toEqual({ olderThan: "30d", dryRun: true });
+
+    const before = current().stub.requests.length;
+    const purged = await invoke(["db", "purge", "--older-than", "30d", "--vacuum", "--json"]);
+    expect(purged.code).toBe(0);
+    expectGolden("db-purge.json", purged.json);
+    const sent = current().stub.requests.slice(before).find((request) => request.path === "/db/purge");
+    expect(sent?.body).toEqual({ olderThan: "30d", vacuum: true });
+  });
+
+  it("argos db vacuum --json reports both sizes", async () => {
+    const result = await invoke(["db", "vacuum", "--json"]);
+    expect(result.code).toBe(0);
+    expectGolden("db-vacuum.json", result.json);
+    const request = current().stub.requests.find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/db/vacuum",
+    );
+    expect(request?.body).toEqual({});
+  });
+
+  it("exits 1 for a usage error (no --older-than, unknown option, unknown sub-command)", async () => {
+    const missing = await invoke(["db", "purge", "--json"]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("--older-than");
+    expect(current().stub.requests.some((request) => request.path === "/db/purge")).toBe(false);
+
+    const unknown = await invoke(["db", "stats", "--nope", "--json"]);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain("unknown option --nope");
+
+    const noSub = await invoke(["db", "--json"]);
+    expect(noSub.code).toBe(1);
+    expect(noSub.stderr).toContain("db needs a sub-command");
+  });
+});
+
 describe("argos doctor --json", () => {
   it("reports storage, schema, port, daemons, providers, and pending gates", async () => {
     const result = await invoke(["doctor", "--json"]);

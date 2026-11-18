@@ -1,0 +1,11 @@
+{
+  "vacuumed": true,
+  "before": {
+    "bytes": 12345678,
+    "walBytes": 4194304
+  },
+  "after": {
+    "bytes": 6291456,
+    "walBytes": 0
+  }
+}

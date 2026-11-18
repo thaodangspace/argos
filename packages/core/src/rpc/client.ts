@@ -15,6 +15,10 @@ import { readFileSync } from "node:fs";
 import {
   DEFAULT_ARGOS_PORT,
   type CancelRunResponse,
+  type DbPurgeRequest,
+  type DbPurgeResponse,
+  type DbStats,
+  type DbVacuumResponse,
   type RemoveRunResponse,
   type DecideGateRequest,
   type GcWorktreesRequest,
@@ -179,6 +183,21 @@ export class RpcClient {
   /** `POST /worktrees/gc` (`argos worktree gc`, FR4.5). */
   async gcWorktrees(body: GcWorktreesRequest): Promise<GcWorktreesResponse> {
     return this.request<GcWorktreesResponse>("POST", "/worktrees/gc", body);
+  }
+
+  /** `GET /db/stats` (`argos db stats`). */
+  async dbStats(): Promise<DbStats> {
+    return this.request<DbStats>("GET", "/db/stats");
+  }
+
+  /** `POST /db/purge` (`argos db purge`). */
+  async purgeDb(body: DbPurgeRequest): Promise<DbPurgeResponse> {
+    return this.request<DbPurgeResponse>("POST", "/db/purge", body);
+  }
+
+  /** `POST /db/vacuum` (`argos db vacuum`). */
+  async vacuumDb(): Promise<DbVacuumResponse> {
+    return this.request<DbVacuumResponse>("POST", "/db/vacuum", {});
   }
 
   /** `POST /runs/:id/cancel`. */

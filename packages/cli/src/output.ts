@@ -119,6 +119,20 @@ export function formatTokens(value: number): string {
   return `${trimZero((value / 1_000_000_000).toFixed(2))}B`;
 }
 
+/** `12_345_678` -> "11.8 MB"; `0` -> "0 B". Binary units, one decimal above a kilobyte. */
+export function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${Math.round(value)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let amount = value / 1024;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount.toFixed(1)} ${units[unit]}`;
+}
+
 function trimZero(text: string): string {
   return text.replace(/\.?0+$/, "");
 }
@@ -183,6 +197,9 @@ Usage:
                      [--isolation none|worktree] [--executor paseo|hc] [--overlap skip|allow]
                      [--catch-up all|0|<n>(s|m|h|d)] [--keep <n>|all] [--json]
   argos schedule ls|show <id>|pause <id>|resume <id>|run <id>|rm <id> [--json]
+  argos db stats [--json]
+  argos db purge --older-than <n>(s|m|h|d) [--dry-run] [--vacuum] [--json]
+  argos db vacuum [--json]
   argos serve [--port N] [--home dir] [--default-executor paseo|hc] [--json]
   argos doctor [--home dir] [--port N] [--json]
 

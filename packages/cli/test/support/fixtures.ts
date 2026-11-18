@@ -1,6 +1,9 @@
 /** Deterministic contract fixtures shared by the CLI golden tests and their stub server. */
 
 import type {
+  DbPurgeResponse,
+  DbStats,
+  DbVacuumResponse,
   ExecutorInfo,
   GateSummary,
   RunDetail,
@@ -301,5 +304,74 @@ export const HC_EXECUTOR: ExecutorInfo = {
     interactiveBlocked: true,
     scheduleSafe: true,
   },
+};
+
+/** `GET /db/stats` (`argos db stats`). Fixed sizes/counts; the goldens never touch a real file. */
+export const DB_STATS: DbStats = {
+  path: "/home/argos.sqlite",
+  bytes: 12_345_678,
+  walBytes: 4_194_304,
+  pageSize: 4_096,
+  pageCount: 3_014,
+  freePages: 12,
+  journalMode: "wal",
+  runs: { total: 244, active: 1 },
+  documents: {
+    total: 535,
+    live: 288,
+    retired: 247,
+    byKind: [
+      { kind: "argos.gate", live: 33, retired: 3, bytes: 4_356 },
+      { kind: "argos.history", live: 122, retired: 122, bytes: 30_146 },
+      { kind: "argos.run", live: 122, retired: 122, bytes: 29_170 },
+      { kind: "argos.runs", live: 1, retired: 0, bytes: 70 },
+    ],
+  },
+  tasks: {
+    total: 1_560,
+    live: 4,
+    terminal: 1_556,
+    byKind: [
+      { kind: "argos.delay", live: 0, terminal: 53, bytes: 29_499 },
+      { kind: "argos.gate", live: 0, terminal: 36, bytes: 32_494 },
+      { kind: "argos.run", live: 1, terminal: 247, bytes: 3_710_970 },
+      { kind: "argos.script", live: 0, terminal: 961, bytes: 826_414 },
+      { kind: "argos.step", live: 3, terminal: 259, bytes: 2_461_608 },
+    ],
+  },
+  revisions: 288,
+  entries: 0,
+  conversations: 1,
+  submissions: 0,
+  receipts: { total: 12, expired: 4 },
+};
+
+/** `POST /db/purge` (`argos db purge`): three old runs, one live one skipped. */
+export const DB_PURGE: DbPurgeResponse = {
+  dryRun: false,
+  olderThanMs: 2_592_000_000,
+  removed: [
+    { runId: "run-old-1", status: "completed", updatedAt: 1_790_000_000_000 },
+    { runId: "run-old-2", status: "failed", updatedAt: 1_790_100_000_000 },
+    {
+      runId: "run-old-3",
+      status: "cancelled",
+      updatedAt: 1_790_200_000_000,
+      worktree: "/home/worktrees/run-old-3",
+    },
+  ],
+  skipped: [{ runId: "run-live", reason: "active" }],
+  tasksRemoved: 42,
+  receiptsRetired: 4,
+  vacuumed: false,
+  before: { bytes: 12_345_678, walBytes: 4_194_304 },
+  after: { bytes: 11_010_048, walBytes: 0 },
+};
+
+/** `POST /db/vacuum` (`argos db vacuum`). */
+export const DB_VACUUM: DbVacuumResponse = {
+  vacuumed: true,
+  before: { bytes: 12_345_678, walBytes: 4_194_304 },
+  after: { bytes: 6_291_456, walBytes: 0 },
 };
 

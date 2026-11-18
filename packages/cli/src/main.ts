@@ -9,6 +9,7 @@ import {
   rmCommand,
 } from "./commands/actions.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { dbCommand } from "./commands/db.js";
 import { gatesCommand, lsCommand, statusCommand } from "./commands/runs.js";
 import { runCommand } from "./commands/run.js";
 import { scheduleCommand } from "./commands/schedule.js";
@@ -69,6 +70,8 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
       return scheduleCommand(args, io);
     case "doctor":
       return doctorCommand(args, io);
+    case "db":
+      return dbCommand(args, io);
     case "serve": {
       // Lazy: `argos run` must never load the durable host (or SQLite) into its process (FR3).
       const module = await import("./commands/serve.js");

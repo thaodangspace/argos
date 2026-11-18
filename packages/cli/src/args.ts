@@ -18,7 +18,15 @@ export interface ParsedArgs {
  * Flags that never take a value. `--force <runId>` and `--dry-run` must stay boolean, otherwise the
  * parser would swallow the positional that follows them.
  */
-const BOOLEAN_FLAGS = new Set(["json", "help", "force", "delete-branch", "dry-run", "paused"]);
+const BOOLEAN_FLAGS = new Set([
+  "json",
+  "help",
+  "force",
+  "delete-branch",
+  "dry-run",
+  "paused",
+  "vacuum",
+]);
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const positionals: string[] = [];

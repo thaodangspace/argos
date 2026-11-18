@@ -33,9 +33,13 @@ import {
   type TaskRecord,
   type Tx,
 } from "@earendil-works/pi-durable";
-import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import {
+  SqliteStorage,
+  type SqliteDatabase,
+} from "@earendil-works/pi-durable/storage/sqlite";
+import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 
-import { ArgosError, type ArgosIssue } from "../errors.js";
+import { ArgosError, isArgosError, type ArgosIssue } from "../errors.js";
 import {
   DEFAULT_EXECUTOR_CAPABILITIES,
   DEFAULT_EXECUTOR_ID,
@@ -63,6 +67,20 @@ import {
 import { cloneRecord, downstreamClosure, hydrateRunRecord, type DraftRecord } from "../engine/index.js";
 import type { Clock, StepExecutor } from "./context.js";
 import { systemClock } from "./context.js";
+import {
+  collectDbStats,
+  countTasksForRuns,
+  dbFileSizes,
+  deleteTasksForRuns,
+  expiredReceiptKeys,
+  selectRunsForPurge,
+  vacuumDatabase,
+  type DbPurgeOptions,
+  type DbPurgeResult,
+  type DbPurgedRun,
+  type DbStats,
+  type DbVacuumResult,
+} from "./db.js";
 import { createStubModels } from "./host-models.js";
 import { validateRunCwd } from "./run-request.js";
 import type {
@@ -170,6 +188,8 @@ export class ArgosHost {
   readonly #scriptTask: ReturnType<typeof createScriptTaskDefinition>;
   readonly #git: GitRunner | undefined;
   readonly #home: string | undefined;
+  /** The file-backed SQLite connection (`undefined` when storage was injected). */
+  readonly #db: SqliteDatabase | undefined;
   readonly #ownsPid: boolean;
   /** FR4.1: the prepare/commit halves exposed to `durable/schedules.ts` (internal, never exported). */
   readonly #startPort: RunStartPort;
@@ -194,6 +214,7 @@ export class ArgosHost {
     scriptTask: ReturnType<typeof createScriptTaskDefinition>;
     git?: GitRunner;
     home: string | undefined;
+    db?: SqliteDatabase;
     ownsPid: boolean;
   }) {
     this.#harness = init.harness;
@@ -212,6 +233,7 @@ export class ArgosHost {
     this.#scriptTask = init.scriptTask;
     this.#git = init.git;
     this.#home = init.home;
+    this.#db = init.db;
     this.#ownsPid = init.ownsPid;
     // FR4.1/FR2.4: `durable/schedules.ts` reaches the private prepare/commit halves **only** through
     // this port, so the fire and `POST /runs` cannot drift apart. Built here, not in `open`, so the
@@ -303,6 +325,7 @@ export class ArgosHost {
     );
 
     let storage: Storage;
+    let db: SqliteDatabase | undefined;
 
     if (options.storage !== undefined) {
       storage = options.storage;
@@ -316,7 +339,11 @@ export class ArgosHost {
       acquirePidFile(ownedHome);
       ownsPid = true;
       try {
-        storage = await openNodeSqliteStorage(dbPath(ownedHome));
+        // The connection is kept, not just wrapped: `argos db` reads the same handle (stats,
+        // purge, vacuum) so it never opens a second writer against the file.
+        const database = await openNodeSqliteDatabase(dbPath(ownedHome));
+        db = database;
+        storage = await SqliteStorage.open(database);
         enforceStorageModes(ownedHome);
       } catch (error) {
         if (ownsPid) releasePidFile(ownedHome);
@@ -357,6 +384,7 @@ export class ArgosHost {
       scriptTask,
       ...(options.git === undefined ? {} : { git: options.git }),
       home,
+      ...(db === undefined ? {} : { db }),
       ownsPid,
     });
     // FR29: a host always resumes what the last process left; `startRun` resumes again for new work.
@@ -1103,7 +1131,11 @@ export class ArgosHost {
       if (clientRequestId !== undefined) {
         const receipt = await tx.doc(IdempotencyDocFamily, clientRequestId, EMPTY_IDEMPOTENCY_DOC);
         // Only drop a receipt that still names this run: the key may have been reused after expiry.
-        if (receipt.runId === runId) await tx.retireDoc(IdempotencyDocFamily, clientRequestId);
+        // An empty receipt is the seed the read above just created (the receipt was already gone), so
+        // it is retired too instead of being left behind as a live empty document.
+        if (receipt.runId === runId || receipt.runId === "") {
+          await tx.retireDoc(IdempotencyDocFamily, clientRequestId);
+        }
       }
       const index = await tx.doc(RunsIndexDoc);
       const at = index.ids.indexOf(runId);
@@ -1168,6 +1200,119 @@ export class ArgosHost {
       ...(options.deleteBranch === undefined ? {} : { deleteBranch: options.deleteBranch }),
       ...(this.#git === undefined ? {} : { git: this.#git }),
     });
+  }
+
+  /**
+   * `argos db stats` (`GET /db/stats`): file size, page counters, and row counts over pi-durable's
+   * own tables. Reads only; it never writes and never runs a checkpoint.
+   */
+  async dbStats(): Promise<DbStats> {
+    this.#assertOpen();
+    const { db, path } = this.#requireDb();
+    return collectDbStats({ db, path, now: this.#clock.now() });
+  }
+
+  /**
+   * `argos db purge` (`POST /db/purge`): retire terminal runs older than the window through
+   * `removeRun`, retire expired idempotency receipts, and reclaim the terminal task rows of the
+   * runs it removed. With `dryRun` nothing is touched and the report says what would happen.
+   *
+   * A live run is skipped as `active` (the mirror is the source of truth, so a run that finishes
+   * during the purge is still safe), a refused removal is reported with its stable code and does
+   * not stop the rest, and worktrees are **never** removed — `argos worktree rm|gc` owns those.
+   */
+  async purgeDb(options: DbPurgeOptions): Promise<DbPurgeResult> {
+    this.#assertOpen();
+    const { db, path } = this.#requireDb();
+    const before = dbFileSizes(path);
+    const now = this.#clock.now();
+    const docs = await this.listRuns();
+    const selection = selectRunsForPurge({
+      runs: docs.map((doc) => ({ runId: doc.record.id, record: doc.record })),
+      now,
+      olderThanMs: options.olderThanMs,
+    });
+    const dryRun = options.dryRun === true;
+    const removed: DbPurgedRun[] = [];
+    const skipped = [...selection.skipped];
+    let tasksRemoved = 0;
+    let receiptsRetired = 0;
+
+    if (dryRun) {
+      removed.push(...selection.candidates);
+      tasksRemoved = await countTasksForRuns(
+        db,
+        selection.candidates.map((candidate) => candidate.runId),
+      );
+      receiptsRetired = (await expiredReceiptKeys({ db, now })).length;
+    } else {
+      for (const candidate of selection.candidates) {
+        try {
+          const result = await this.removeRun(candidate.runId);
+          removed.push({
+            ...candidate,
+            ...(result.worktree === undefined ? {} : { worktree: result.worktree }),
+          });
+        } catch (error) {
+          skipped.push({
+            runId: candidate.runId,
+            reason: isArgosError(error) ? error.code : "internal_error",
+          });
+        }
+      }
+      tasksRemoved = await deleteTasksForRuns(
+        db,
+        removed.map((run) => run.runId),
+      );
+      receiptsRetired = await this.#retireExpiredReceipts(db, now);
+    }
+
+    let vacuumed = false;
+    if (!dryRun && options.vacuum === true) {
+      await vacuumDatabase(db);
+      vacuumed = true;
+    }
+    return {
+      dryRun,
+      olderThanMs: options.olderThanMs,
+      removed,
+      skipped,
+      tasksRemoved,
+      receiptsRetired,
+      vacuumed,
+      before,
+      after: dbFileSizes(path),
+    };
+  }
+
+  /** `argos db vacuum` (`POST /db/vacuum`): rewrite the file compactly, then truncate the WAL. */
+  async vacuumDb(): Promise<DbVacuumResult> {
+    this.#assertOpen();
+    const { db, path } = this.#requireDb();
+    const before = dbFileSizes(path);
+    await vacuumDatabase(db);
+    return { vacuumed: true, before, after: dbFileSizes(path) };
+  }
+
+  /** Database maintenance reads and writes the one connection the host opened. */
+  #requireDb(): { db: SqliteDatabase; path: string } {
+    if (this.#db === undefined || this.#home === undefined) {
+      throw new ArgosError(
+        "invalid_request",
+        "database maintenance needs file-backed storage under an ARGOS_HOME; this host was opened with injected storage",
+      );
+    }
+    return { db: this.#db, path: dbPath(this.#home) };
+  }
+
+  /** Retire the receipts past their TTL in one commit (the sanctioned document path). */
+  async #retireExpiredReceipts(db: SqliteDatabase, now: number): Promise<number> {
+    const keys = await expiredReceiptKeys({ db, now });
+    if (keys.length === 0) return 0;
+    await this.#harness.commit(async (tx) => {
+      for (const key of keys) await tx.retireDoc(IdempotencyDocFamily, key);
+    }, this.#context);
+    return keys.length;
   }
 
   /** The `clientRequestId` the run's task was created with, if any (D15 receipt to retire). */

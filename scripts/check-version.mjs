@@ -27,7 +27,7 @@ const PUBLISHED = [
   { dir: "packages/cli", dependsOn: { "@thaodangspace/argos-core": null } },
 ];
 /** Workspaces that stay private (installed by path, not by npm). */
-const UNPUBLISHED = ["packages/paseo-plugin"];
+const UNPUBLISHED = ["packages/paseo-plugin", "packages/web"];
 
 const readManifest = (dir) => JSON.parse(readFileSync(join(root, dir, "package.json"), "utf8"));
 

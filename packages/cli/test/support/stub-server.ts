@@ -8,6 +8,9 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import type {
+  DbPurgeResponse,
+  DbStats,
+  DbVacuumResponse,
   DecideGateRequest,
   RunDetail,
   RunSummary,
@@ -16,6 +19,9 @@ import type {
 } from "@thaodangspace/argos-core/rpc";
 
 import {
+  DB_PURGE,
+  DB_STATS,
+  DB_VACUUM,
   DECIDED_AT,
   NEXT_FIRE_AT,
   RUN_DETAIL,
@@ -197,6 +203,32 @@ export async function startStubServer(
           skipped: [{ runId: "run-2", reason: "active" }],
           orphans: ["/home/worktrees/orphan-1"],
         });
+        return;
+      }
+      if (segments[0] === "db") {
+        if (segments[1] === "stats" && req.method === "GET") {
+          send(200, DB_STATS);
+          return;
+        }
+        if (segments[1] === "purge" && req.method === "POST") {
+          const request = body as { olderThan?: string; dryRun?: boolean; vacuum?: boolean } | undefined;
+          if (request?.olderThan === undefined) {
+            error(400, "invalid_request", "olderThan is required");
+            return;
+          }
+          send(200, {
+            ...DB_PURGE,
+            dryRun: request.dryRun === true,
+            vacuumed: request.dryRun === true ? false : request.vacuum === true,
+            ...(request.dryRun === true ? { tasksRemoved: 42, receiptsRetired: 4 } : {}),
+          });
+          return;
+        }
+        if (segments[1] === "vacuum" && req.method === "POST") {
+          send(200, DB_VACUUM);
+          return;
+        }
+        error(404, "not_found", "unknown route");
         return;
       }
       if (segments[0] === "schedules") {

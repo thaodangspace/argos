@@ -37,6 +37,7 @@ const root = manifest(".");
 const core = manifest("packages/core");
 const cli = manifest("packages/cli");
 const plugin = manifest("packages/paseo-plugin");
+const web = manifest("packages/web");
 const published = [core, cli];
 
 describe("npm package manifests", () => {
@@ -44,7 +45,7 @@ describe("npm package manifests", () => {
     const version = root.version;
     expect(version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(version).not.toBe("0.0.0");
-    for (const packageManifest of [core, cli, plugin]) {
+    for (const packageManifest of [core, cli, plugin, web]) {
       expect(packageManifest.version, packageManifest.name).toBe(version);
     }
   });
@@ -55,6 +56,9 @@ describe("npm package manifests", () => {
     expect(cli.dependencies?.["@thaodangspace/argos-core"]).toBe(core.version);
     expect(plugin.dependencies?.["@thaodangspace/argos-core"]).toBe(core.version);
     expect(plugin.private).toBe(true);
+    // The UI is an implementation detail of `argos serve`, shipped inside the CLI tarball.
+    expect(web.name).toBe("@thaodangspace/argos-web");
+    expect(web.private).toBe(true);
   });
 
   it.each(published)("gives $name publishable metadata", (packageManifest) => {
@@ -64,7 +68,23 @@ describe("npm package manifests", () => {
     expect(packageManifest.engines?.node).toBe(">=22.13");
     expect(packageManifest.files).toContain("dist");
     expect(packageManifest.repository?.url).toContain("github.com/thaodangspace/argos");
-    expect(packageManifest.scripts?.["prepublishOnly"]).toBe("npm run build");
+    // The CLI also copies the SvelteKit build into `ui/` before publishing (spec FR18).
+    expect(packageManifest.scripts?.["prepublishOnly"]).toContain("npm run build");
+  });
+
+  it("syncs the SvelteKit toolchain on install", () => {
+    // `npm ci` runs workspace `prepare` scripts; without it `$app/tsconfig` (generated into
+    // `packages/web/node_modules/$app/tsconfig.json`) does not exist, and the web test project
+    // fails to transform on a fresh checkout.
+    expect(web.scripts?.["prepare"]).toContain("svelte-kit sync");
+  });
+
+  it("ships the UI inside the CLI tarball", () => {
+    expect(cli.files).toContain("ui");
+    expect(existsSync(join(repoRoot, "packages/cli/scripts/copy-ui.mjs"))).toBe(true);
+    expect(cli.scripts?.["prepublishOnly"]).toContain("copy-ui.mjs");
+    expect(root.scripts?.["release:publish"]).toContain("build:ui");
+    expect(root.scripts?.["build:ui"]).toContain("argos-web");
   });
 
   it("points the CLI bin at the built entry", () => {

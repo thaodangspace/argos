@@ -22,6 +22,7 @@ herdr-core adapter come from
 | `packages/core` | `@thaodangspace/argos-core` | loader, engine, durable host, git helpers, RPC server, Paseo + herdr-core adapters |
 | `packages/cli` | `@thaodangspace/argos` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite |
 | `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel + chat tools; HTTP client, never opens SQLite |
+| `packages/web` | `@thaodangspace/argos-web` | SvelteKit SPA served by `argos serve` under `/ui`; HTTP client, never opens SQLite |
 
 No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResolution`
 `NodeNext` (relative imports need `.js` extensions), Node `>=22.13` (`node:sqlite` is unflagged
@@ -38,6 +39,20 @@ nor a timer.
 `paseo`/`hc`, one normalizer accepting `herdr`/`herdr-core`, `DEFAULT_EXECUTOR_CAPABILITIES`, and
 the `ExecutorInfo` schema) plus the shared structured-result parser (`output.ts`: schema
 compilation and `parseStepResult`), which both adapters use.
+
+`packages/core/src/view/` is the shared, DOM-free UI projection (`@thaodangspace/argos-core/view`):
+status labels/tones/glyphs, filters, `sortRuns`/`pendingGates`, `runView`/`groupRuns`/`panelView`,
+`buildStepLog`/`buildRunLog`/`historyText`, `gateView`, and `parseStartForm`. The Paseo panel
+re-exports it and the SvelteKit UI imports it, so a new status or history event is one edit for both
+(and the Paseo plugin's exhaustive `historyText` switch is now the core one). It imports only
+`rpc/contracts` — never the durable host, engine, adapters, or a Node built-in
+(`test/view/purity.test.ts`).
+
+`packages/web` is deliberately outside the root `tsc -b` graph (Svelte files are not `tsc` inputs):
+it typechecks with `svelte-kit sync && svelte-check` and builds with Vite/`adapter-static` under
+base `/ui`. It pins its own `typescript@6.0.3` because SvelteKit/svelte-check peer on TS 6 while the
+repository compiles with TS 7.0.2; its only core subpaths are `/rpc/contracts` and `/view`
+(`test import graph in src/lib/import-graph.test.ts`).
 
 `packages/core/src/hc/` is the herdr-core adapter, exposed on `@thaodangspace/argos-core/hc`, never
 from the package root: `port.ts` (the typed JSON-RPC surface and the one `kind` → Argos code table),
@@ -57,6 +72,9 @@ the IR as **types** only, never Paseo, the engine, git, or RPC (`test/hc/isolati
 - **Loopback + token.** The server binds `127.0.0.1` and requires
   `Authorization: Bearer <token>`; tokens and secrets never reach the database or logs.
 - **Stable codes.** Callers match on `ArgosError.code`, never on message text.
+- **One view model.** Status labels/tones, grouping, the step log, and the history text live in
+  `@thaodangspace/argos-core/view`; the Paseo panel re-exports it and the web UI imports it, so a new
+  status or history event is one edit for every client.
 - **The substrate is frozen in the run.** A run resolves its executor once (request > schedule >
   playbook > server default) and stores the canonical id in `RunRecord.executor` (`paseo` omitted,
   so older records stay byte-identical). The child step commits the same id and looks it up in the
@@ -79,6 +97,9 @@ npm test          # builds workspaces (tsc -b) then vitest over all projects; ex
 npm run typecheck # tsc -b for src, then tsc --noEmit for every test/entry graph
 npm run test:e2e  # builds, then the real-process SIGKILL/restart suite
 npm run build     # tsc -b (emits dist/ for every workspace)
+npm run build:ui  # SvelteKit build into packages/web/build (base /ui, static)
+npm run check:ui  # svelte-kit sync + svelte-check for packages/web
+npm run local:restart # rebuild CLI + UI, copy ui/, then restart the detached local `argos serve`
 node -e "import('@thaodangspace/argos-core')"   # workspace-link check; requires a build first
 npm run version:check -- v0.1.0                 # release guard: tag must match every manifest
 ```
@@ -94,6 +115,7 @@ npx vitest run --project core packages/core/test/hc
 npx vitest run --project core packages/core/test/rpc
 npx vitest run --project cli
 npx vitest run --project paseo-plugin
+npx vitest run --project web
 npx vitest run --config vitest.e2e.config.ts
 ```
 
@@ -101,13 +123,14 @@ Package `exports` point at `dist/`, so anything importing a sibling workspace ne
 
 ## Publishing (npm)
 
-Two workspaces are public on npm and one is not:
+Two workspaces are public on npm and two are not:
 
 | Package | npm | Notes |
 |---|---|---|
 | `@thaodangspace/argos-core` | yes | the library; published first |
 | `@thaodangspace/argos` | yes | the CLI, `bin: {"argos": "dist/index.js"}` |
 | `argos-paseo-plugin` | no (`private`) | Paseo bundles its TypeScript source; installed with `paseo plugin install <path>` |
+| `@thaodangspace/argos-web` | no (`private`) | the SvelteKit UI; `packages/cli/scripts/copy-ui.mjs` copies its build into `packages/cli/ui`, which ships inside the CLI tarball |
 
 The bare names `argos` and `argos-cli` are taken on npm by unrelated projects, which is why both
 packages live under the `@thaodangspace` scope. `argos` remains the command name.
@@ -152,12 +175,38 @@ packages live under the `@thaodangspace` scope. `argos` remains the command name
 `ArgosHost.open({ home?, storage?, executor, executors?, defaultExecutor?, catalogs?, executorInfo?,
 clock?, models? })` ensures the home, takes the pid file, opens the database, installs the `argos`
 extension, and calls `resume()`; `close()` is idempotent and removes the pid file only when it still
-names this process. A `storage` injection (`MemoryStorage`) skips the home/pid setup for fast tests.
+names this process. A `storage` injection (`MemoryStorage`) skips the home/pid setup for fast tests
+(and disables `argos db`, which needs the one file-backed connection).
 `executor` stays the `paseo` entry so every existing call site and test is unchanged; `executors`
 adds the other ids, `catalogs` gives each id its `TargetCatalog` (`paseo` still falls back to
 `modelCatalog`), and `executorInfo` is the reachability/version/capability descriptor `GET /info`
 publishes. A `defaultExecutor` the registry cannot run is `executor_unavailable` **before** the pid
 file and database are touched.
+
+## Database maintenance
+
+`argos db` is the operator's cleanup surface, and it is a route family on `argos serve` rather than
+a second process that opens SQLite (the one-writer rule). The host keeps the `SqliteDatabase` it
+opened (`#db`), so stats, purge, and vacuum share the connection the tasks use; an injected
+`MemoryStorage` has no path and answers `invalid_request`.
+
+- **`argos db stats`** (`host.dbStats`) is read-only: file + WAL size, `page_size`/`page_count`/
+  `freelist_count`/`journal_mode`, and row counts over pi-durable's tables. Document `kind` and
+  `key_value` are **JSON-encoded** columns (`'"argos.run"'`), as is `tasks.kind`, so every query
+  decodes with `json_extract(x, '$')`; `document_revisions.content` holds the value of a
+  current-only document (the run record, the receipt `createdAt`).
+- **`argos db purge`** retires terminal runs older than `--older-than` through the same
+  `removeRun` path as `argos rm`, then reclaims what `removeRun` deliberately keeps: the terminal
+  `tasks` rows (`json_extract(record, '$.input.runId')` names the run) and their `record_ids`
+  claims. It also retires expired idempotency receipts. `--dry-run` reports the same counts
+  (`countTasksForRuns`) and writes nothing; `--vacuum` compacts afterwards; worktrees are reported,
+  never removed; a live run is `skipped: active`; a refused removal is `skipped` with its code.
+  A seed receipt (`runId: ""`, created by a `tx.doc` read for a key that was already gone) is
+  retired by `removeRun` itself, so it never becomes live garbage.
+- **`argos db vacuum`** runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)` — in that order,
+  because the rewrite goes through the WAL and only the checkpoint makes the on-disk total shrink.
+- Nothing is scheduled: no timer, no retention policy, no automatic vacuum. Only terminal data
+  older than an explicit window is touched.
 
 ## Task kinds and versions
 
@@ -257,6 +306,7 @@ Protocol-only responses (`not_found`, `method_not_allowed`, `internal_error`) ar
 |---|---|---|
 | `ARGOS_HOME` | `~/.argos` | state directory (`0700`); DB `argos.sqlite`, `token`, `serve.pid` |
 | `ARGOS_PORT` | `7676` | `argos serve` port on `127.0.0.1`; `0` picks a free port |
+| `ARGOS_UI_DIR` | `<cli package>/ui` | the built SvelteKit UI `argos serve` hosts under `/ui`; empty disables the UI, unset uses the copied build |
 | `ARGOS_EXECUTOR` | `paseo` | `argos serve` default substrate; `--default-executor` wins |
 | `ARGOS_PASEO_URL` | `ws://127.0.0.1:6767/ws` | Paseo daemon URL (read only by `src/paseo/client.ts`) |
 | `ARGOS_PASEO_PASSWORD` | (unset) | daemon password; never logged, redacted from errors |
@@ -442,7 +492,8 @@ and no `pi.generation` task may ever appear in `inspect()`.
 The modules follow the responsibilities: `host.ts` (run lifecycle and the schedule methods),
 `host-models.ts` (the D6 stub), `pid.ts` (single-writer pid file and database modes),
 `host-types.ts` (public option/result types, `RunStartPort`, `ScheduleRunPort`, the fire-event
-shape), `run-request.ts` (`resolveRunRequest` — the shared `cwd` validate → `loadPlaybook` →
+shape), `db.ts` (database maintenance: stats queries, purge selection, task-row reclamation,
+`vacuum`), `run-request.ts` (`resolveRunRequest` — the shared `cwd` validate → `loadPlaybook` →
 `prepareInputs` front half of `POST /runs` and every fire), `schedule-docs.ts` (both document
 families, hydration, `scheduleRunId`, the bounded `fires`/`runIds` pushes), and `schedules.ts`
 (`ScheduleRunner`: registry CRUD, the one timer, tick/fire/run-now, retention). The `argos.run`
@@ -899,6 +950,9 @@ by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunId
 | `DELETE /runs/:id` | `host.removeRun`: one commit retires the run, history, gate, and idempotency documents and drops the id from `argos.runs`; refuses a live run or a running after-task (`run_terminal`); task records and the worktree are kept |
 | `POST /runs/:id/worktree/remove` | `host.removeWorktree` (`argos worktree rm`): path and branch come from the record only (`runWorktreePath`/`runWorktreeBranch`, else `worktree_failed`); a dirty checkout without `force` is `worktree_failed` naming `--force`; `run_active` for a live run; `removed: false` when the run never had a worktree; `deleteBranch` runs `git branch -d` (`-D` with `force`) |
 | `POST /worktrees/gc` | `host.gcWorktrees` (`argos worktree gc`): terminal runs whose `updatedAt < now - olderThan` (`<n>(s\|m\|h\|d)`), `dryRun`, per-run `skipped` reasons (`active`, `path_mismatch`, a stable code), and `orphans` under `<home>/worktrees` that no run claims (reported, never deleted) |
+| `GET /db/stats` | `host.dbStats` (`argos db stats`): file/WAL size, page counters, row counts by document kind and task kind, live runs by status, idempotency receipts (total/expired). Read-only; needs file-backed storage (`invalid_request` otherwise) |
+| `POST /db/purge` | `host.purgeDb` (`argos db purge`): `removeRun` for every **terminal** run older than `olderThan`, retire expired idempotency receipts, delete the terminal task rows (and `record_ids` claims) of the runs it removed; `dryRun` reports only; `vacuum` compacts afterwards; worktrees are never removed |
+| `POST /db/vacuum` | `host.vacuumDb` (`argos db vacuum`): `VACUUM` then `PRAGMA wal_checkpoint(TRUNCATE)` (that order — the rewrite goes through the WAL) |
 | `POST /runs/:id/cancel` | engine `cancel`; `run_terminal` if finished |
 | `POST /runs/:id/retry` | clone a terminal run into a fresh task (same `runId`), reset the step + downstream; refuses non-terminal (`run_terminal`), unknown run/step |
 | `POST /runs/:id/fork` | **new** run from one step with the definition reloaded from the run's `cwd`: inherits the settled prefix, records `forkedFrom`, drops gates/loops/trigger/deadline, re-pins the closure's scripts; `definition_conflict` when the edit escapes the reset closure |
@@ -912,6 +966,8 @@ by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunId
 | `DELETE /schedules/:id` | `{id, removed: true}`; the runs it started continue and keep their `trigger` |
 | `GET /events` | SSE: one `snapshot` then `run` per changed mirror; `: ping` heartbeat; commit-driven |
 | `GET /info`, `GET /health` | doctor data / liveness; `/info` includes `executors[]` (`{id, default, reachable, version?, capabilities}`) |
+| `GET /playbooks?cwd=` | discovery for the UI's start form: `{cwd, playbooks:[{id,file,hash,inputs,executor?,isolation?,stepCount}], errors}`; a broken playbook is a per-file `errors[]` entry; `cwd` is validated like `POST /runs` |
+| `GET /ui`, `/ui/*` | the embedded SPA (static build, `paths.base = "/ui"`): shell + assets, extension-less deep links fall back to `index.html`, a missing asset is 404, `_app/immutable/*` is immutable-cached. HTML responses set the per-process `HttpOnly; SameSite=Strict` session cookie (spec FR3); API auth accepts that cookie or the bearer token, and a cookie-authenticated write also requires `Origin` = `Host`. `GET /` redirects to `/ui/` only when the UI is present |
 
 `POST /runs` and every schedule fire share `resolveRunRequest` (`durable/run-request.ts`): `cwd`
 validation, then `loadPlaybook`, then input coercion/defaults. `POST /runs` defaults `cwd` to the
@@ -963,6 +1019,9 @@ commit that creates the run task, including after-task children and retry clones
 | `argos schedule pause <id>` / `resume <id>` | `ScheduleSummary` | 0 |
 | `argos schedule run <id>` | `{runId, taskId}` | 0 (`run_active` while the live run still runs) |
 | `argos schedule rm <id>` | `{id, removed: true}` | 0 |
+| `argos db stats` | `DbStats` (size/WAL/pages, row counts by kind, runs, receipts) | 0 |
+| `argos db purge --older-than <dur> [--dry-run] [--vacuum]` | `DbPurgeResponse` (`removed`, `skipped`, `tasksRemoved`, `receiptsRetired`, `vacuumed`, `before`/`after` sizes) | 0, 1 usage without `--older-than` |
+| `argos db vacuum` | `{vacuumed: true, before, after}` | 0 |
 | `argos serve [--port] [--home] [--default-executor <id>]` | `{port, home, pid}` | 0 |
 | `argos doctor [--home] [--port]` | `DoctorReport` | 0 (report), 1 old Node |
 
@@ -1071,9 +1130,9 @@ Import-graph rule (`test/import-graph.test.ts`): no file under `packages/paseo-p
 `@thaodangspace/argos-core/paseo`, `@thaodangspace/argos-core/hc`, `@thaodangspace/argos-core/engine`, `@thaodangspace/argos-core/playbook`, `@thaodangspace/argos-core/rpc/server`, the
 `@thaodangspace/argos-core` root, `@earendil-works/*`, `node:sqlite`, or `node:child_process`. Only `server/` may
 import `node:fs` (it reads the token); `shared/` and the client entry must stay portable. The only
-`@thaodangspace/argos-core` subpaths are `@thaodangspace/argos-core/rpc` and `@thaodangspace/argos-core/rpc/contracts` (the latter is
-Node-free); other imports are limited to `@getpaseo/*`, `react`, and `zod`, plus `react-native` in
-the client half only.
+`@thaodangspace/argos-core` subpaths are `@thaodangspace/argos-core/rpc`, `@thaodangspace/argos-core/rpc/contracts`
+(the latter is Node-free), and `@thaodangspace/argos-core/view`; other imports are limited to
+`@getpaseo/*`, `react`, and `zod`, plus `react-native` in the client half only.
 
 **The client half is React Native, never DOM.** Paseo renders plugin UI natively on iOS/Android
 and through react-native-web on desktop, so a DOM element (`<div>`, `<span>`, `<button>`) or a CSS
@@ -1104,6 +1163,7 @@ npx vitest run --project core packages/core/test/paseo
 npx vitest run --project core packages/core/test/rpc
 npx vitest run --project cli
 npx vitest run --project paseo-plugin
+npx vitest run --project web
 ```
 
 Fixtures: `test/fakes/clock.ts` (fake `now()`/timers), `test/fakes/executor.ts` (agents keyed by
@@ -1121,7 +1181,9 @@ after-task copy, pre-pinning records), `fork` (new run id, edited prompt reachin
 prefix preserved and parent untouched, `forkedFrom` + `forked_from`, gates/loops/trigger/deadline
 dropped, `definition_conflict` inside/outside the closure, script re-pin, fork worktree from the
 parent branch), `definition-freeze` (a new start reads the edited YAML while a parked loop-limit
-gate and a `retry` keep the frozen IR), worktrees, `readonly_violation`, and the scheduler:
+gate and a `retry` keep the frozen IR), worktrees, `readonly_violation`, `db` (stats against the
+real encoded tables, purge window/`active`/`dryRun`/worktree reporting, task-row reclamation, the
+receipt TTL path, `invalid_request` for injected storage, vacuum survival), and the scheduler:
 `schedule-docs` (strict/hydrating documents, bounded `fires`/`runIds`, `scheduleRunId`),
 `schedules` (CRUD, duplicate/limit refusals, the dry check), `schedule-runner` (arm/disarm, tick
 order, cache), `schedule-fire` (one commit, guards, adopt-existing, run-now, refusal,
@@ -1139,11 +1201,16 @@ and `invalid_output`, one handover then `agent_missing`, `executor_unreachable` 
 poll, kill-before-`rm` on settle, the production-side fake's block/release knobs and file-backed
 restart adoption, and the adapter's isolation rules. The RPC suite
 covers auth, idempotency, SSE, retry, gates, response projection, and the `/schedules` routes
-(codes, statuses, projections). The plugin suite covers
+(codes, statuses, projections); `test/rpc/db.test.ts` runs `/db/stats`, `/db/purge` (dry then
+real), `/db/vacuum`, and the 404/401 cases over a file-backed host. The plugin suite covers
 manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload survival, the
 CI-style grouping/filters/step log and the one-fetch detail sync (`test/detail.test.ts`), and the
-import graph. The CLI suite covers validate exit codes, golden JSON shapes (including
-`ls-schedule` and every `schedule-*` command), the no-storage import graph, the fire-line
+import graph. The web suite (`packages/web`) covers the API client (schema validation, stable codes, the 401 hook),
+the SSE client (frames, malformed payloads, capped backoff), the run/detail reducers, the typed start
+form, and component rendering of the list, run page, gate card, and start dialog in jsdom; the web
+import-graph test pins its core subpaths. The CLI suite covers validate exit codes, golden JSON shapes (including
+`ls-schedule`, every `schedule-*` command, and `db-stats`/`db-purge`/`db-purge-dry`/`db-vacuum`),
+the no-storage import graph, the fire-line
 formatter, a real-serve sentinel, and the npm channel (`test/publish.test.ts`: manifest metadata
 and lockstep versions, byte-identical `LICENSE` copies, the release workflow order, and
 `scripts/check-version.mjs` accepting a matching tag, refusing a mismatched one, and passing on a
@@ -1250,6 +1317,12 @@ suite green.
 - **Worktrees are never cleaned up automatically**; a failed/violating step leaves its worktree
   for inspection, and cleanup is the manual `argos worktree rm` / `argos worktree gc` pair (FR4).
   gc only *reports* a directory under `<home>/worktrees` that no run index entry claims.
+- **Database cleanup is manual and windowed.** Nothing prunes storage on a timer; `argos db purge`
+  removes terminal runs older than the window you name, and `argos db vacuum` compacts the file.
+  Three things survive a purge: retired document rows (`retired_at`, small metadata), the terminal
+  task rows of runs you have not purged (they are the checkpoint of a run that still exists), and
+  expired idempotency receipts only up to the next purge. `argos.sqlite-wal` is truncated by
+  `vacuum`, not by the backoff of ordinary traffic.
 - **Nothing fires while `argos serve` is down.** The timer lives in that process; the next start
   applies the catch-up rule once per schedule instead of replaying every missed fire time.
 - **A schedule is unattended execution as the operator.** Only token-authenticated RPC (CLI or
@@ -1289,3 +1362,14 @@ suite green.
   `docs/architecture.md#security`).
 - **The plugin reads `ARGOS_HOME`/`ARGOS_PORT` once per client** and has no settings screen; the
   server must be started with matching values.
+
+- **The web UI covers watching, gates, and run controls, not the operator console.** It has no
+  schedules, worktrees, database, or doctor screen, and no run deletion; those stay in the CLI (and
+  the Paseo panel for removal). It renders the same read model as the CLI, so it never shows agent
+  prompts or transcripts — a step's log ends at its declared outputs, attempts, and history.
+- **The UI is a static SPA that needs a built artifact.** A published CLI carries one in `ui/`; a
+  development checkout must `npm run build:ui` and set `ARGOS_UI_DIR` (or run
+  `node packages/cli/scripts/copy-ui.mjs`). Without it `argos serve` is API-only with one warning.
+- **A browser session dies with the process.** `argos serve` mints one session per start, so a
+  restart makes every open tab's cookie stale; the SPA reloads once to obtain a fresh one. The
+  cookie is a capability equal to the token (same-user loopback), never broader.

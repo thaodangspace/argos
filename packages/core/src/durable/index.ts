@@ -10,6 +10,19 @@ export * from "./context.js";
 export * from "./mirror.js";
 export * from "./host.js";
 export * from "./ulid.js";
+// Database maintenance surface: the host's methods `argos db` calls. The helpers in `db.ts`
+// (queries, purge selection) stay internal, so the runtime export surface is unchanged.
+export type {
+  DbDocumentKind,
+  DbFileSizes,
+  DbPurgeOptions,
+  DbPurgeResult,
+  DbPurgeSkipped,
+  DbPurgedRun,
+  DbStats,
+  DbTaskKind,
+  DbVacuumResult,
+} from "./db.js";
 // Named exports only: `plannedAfterTasks` is an internal helper of the run task, not surface.
 export { afterPlaybookIR, planAfterRun, type PlannedAfterRun } from "./tasks/after.js";
 export * from "./tasks/gate.js";
