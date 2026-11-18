@@ -72,6 +72,13 @@ describe("npm package manifests", () => {
     expect(packageManifest.scripts?.["prepublishOnly"]).toContain("npm run build");
   });
 
+  it("syncs the SvelteKit toolchain on install", () => {
+    // `npm ci` runs workspace `prepare` scripts; without it `$app/tsconfig` (generated into
+    // `packages/web/node_modules/$app/tsconfig.json`) does not exist, and the web test project
+    // fails to transform on a fresh checkout.
+    expect(web.scripts?.["prepare"]).toContain("svelte-kit sync");
+  });
+
   it("ships the UI inside the CLI tarball", () => {
     expect(cli.files).toContain("ui");
     expect(existsSync(join(repoRoot, "packages/cli/scripts/copy-ui.mjs"))).toBe(true);
