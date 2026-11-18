@@ -17,13 +17,14 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   createServer,
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
+import { join, resolve } from "node:path";
 
 import { z } from "zod";
 
@@ -33,11 +34,15 @@ import { argosHome, ensureHome, tokenPath, ARGOS_TOKEN_MODE } from "../paths.js"
 import { ModelCatalog } from "../paseo/model-catalog.js";
 import type { ProviderCatalog } from "../paseo/port.js";
 import { ArgosHost, type ArgosHostOptions } from "../durable/host.js";
-import { resolveRunRequest } from "../durable/run-request.js";
+import { resolveRunRequest, validateRunCwd } from "../durable/run-request.js";
 import {
   ARGOS_RPC_VERSION,
   ARGOS_SCHEMA_VERSION,
   CancelRunResponseSchema,
+  DbPurgeRequestSchema,
+  DbPurgeResponseSchema,
+  DbStatsSchema,
+  DbVacuumResponseSchema,
   RemoveRunResponseSchema,
   RemoveWorktreeRequestSchema,
   RemoveWorktreeResponseSchema,
@@ -47,6 +52,7 @@ import {
   DEFAULT_ARGOS_PORT,
   GateDecisionResponseSchema,
   ForkRequestSchema,
+  PlaybookListResponseSchema,
   RetryRequestSchema,
   RunDetailSchema,
   RunListResponseSchema,
@@ -80,6 +86,9 @@ import {
   toScheduleSummary,
   type GateDocumentView,
 } from "./summary.js";
+import { cookieAuthAllowed, createUiSession } from "./session.js";
+import { listPlaybooks } from "./playbooks.js";
+import { isUiAttempt, isUiPath, resolveUiFile, serveUiFile, UI_BASE } from "./ui.js";
 
 // `@thaodangspace/argos-core/rpc/server` re-exports the one storage owner so the CLI's `serve` command can open it
 // without importing `@thaodangspace/argos-core/durable` anywhere in the CLI source (Phase 8 import-graph rule).
@@ -146,6 +155,11 @@ export interface CreateRpcServerOptions {
   readonly cors?: string | readonly string[];
   /** Default `cwd` for `POST /runs` when the body omits one. */
   readonly cwd?: string;
+  /**
+   * Spec FR1: serve the built UI (`packages/web/build`) under `/ui` on this same origin. Omitted,
+   * empty, or missing `index.html` keeps the server API-only, exactly as before.
+   */
+  readonly ui?: { readonly dir: string };
   readonly paseo?: PaseoProbe;
   /** SSE `: ping` interval; default 15 s. */
   readonly heartbeatMs?: number;
@@ -354,6 +368,15 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const startedAt = Date.now();
   const sseClients = new Set<SseConnection>();
+
+  // Spec FR1/FR3: the UI directory and the per-process browser session. A configured directory
+  // without `index.html` is a warning, never a startup failure: `argos serve` keeps working API-only.
+  const uiDir = options.ui?.dir === undefined ? undefined : resolve(options.ui.dir);
+  const uiEnabled = uiDir !== undefined && existsSync(join(uiDir, "index.html"));
+  if (uiDir !== undefined && !uiEnabled) {
+    log(`[argos] ui disabled: no index.html in ${uiDir}`);
+  }
+  const uiSession = createUiSession();
 
   const corsHeaders = (origin: string | undefined): Record<string, string> => {
     if (cors === undefined) return {};
@@ -655,9 +678,51 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
       return;
     }
 
+    const url = new URL(req.url ?? "/", `http://127.0.0.1:${currentPort()}`);
+
+    // Spec FR1/FR2: the UI shell and its assets are served before authentication. They are static
+    // code with no run data, and the shell is what delivers the session cookie (FR3). Only `/ui/*`
+    // is claimed here, so every API path keeps its existing auth and routing.
+    if (uiEnabled && uiDir !== undefined && isUiAttempt(req)) {
+      if (!isUiPath(url.pathname)) {
+        // `/ui/../x` normalizes off the UI prefix. It is still a UI-shaped request, so answer 404
+        // rather than letting it fall into the API's auth path.
+        sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
+        return;
+      }
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        sendJson(res, 405, { error: { code: "method_not_allowed", message: "GET only" } }, extra);
+        return;
+      }
+      const file = resolveUiFile(uiDir, url.pathname);
+      if (file === undefined) {
+        sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
+        return;
+      }
+      serveUiFile(req, res, { file, setCookie: uiSession.setCookie });
+      return;
+    }
+
+    // A `/ui`-shaped request with the UI disabled is a 404, not an auth challenge: there is no UI
+    // route to protect, and the operator's warning already explains why (spec FR1).
+    if (!uiEnabled && isUiAttempt(req)) {
+      sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
+      return;
+    }
+
+    // Spec FR1: one link to the UI from the root, only when it is actually enabled.
+    if (uiEnabled && url.pathname === "/") {
+      res.writeHead(302, { ...extra, location: `${UI_BASE}/` });
+      res.end();
+      return;
+    }
+
     const header = req.headers.authorization;
     const presented = typeof header === "string" ? /^Bearer\s+(.+)$/i.exec(header)?.[1] : undefined;
-    if (presented === undefined || !tokenMatches(presented, token)) {
+    const bearerOk = presented !== undefined && tokenMatches(presented, token);
+    const cookie = typeof req.headers.cookie === "string" ? req.headers.cookie : undefined;
+    const cookieOk = !bearerOk && uiSession.matches(cookie) && cookieAuthAllowed(req);
+    if (!bearerOk && !cookieOk) {
       sendJson(
         res,
         401,
@@ -667,7 +732,6 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
       return;
     }
 
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${currentPort()}`);
     const segments = url.pathname.split("/").filter((segment) => segment !== "");
 
     try {
@@ -719,10 +783,65 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         return;
       }
 
+      // Database maintenance (`argos db stats|purge|vacuum`). Before the `/runs` guard, like
+      // `/worktrees/gc`, so `/db/...` never falls through to the run routes.
+      if (segments[0] === "db") {
+        const action = segments[1];
+        if (segments.length === 2 && action === "stats") {
+          if (req.method !== "GET") {
+            sendJson(res, 405, { error: { code: "method_not_allowed", message: "GET only" } }, extra);
+            return;
+          }
+          sendJson(res, 200, DbStatsSchema.parse(await options.host.dbStats()), extra);
+          return;
+        }
+        if (segments.length === 2 && action === "purge") {
+          if (req.method !== "POST") {
+            sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+            return;
+          }
+          const body = DbPurgeRequestSchema.parse(await readJson(req, maxBodyBytes));
+          const result = await options.host.purgeDb({
+            olderThanMs: parseOlderThan(body.olderThan),
+            ...(body.dryRun === undefined ? {} : { dryRun: body.dryRun }),
+            ...(body.vacuum === undefined ? {} : { vacuum: body.vacuum }),
+          });
+          sendJson(res, 200, DbPurgeResponseSchema.parse(result), extra);
+          return;
+        }
+        if (segments.length === 2 && action === "vacuum") {
+          if (req.method !== "POST") {
+            sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+            return;
+          }
+          const result = await options.host.vacuumDb();
+          sendJson(res, 200, DbVacuumResponseSchema.parse(result), extra);
+          return;
+        }
+        sendJson(res, 404, { error: { code: "not_found", message: "unknown route" } }, extra);
+        return;
+      }
+
       // Schedules (FR10.1). Before the `/runs` guard, like `/worktrees/gc`: an unknown prefix is a
       // 404 answered by that guard, so `/schedules/...` must be claimed here.
       if (segments[0] === "schedules") {
         await handleSchedules(req, res, segments, extra);
+        return;
+      }
+
+      // Playbook discovery (spec FR4). Claimed before the `/runs` guard, like `/schedules`, so
+      // `/playbooks` can never fall through to the run router as an unknown run prefix.
+      if (segments.length === 1 && segments[0] === "playbooks") {
+        if (req.method !== "GET") {
+          sendJson(res, 405, { error: { code: "method_not_allowed", message: "GET only" } }, extra);
+          return;
+        }
+        // The same cwd rules as `POST /runs`: a form that lists playbooks from a bad directory would
+        // only fail later, at start time.
+        const cwd = url.searchParams.get("cwd") ?? options.cwd ?? process.cwd();
+        validateRunCwd(cwd);
+        const listing = listPlaybooks(cwd, home);
+        sendJson(res, 200, PlaybookListResponseSchema.parse(listing), extra);
         return;
       }
 

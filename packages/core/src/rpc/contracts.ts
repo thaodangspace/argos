@@ -312,6 +312,118 @@ export const GcWorktreesResponseSchema = z.strictObject({
 });
 export type GcWorktreesResponse = z.infer<typeof GcWorktreesResponseSchema>;
 
+// ------------------------------------------------------------------ database maintenance
+
+/** Bytes on disk of `argos.sqlite` and its WAL (`0` when a file is absent). */
+export const DbFileSizesSchema = z.strictObject({
+  bytes: z.number().int().min(0),
+  walBytes: z.number().int().min(0),
+});
+export type DbFileSizes = z.infer<typeof DbFileSizesSchema>;
+
+export const DbDocumentKindSchema = z.strictObject({
+  kind: z.string().min(1),
+  live: z.number().int().min(0),
+  retired: z.number().int().min(0),
+  bytes: z.number().int().min(0),
+});
+export type DbDocumentKind = z.infer<typeof DbDocumentKindSchema>;
+
+export const DbTaskKindSchema = z.strictObject({
+  kind: z.string().min(1),
+  live: z.number().int().min(0),
+  terminal: z.number().int().min(0),
+  bytes: z.number().int().min(0),
+});
+export type DbTaskKind = z.infer<typeof DbTaskKindSchema>;
+
+/** `GET /db/stats` (`argos db stats`). Read-only: sizes, page counters, and row counts. */
+export const DbStatsSchema = z.strictObject({
+  path: z.string().min(1),
+  bytes: z.number().int().min(0),
+  walBytes: z.number().int().min(0),
+  pageSize: z.number().int().min(0),
+  pageCount: z.number().int().min(0),
+  /** Pages SQLite can reuse before the file grows (`PRAGMA freelist_count`). */
+  freePages: z.number().int().min(0),
+  journalMode: z.string().min(1),
+  runs: z.strictObject({
+    total: z.number().int().min(0),
+    active: z.number().int().min(0),
+  }),
+  documents: z.strictObject({
+    total: z.number().int().min(0),
+    live: z.number().int().min(0),
+    retired: z.number().int().min(0),
+    byKind: z.array(DbDocumentKindSchema),
+  }),
+  tasks: z.strictObject({
+    total: z.number().int().min(0),
+    live: z.number().int().min(0),
+    terminal: z.number().int().min(0),
+    byKind: z.array(DbTaskKindSchema),
+  }),
+  revisions: z.number().int().min(0),
+  entries: z.number().int().min(0),
+  conversations: z.number().int().min(0),
+  submissions: z.number().int().min(0),
+  receipts: z.strictObject({
+    total: z.number().int().min(0),
+    /** Past the 24 h TTL; `purge` retires them. */
+    expired: z.number().int().min(0),
+  }),
+});
+export type DbStats = z.infer<typeof DbStatsSchema>;
+
+/** `POST /db/purge` (`argos db purge`). `olderThan` is `<n>(s|m|h|d)` and is required. */
+export const DbPurgeRequestSchema = z.strictObject({
+  olderThan: z.string().regex(/^[0-9]+[smhd]$/, "olderThan must be <n>(s|m|h|d), e.g. 30d"),
+  /** Report what would happen without touching anything. */
+  dryRun: z.boolean().optional(),
+  /** `VACUUM` after the purge (ignored with `dryRun`). */
+  vacuum: z.boolean().optional(),
+});
+export type DbPurgeRequest = z.infer<typeof DbPurgeRequestSchema>;
+
+export const DbPurgedRunSchema = z.strictObject({
+  runId: z.string().min(1),
+  status: RunStatusSchema,
+  updatedAt: z.number(),
+  /** The checkout `removeRun` leaves on disk (a purge never removes worktrees). */
+  worktree: z.string().min(1).optional(),
+});
+export type DbPurgedRun = z.infer<typeof DbPurgedRunSchema>;
+
+/** A run purge left alone: `active`, or the stable code a refused removal raised. */
+export const DbPurgeSkippedSchema = z.strictObject({
+  runId: z.string().min(1),
+  reason: z.string().min(1),
+});
+export type DbPurgeSkipped = z.infer<typeof DbPurgeSkippedSchema>;
+
+export const DbPurgeResponseSchema = z.strictObject({
+  dryRun: z.boolean(),
+  olderThanMs: z.number().int().min(0),
+  removed: z.array(DbPurgedRunSchema),
+  skipped: z.array(DbPurgeSkippedSchema),
+  /** Terminal task rows reclaimed for the runs this call removed. */
+  tasksRemoved: z.number().int().min(0),
+  /** Expired idempotency receipts retired (`dryRun`: the count that would be). */
+  receiptsRetired: z.number().int().min(0),
+  vacuumed: z.boolean(),
+  before: DbFileSizesSchema,
+  after: DbFileSizesSchema,
+});
+export type DbPurgeResponse = z.infer<typeof DbPurgeResponseSchema>;
+
+/** `POST /db/vacuum` (`argos db vacuum`). */
+export const DbVacuumResponseSchema = z.strictObject({
+  vacuumed: z.literal(true),
+  before: DbFileSizesSchema,
+  after: DbFileSizesSchema,
+});
+export type DbVacuumResponse = z.infer<typeof DbVacuumResponseSchema>;
+
 // ------------------------------------------------------------------ read model
 
 export const GateChoiceSummarySchema = z.strictObject({
@@ -473,6 +585,55 @@ export const GateListResponseSchema = z.strictObject({
   gates: z.array(GateSummarySchema),
 });
 export type GateListResponse = z.infer<typeof GateListResponseSchema>;
+
+// ------------------------------------------------------------------ playbooks (spec FR4)
+
+/**
+ * One declared input of a playbook, exactly what a "Run workflow" form needs: the name, the type to
+ * render, whether it is required, and the default/values to prefill. A default whose name looks like
+ * a credential (`SECRET_INPUT_NAME_PATTERN`) is never published, matching the run-summary rule.
+ */
+export const PlaybookInputSchema = z.strictObject({
+  name: z.string().min(1),
+  type: z.enum(["string", "number", "boolean", "enum"]),
+  required: z.boolean(),
+  default: ScalarSchema.optional(),
+  values: z.array(z.string()).optional(),
+  description: z.string().optional(),
+});
+export type PlaybookInput = z.infer<typeof PlaybookInputSchema>;
+
+/**
+ * One discoverable playbook. `file` is the path the loader read; `hash` is the frozen IR hash, so a
+ * UI can tell that a definition changed between two runs. No prompt, step body, or IR field beyond
+ * these crosses the contract.
+ */
+export const PlaybookSummarySchema = z.strictObject({
+  id: z.string().min(1),
+  file: z.string().min(1),
+  hash: z.string().min(1),
+  inputs: z.array(PlaybookInputSchema),
+  executor: ExecutorIdSchema.optional(),
+  isolation: z.enum(["none", "worktree"]).optional(),
+  stepCount: z.number().int().min(0),
+});
+export type PlaybookSummary = z.infer<typeof PlaybookSummarySchema>;
+
+/** A playbook under `cwd`/`home` that failed to load. One bad file never hides the others. */
+export const PlaybookLoadErrorSchema = z.strictObject({
+  file: z.string(),
+  code: z.string().min(1),
+  message: z.string(),
+});
+export type PlaybookLoadError = z.infer<typeof PlaybookLoadErrorSchema>;
+
+/** `GET /playbooks?cwd=<absolute dir>` (spec FR4). Read-only: discovery + validation, no task. */
+export const PlaybookListResponseSchema = z.strictObject({
+  cwd: z.string().min(1),
+  playbooks: z.array(PlaybookSummarySchema),
+  errors: z.array(PlaybookLoadErrorSchema),
+});
+export type PlaybookListResponse = z.infer<typeof PlaybookListResponseSchema>;
 
 // ------------------------------------------------------------------ schedules (FR10.1)
 

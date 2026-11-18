@@ -3,8 +3,8 @@
  *
  * No file under `server/` or `shared/` (nor either entry point) may reach storage, git, the Paseo adapter, the hc
  * transport, the durable host, the RPC *server*, SQLite, a socket, or the filesystem API. The only
- * `@thaodangspace\/argos-core` subpath allowed is `@thaodangspace\/argos-core/rpc` (contracts + client), which itself imports no
- * durable code.
+ * `@thaodangspace\/argos-core` subpaths allowed are `/rpc` (contracts + client) and `/view` (the shared, DOM-free
+ * projection), neither of which imports durable code.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -80,12 +80,12 @@ describe("plugin import graph", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("only uses the shared RPC subpath for @thaodangspace\/argos-core", () => {
+  it("only uses the shared RPC and view subpaths for @thaodangspace\/argos-core", () => {
     const offenders: string[] = [];
     for (const file of pluginSources) {
       for (const specifier of importSpecifiers(readFileSync(file, "utf8"))) {
         if (!specifier.startsWith("@thaodangspace/argos-core")) continue;
-        if (!/^@thaodangspace\/argos-core\/rpc(\/contracts)?$/.test(specifier)) {
+        if (!/^@thaodangspace\/argos-core\/(rpc(\/contracts)?|view)$/.test(specifier)) {
           offenders.push(`${file}: ${specifier}`);
         }
       }
@@ -93,9 +93,9 @@ describe("plugin import graph", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("keeps its non-relative imports to the Paseo SDK, React, zod, and the RPC contract", () => {
+  it("keeps its non-relative imports to the Paseo SDK, React, zod, and the shared contract/view", () => {
     const allowed = [
-      /^@thaodangspace\/argos-core\/rpc(\/contracts)?$/,
+      /^@thaodangspace\/argos-core\/(rpc(\/contracts)?|view)$/,
       /^@getpaseo\//,
       /^react$/,
       /^zod$/,

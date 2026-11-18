@@ -92,6 +92,30 @@ else `paseo`.)
 The CLI and plugin talk HTTP to this process; they never open the database. If the server is not
 running, `argos run` tells you to start it and exits with code `3`.
 
+## Web UI
+
+`argos serve` also serves a browser UI on the same port. Open
+[`http://127.0.0.1:7676/ui`](http://127.0.0.1:7676/ui) (or the `[argos] ui …` line `argos serve`
+prints) after starting the server. It shows every workflow run grouped by playbook with filter
+chips, opens a run into a GitHub-Actions-style step rail plus that step's log (attempts, declared
+outputs, usage, gates), and lets you approve or reject a gate, cancel, retry a step, fork from a
+step, and start a new run from a typed form. It updates live over `GET /events`.
+
+The UI ships inside the CLI tarball. In a development checkout, build and point the server at it:
+
+```sh
+npm run build:ui                                  # writes packages/web/build
+ARGOS_UI_DIR=packages/web/build argos serve       # then open /ui
+ARGOS_UI_DIR= argos serve                         # API only
+```
+
+To rebuild this checkout and restart a locally running server in one step, use
+`npm run local:restart` (`-- --help` lists flags such as `--tests`, `--no-ui`, `--no-restart`).
+
+The browser never holds the bearer token: the server issues a per-process `HttpOnly` session cookie
+(see `docs/architecture.md#browser-session-web-ui`). The UI is a projection of the same read model
+as the CLI and panel — it never shows prompts or agent transcripts, which the API does not expose.
+
 ## A minimal playbook
 
 Put this in `.argos/playbooks/fix.yaml`:
@@ -257,6 +281,24 @@ schedule is still running (the fire log says `skipped_overlap`) and `allow` star
 a fire, with the same removal `argos rm` performs; a run whose worktree directory still exists is
 kept until you clean the worktree up yourself (`argos worktree rm` / `gc`), and retention never
 deletes a worktree or a branch.
+
+## Database maintenance
+
+One process owns `$ARGOS_HOME/argos.sqlite`, so cleanup is a command on the running server rather
+than a second tool opening the file:
+
+```sh
+argos db stats                       # size, WAL, pages, runs, tasks, receipts
+argos db purge --older-than 30d --dry-run   # what would go, without touching anything
+argos db purge --older-than 30d --vacuum    # retire old runs, reclaim rows, compact
+argos db vacuum                      # just compact the file
+```
+
+`purge` only considers **terminal** runs whose `updatedAt` is older than the window; a live run is
+reported as `active`. It retires them with the same commit `argos rm` uses, then reclaims the
+terminal task records (the bulk of the file) and the expired idempotency receipts. Worktrees are
+never deleted by a purge — `argos worktree rm` / `gc` owns those. Nothing runs on a timer: the
+window is always explicit.
 
 ## Paseo plugin
 

@@ -1,0 +1,113 @@
+/**
+ * The API client's contract behavior (spec FR14): schema validation, stable codes, the 401 hook.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+
+import { ArgosApiError, createApi } from "./api.js";
+
+const summary = {
+  id: "01J0000000000000000000000A",
+  playbookId: "release",
+  playbookHash: "h",
+  status: "running",
+  inputs: {},
+  cwd: "/repo",
+  steps: [],
+  gates: [],
+  after: [],
+  createdAt: 1,
+  updatedAt: 2,
+  seq: 1,
+};
+
+function response(body: unknown, status = 200): Response {
+  return new Response(body === undefined ? "" : JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("api client", () => {
+  it("parses a valid list response", async () => {
+    const api = createApi({
+      fetchImpl: async () => response({ runs: [summary] }),
+    });
+    await expect(api.listRuns()).resolves.toHaveLength(1);
+  });
+
+  it("maps an error body to its stable code and status", async () => {
+    const api = createApi({
+      fetchImpl: async () => response({ error: { code: "gate_already_decided", message: "taken" } }, 409),
+    });
+    await expect(api.decideGate("r", "g", { decision: "approve" })).rejects.toMatchObject({
+      code: "gate_already_decided",
+      status: 409,
+    });
+  });
+
+  it("maps a non-JSON error body to internal_error", async () => {
+    const api = createApi({ fetchImpl: async () => new Response("nope", { status: 502 }) });
+    const error = await api.listRuns().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ArgosApiError);
+    expect((error as ArgosApiError).code).toBe("internal_error");
+    expect((error as ArgosApiError).status).toBe(502);
+  });
+
+  it("refuses a response that does not match the contract", async () => {
+    const api = createApi({ fetchImpl: async () => response({ runs: [{ nope: true }] }) });
+    await expect(api.listRuns()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("reports a refused connection as unreachable", async () => {
+    const api = createApi({
+      fetchImpl: async () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+    await expect(api.listRuns()).rejects.toMatchObject({ code: "unreachable", status: 0 });
+  });
+
+  it("calls the unauthorized hook once per client", async () => {
+    const onUnauthorized = vi.fn();
+    const api = createApi({
+      fetchImpl: async () => response({ error: { code: "unauthorized", message: "no" } }, 401),
+      onUnauthorized,
+    });
+    await api.listRuns().catch(() => undefined);
+    await api.listRuns().catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts a start request as JSON with the same-origin credential mode", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    const api = createApi({
+      baseUrl: "http://test",
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init });
+        return response({ runId: "r1", taskId: "t1" }, 201);
+      },
+    });
+    await api.startRun({ playbookId: "release", cwd: "/repo", inputs: { n: 1 } });
+    expect(calls[0]?.url).toBe("http://test/runs");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(calls[0]?.init?.credentials).toBe("same-origin");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      playbookId: "release",
+      cwd: "/repo",
+      inputs: { n: 1 },
+    });
+  });
+
+  it("encodes ids and the playbook cwd", async () => {
+    const urls: string[] = [];
+    const api = createApi({
+      fetchImpl: async (url) => {
+        urls.push(url);
+        return response({ cwd: "/a b", playbooks: [], errors: [] });
+      },
+    });
+    await api.listPlaybooks("/a b");
+    expect(urls[0]).toBe(`/playbooks?cwd=${encodeURIComponent("/a b")}`);
+  });
+});

@@ -21,12 +21,16 @@
   },
   "scripts": {
     "build": "tsc -b",
+    "build:ui": "npm run build -w @thaodangspace/argos-web",
+    "check:ui": "npm run check -w @thaodangspace/argos-web",
+    "dev:ui": "npm run dev -w @thaodangspace/argos-web",
     "postbuild": "node packages/cli/scripts/make-bin-executable.mjs",
     "test": "npm run build && vitest run",
     "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
     "typecheck": "tsc -b && npm run typecheck:tests --workspaces --if-present",
     "version:check": "node scripts/check-version.mjs",
-    "release:publish": "npm publish -w @thaodangspace/argos-core && npm publish -w @thaodangspace/argos"
+    "release:publish": "npm run build:ui && npm publish -w @thaodangspace/argos-core && npm publish -w @thaodangspace/argos",
+    "local:restart": "bash scripts/local-restart.sh"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
