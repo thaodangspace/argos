@@ -270,7 +270,7 @@ describe("Paseo adapter through the durable host (Phase 6)", () => {
       expect(stepRecord?.attempts).toHaveLength(1);
       expect(port.creates.map((create) => create.requestId)).toEqual([
         `argos:${runId}:build:1`,
-        `argos:${runId}:build:2`,
+        `argos:${runId}:build:1.1`,
       ]);
       // The retry came from the waitForFinish timeout path, not from a refresh error.
       expect(port.waitCalls.length).toBeGreaterThanOrEqual(2);
@@ -303,7 +303,7 @@ describe("Paseo adapter through the durable host (Phase 6)", () => {
       expect(doc?.record.steps["build"]?.errorCode).toBe("invalid_output");
       expect(port.creates.map((create) => create.requestId)).toEqual([
         `argos:${runId}:build:1`,
-        `argos:${runId}:build:2`,
+        `argos:${runId}:build:1.1`,
       ]);
     } finally {
       await host.close();

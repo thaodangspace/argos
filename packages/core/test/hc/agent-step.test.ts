@@ -725,7 +725,7 @@ describe("hc through the durable host (Phase 6)", () => {
       const second = port.runs[1];
       if (second === undefined) throw new Error("expected the retried terminal");
       expect(second.name).not.toBe(first.name);
-      expect(second.labels?.["argos/launch"]).toBe(`argos:${runId}:build:2`);
+      expect(second.labels?.["argos/launch"]).toBe(`argos:${runId}:build:1.1`);
       expect(first.labels?.["argos/launch"]).toBe(`argos:${runId}:build:1`);
 
       // Attempt 2 is invalid too: no retries left, so the step fails with the stable code.

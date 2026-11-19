@@ -136,7 +136,7 @@ describe("providers.on_exhausted through the durable host", () => {
     expect(doc?.record.steps["build"]?.attempts).toHaveLength(1);
     expect(port.creates.map((create) => create.requestId)).toEqual([
       `argos:${runId}:build:1`,
-      `argos:${runId}:build:2`,
+      `argos:${runId}:build:1.1`,
     ]);
     expect(port.creates.map((create) => create.config.provider)).toEqual(["claude/opus", "claude/opus"]);
     expect(port.archiveCalls).toHaveLength(1);

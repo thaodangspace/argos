@@ -160,7 +160,10 @@ The engine guarantees **at-most-once launch *attempt* with reconciliation**, not
 execution. The difference matters across the daemon boundary.
 
 1. `locate` commits `{ requestId, label, attempt, deadlineAt }` **before** any executor call.
-   `requestId = argos:<runId>:<stepId>:<attempt>` is stable across restarts.
+   `requestId = argos:<runId>:<stepId>:<dispatchAttempt>` is stable across restarts. A local retry
+   inside the task (timeout, invalid output, quota wait) uses
+   `argos:<runId>:<stepId>:<dispatchAttempt>.<k>`, so it can never collide with the request id of a
+   later engine dispatch.
 2. `launch` commits `launchAttempted: true`, then calls the executor. The Paseo adapter first
    lists agents with label `argos/launch=<requestId>`; it adopts a found agent, otherwise creates
    one with that label, `cwd`, rendered prompt, and compiled `outputSchema`.

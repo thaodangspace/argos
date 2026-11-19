@@ -23,8 +23,10 @@
  * children and does not tick. `retries` counts *extra* attempts (engine semantics); each retry
  * gets a fresh `requestId` and a deterministic 1s/2s/4s… backoff. The run record still records one
  * dispatch attempt per child task; the step task's own retries are visible in its checkpoint and
- * history. (Phase 5/6 can move retry scheduling back into the engine once the host wakes parked
- * runs on backoff.)
+ * history. A local retry id is `<dispatchRequestId>.<k>`: the engine's attempt counter and this
+ * task's local counter are independent, so sharing one namespace let a later dispatch reuse the
+ * request id of a finished retry and adopt that agent. (Phase 5/6 can move retry scheduling back
+ * into the engine once the host wakes parked runs on backoff.)
  */
 
 import { defineTask } from "@earendil-works/pi-durable";
@@ -43,7 +45,6 @@ import {
 } from "../../git/snapshot.js";
 import {
   launchLabel,
-  stepRequestId,
   type AgentStatusInput,
   type AgentStepConfig,
   type CollectResult,
@@ -333,6 +334,22 @@ function doneCheckpoint(
   };
 }
 
+/**
+ * Request id of one local attempt inside a dispatched step.
+ *
+ * The engine and this task count attempts independently: the run record only records *dispatch*
+ * attempts (`n = attempts.length + 1`), while retries and quota waits advance `checkpoint.attempt`
+ * invisibly to it. Both used to render the same `argos:<runId>:<stepId>:<n>` id, so the next
+ * dispatch could reuse the request id of an earlier local retry; `launch` then adopted that
+ * finished agent instead of creating a fresh one (29 ms `step_failed`). The first local attempt
+ * keeps the engine's id (stable across restarts, unchanged for every non-retrying step); a retry
+ * gets a `.<k>` suffix that a dispatch attempt can never produce.
+ */
+function localRequestId(input: StepTaskInput, attempt: number): string {
+  const local = attempt - input.attempt;
+  return local <= 0 ? input.requestId : `${input.requestId}.${local}`;
+}
+
 /** A fresh local attempt: new request id/label, backoff, and a clean crash/launch window. */
 function retryCheckpoint(
   input: StepTaskInput,
@@ -342,7 +359,7 @@ function retryCheckpoint(
 ): StepCheckpoint {
   return {
     phase: "launch",
-    requestId: stepRequestId(input.runId, input.stepId, attempt),
+    requestId: localRequestId(input, attempt),
     attempt,
     label: launchLabel(input.runId, input.stepId, attempt),
     deadlineAt: now + retryBackoffMs(checkpoint.attempt) + input.timeoutMs,
