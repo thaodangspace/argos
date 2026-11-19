@@ -1,6 +1,6 @@
 {
   "name": "@thaodangspace/argos-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Argos playbook loader, engine, RPC server, and Paseo adapter",
   "license": "MIT",
