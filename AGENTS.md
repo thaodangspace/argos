@@ -564,6 +564,9 @@ without a terminal state.
 `timeout`/`retries` are enforced inside `argos.step`: a poll after `deadlineAt` either relaunches
 with a fresh attempt/request id after backoff, or collects `step_timeout`. The run record records
 one dispatch attempt per child task; local attempts are visible in the step checkpoint/history.
+The first local attempt keeps the engine's `argos:<runId>:<stepId>:<n>` request id; a local retry
+gets `<n>.<k>`, so a later dispatch (loop, `argos retry`, gate rerun) can never reuse the request id
+of a finished retry agent.
 
 ### Gates and after-tasks
 
@@ -717,8 +720,8 @@ next available target (`argos/handover=1` label + handover note). Nothing left â
 maxWaitMs? }`; absent keeps the IR (and hash) unchanged. `exhausted_for` overrides the executor's
 15 min window per step (`StepAgentContext.quotaWindowMs`). With `on_exhausted: wait`,
 `argos.step` turns `provider_exhausted` into a sleep until the first candidate leaves its window
-(min 30 s), then a fresh local attempt (new request id; the archived quota agent is never
-adopted; preferred target first). These relaunches are counted in `quotaRelaunches` and do not
+(min 30 s), then a fresh local attempt (a `<dispatchAttempt>.<k>` request id; the archived quota
+agent is never adopted; preferred target first). These relaunches are counted in `quotaRelaunches` and do not
 consume `retries`; `max_wait` bounds the total wait from the first exhaustion
 (`quotaWaitSince`), after which the step fails `provider_exhausted`. Default `fail`. The upstream
 `providers.fallback` key is parsed and ignored.
