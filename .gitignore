@@ -13,3 +13,4 @@ coverage/
 .svelte-kit/
 packages/web/build/
 packages/cli/ui/
+bench-report.html

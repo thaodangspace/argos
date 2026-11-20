@@ -96,6 +96,9 @@ npm ci            # reproducible install from package-lock.json
 npm test          # builds workspaces (tsc -b) then vitest over all projects; excludes e2e
 npm run typecheck # tsc -b for src, then tsc --noEmit for every test/entry graph
 npm run test:e2e  # builds, then the real-process SIGKILL/restart suite
+npm run test:perf # the wall-clock budget guard (ceilings + scaling ratios)
+npm run bench     # perf benches for the engine, the loader, and the read model
+npm run bench:report # the same run as one standalone HTML page (bench-report.html, gitignored)
 npm run build     # tsc -b (emits dist/ for every workspace)
 npm run build:ui  # SvelteKit build into packages/web/build (base /ui, static)
 npm run check:ui  # svelte-kit sync + svelte-check for packages/web
@@ -117,9 +120,41 @@ npx vitest run --project cli
 npx vitest run --project paseo-plugin
 npx vitest run --project web
 npx vitest run --config vitest.e2e.config.ts
+npx vitest run --config vitest.perf.config.ts
+npx vitest bench --reporter=verbose packages/core/bench
 ```
 
 Package `exports` point at `dist/`, so anything importing a sibling workspace needs a build.
+
+## Benchmarks
+
+`packages/core/bench/` measures the three hot paths that are ordinary deterministic code, so a
+regression in them would be invisible to the behaviour suites: the reducer `next()` (every task
+wake), `loadPlaybook` (every start and every fire), and the shared read model (`toRunSummary`,
+`stepDetailSummaries`, `runView`/`panelView`, `buildStepLog`) that both clients render.
+Fixtures come from `bench/support.ts` (fixed epoch, generated playbooks, no clock, no socket, no
+SQLite), so a bench run describes Argos and not the machine's disk or daemon.
+
+- **`npm run bench`** prints the tables. In this vitest version a benchmark is registered from the
+test context (`test("…", async ({ bench }) => { await bench.compare(bench("…", fn), …); })`), not a
+top-level `bench` import, and `--project` cannot filter a bench run (it re-registers each project as
+`<name> (bench)`) — filter by file path instead. The default reporter prints benchmark tables only
+on a TTY, hence `--reporter=verbose` in the script.
+- **`npm run test:perf`** is the assertion layer (`vitest.perf.config.ts`,
+`packages/core/test/perf/budget.test.ts`): generous absolute ceilings (~10× a reference laptop) plus
+scaling ratios (10× steps ≤ 25× time for `stepSettled`, ≤ 15× for the summary projection, ≤ 12× for
+the loader) so an accidental O(n²) fails on any machine. It is a separate project for the same
+reason the E2E suite is: a wall clock is not reproducible, so `npm test` never gates on one. Raise a
+specific ceiling only in the commit that deliberately costs more, and say why.
+- **`npm run bench:report`** (`scripts/bench-report.mjs`) re-runs the benches through the JSON
+reporter — the only one that carries the latency/throughput statistics — and writes one
+self-contained `bench-report.html` (machine, commit, and vitest version in the header; one table plus
+a relative-cost bar per group). It is a snapshot, never a gate: `--json=`/`--no-run` renders an
+existing result, `--out=`, `--open`, and trailing vitest paths are supported.
+- Both import the same builders, so a fixture change lands in the benches and the budget test at
+once. `bench/**/*.ts` is typechecked with the test graph (`packages/core/tsconfig.test.json`) and is
+not part of `tsc -b`. Reference numbers, the rationale per bench, and the caveats (module-getter
+overhead, `mean` vs `p99`, what is deliberately not measured) live in [`docs/bench.md`](docs/bench.md).
 
 ## Publishing (npm)
 
@@ -1158,9 +1193,10 @@ leaks into the server graph.
 ## Tests
 
 ```sh
-npm test                                        # all workspaces, excludes e2e
+npm test                                        # all workspaces, excludes e2e and perf
 npm run typecheck
 npm run test:e2e                                # build + real SIGKILL/restart
+npm run test:perf                               # wall-clock budgets, no build needed
 npx vitest run --project core packages/core/test/durable
 npx vitest run --project core packages/core/test/paseo
 npx vitest run --project core packages/core/test/rpc
