@@ -100,14 +100,49 @@ describe("npm package manifests", () => {
     }
   });
 
-  it("has a tag-driven release workflow that publishes core before the CLI", () => {
+  it("has a release workflow that publishes on a version bump and on a tag", () => {
     const workflow = readFileSync(join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+    // A merge into main publishes only when the embedded version is not on npm yet, so the bump is
+    // the release switch; a `v*` tag re-runs or repairs the same release.
+    expect(workflow).toContain("branches: [main]");
+    expect(workflow).toContain('tags: ["v*"]');
+    expect(workflow).toContain("workflow_dispatch");
+    expect(workflow).toContain("npm run version:bump");
+
     const corePublish = workflow.indexOf("npm publish -w @thaodangspace/argos-core");
     const cliPublish = workflow.indexOf("npm publish -w @thaodangspace/argos ");
     expect(corePublish).toBeGreaterThan(-1);
     expect(cliPublish).toBeGreaterThan(corePublish);
     expect(workflow).toContain("--provenance");
     expect(workflow).toContain("scripts/check-version.mjs");
+  });
+
+  it("builds the UI before the CLI publish can pack it", () => {
+    const workflow = readFileSync(join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+    // `packages/cli` has `prepublishOnly: npm run build && node scripts/copy-ui.mjs`, so publishing
+    // without a `packages/web/build` first fails *after* core is live: a half-finished release.
+    const buildUi = workflow.indexOf("npm run build:ui");
+    const cliPublish = workflow.indexOf("npm publish -w @thaodangspace/argos ");
+    expect(buildUi).toBeGreaterThan(-1);
+    expect(buildUi).toBeLessThan(cliPublish);
+    expect(workflow.indexOf("copy-ui.mjs")).toBeLessThan(cliPublish);
+  });
+
+  it("gates a publish, skips a no-op push, and verifies what landed on npm", () => {
+    const workflow = readFileSync(join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+    // Human gate between merge and publish, and the writes a publish and a release need.
+    expect(workflow).toContain("environment: npm-publish");
+    expect(workflow).toContain("id-token: write");
+    expect(workflow).toContain("contents: write");
+    // The registry probe decides whether anything runs, so a no-op merge never asks for approval.
+    expect(workflow).toContain("--prefer-online");
+    expect(workflow).toContain("needs.resolve.outputs.enabled == 'true'");
+    // A half-published release (core live, CLI missing) publishes the missing side.
+    expect(workflow).toContain("publish_core");
+    expect(workflow).toContain("publish_cli");
+    // Registry propagation lags; the release asset is the tarball npm actually published.
+    expect(workflow).toContain("dist.integrity");
+    expect(workflow).toContain("gh release create");
   });
 });
 
@@ -170,5 +205,69 @@ describe("scripts/check-version.mjs", () => {
     const result = run([], { GITHUB_REF: "refs/tags/v9.9.9", GITHUB_REF_NAME: "v9.9.9" });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("tag v9.9.9 does not match the workspace version");
+  });
+});
+
+describe("scripts/bump-version.mjs", () => {
+  const bump = (args: string[]): { status: number; stdout: string; stderr: string } => {
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        [join(repoRoot, "scripts", "bump-version.mjs"), ...args],
+        { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      return { status: 0, stdout, stderr: "" };
+    } catch (error) {
+      const failure = error as { status?: number; stdout?: string; stderr?: string };
+      return { status: failure.status ?? 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+    }
+  };
+
+  // The release switch: "merge into main publishes" is only true when one command moves the whole
+  // lockstep graph, including every internal pin of the core package.
+  it("moves every manifest and every core pin, writing nothing on a dry run", () => {
+    const before = [".", "packages/core", "packages/cli", "packages/paseo-plugin", "packages/web"].map(
+      (directory) => readFileSync(join(repoRoot, directory, "package.json"), "utf8"),
+    );
+
+    const result = bump(["0.0.0-test.dry-run", "--dry-run"]);
+    expect(result.stderr).toContain("is not a version");
+    expect(result.status).toBe(1);
+
+    const next = `${Number(root.version?.split(".")[0]) + 1}.0.0`;
+    const planned = bump([next, "--dry-run"]);
+    expect(planned.status).toBe(0);
+    for (const directory of [".", "packages/core", "packages/cli", "packages/paseo-plugin", "packages/web"]) {
+      expect(planned.stdout).toContain(`version:bump: ${directory === "." ? "package.json" : `${directory}/package.json`}`);
+    }
+    expect(planned.stdout).toContain(`packages/cli/package.json @thaodangspace/argos-core`);
+    expect(planned.stdout).toContain(`packages/paseo-plugin/package.json @thaodangspace/argos-core`);
+    expect(planned.stdout).toContain(`packages/web/package.json @thaodangspace/argos-core`);
+    expect(planned.stdout).toContain("dry run; nothing written");
+
+    const after = [".", "packages/core", "packages/cli", "packages/paseo-plugin", "packages/web"].map(
+      (directory) => readFileSync(join(repoRoot, directory, "package.json"), "utf8"),
+    );
+    expect(after).toEqual(before);
+  });
+
+  it("accepts patch, minor, and major relative to the current version", () => {
+    const [major = 0, minor = 0, patch = 0] = (root.version ?? "0.0.0").split(".").map(Number);
+    expect(bump(["patch", "--dry-run"]).stdout).toContain(`${major}.${minor}.${patch + 1}`);
+    expect(bump(["minor", "--dry-run"]).stdout).toContain(`${major}.${minor + 1}.0`);
+    expect(bump(["major", "--dry-run"]).stdout).toContain(`${major + 1}.0.0`);
+  });
+
+  it("is idempotent and wired to npm run version:bump", () => {
+    expect(root.scripts?.["version:bump"]).toBe("node scripts/bump-version.mjs");
+    const result = bump([`v${root.version}`, "--dry-run"]);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("nothing to do");
+  });
+
+  it("refuses a missing or malformed target", () => {
+    expect(bump(["--dry-run"]).stderr).toContain("missing version");
+    expect(bump(["1.2", "--dry-run"]).stderr).toContain("is not a version");
+    expect(bump(["1.2.3", "--nope"]).stderr).toContain("unknown flag");
   });
 });

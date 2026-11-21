@@ -58,17 +58,22 @@ npm link ./packages/cli   # then `argos ...`
 ## Release (maintainers)
 
 Versions are kept in lockstep: the root, `@thaodangspace/argos-core`, `@thaodangspace/argos`, and
-the private plugin all share one version, and the CLI pins the core version it ships with.
+the private plugin and web UI all share one version, and every workspace pins the core version it
+ships with.
 
 ```sh
-npm run version:check -- v0.1.0        # tag must match every manifest
-git tag v0.1.0 && git push origin v0.1.0
+npm run version:bump -- patch         # 0.1.1 -> 0.1.2 in every manifest + the lockfile
+npm run version:check -- v0.1.2       # guard: tag must match every manifest
+git commit -am "chore(release): v0.1.2"
 ```
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which re-runs the version guard, the unit
-suite and the typecheck, then publishes core first and the CLI second with npm provenance
-(`NPM_TOKEN` repository secret). To publish by hand, use
-`npm publish -w @thaodangspace/argos-core && npm publish -w @thaodangspace/argos`.
+Merging that commit into `main` publishes: `.github/workflows/release.yml` probes npm, and when the
+version is not there yet it re-runs the version guard, the unit suite, the typecheck, the UI build
+and the end-to-end suite, then publishes core first and the CLI second with npm provenance
+(`NPM_TOKEN` repository secret, or npm trusted publishing). Pushing a `v*` tag is the same publish
+path. The job sits behind the `npm-publish` environment, so a reviewer approves between merge and
+publish; a merge that does not bump the version is a no-op. To publish by hand, use
+`npm run release:publish`.
 
 ## Run the server
 

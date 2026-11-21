@@ -28,6 +28,10 @@ const PUBLISHED = [
 ];
 /** Workspaces that stay private (installed by path, not by npm). */
 const UNPUBLISHED = ["packages/paseo-plugin", "packages/web"];
+const ALL_WORKSPACES = [...PUBLISHED.map((entry) => entry.dir), ...UNPUBLISHED];
+
+/** The internal dependency every workspace pins to the released version. */
+const CORE = "@thaodangspace/argos-core";
 
 const readManifest = (dir) => JSON.parse(readFileSync(join(root, dir, "package.json"), "utf8"));
 
@@ -76,6 +80,18 @@ for (const dir of UNPUBLISHED) {
   if (manifest.private !== true) problems.push(`${manifest.name}: expected "private": true`);
   if (manifest.version !== expected) {
     problems.push(`${manifest.name}: version ${manifest.version} does not match the root version ${expected}`);
+  }
+}
+
+// Every workspace that depends on core pins the exact released version. A stale pin in an
+// unpublished workspace still makes `npm ci` resolve a second copy from the registry, so the whole
+// repository is one lockstep graph, not just the two published packages.
+for (const dir of ALL_WORKSPACES) {
+  const manifest = readManifest(dir);
+  for (const declared of [manifest.dependencies?.[CORE], manifest.peerDependencies?.[CORE]]) {
+    if (declared !== undefined && declared !== expected) {
+      problems.push(`${manifest.name}: ${CORE} is pinned to ${declared}, expected ${expected}`);
+    }
   }
 }
 
