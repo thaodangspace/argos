@@ -1,41 +1,316 @@
 name: release
 
-# Publishing happens on a tag, never on a branch: `v0.1.0` must match every workspace version
-# (scripts/check-version.mjs). Core is published before the CLI because the CLI pins the exact core
-# version it ships with. Provenance requires a public repository and an `NPM_TOKEN` secret with
-# write access to the @thaodangspace scope.
+# Two ways to publish, both gated by the same checks:
+#
+#   * merge into `main` with a version npm does not have yet — the normal release switch. Bump the
+#     version (`npm run version:bump -- patch`), merge the PR, and CI publishes.
+#   * push a `v*` tag — re-runs or repairs a release from a tag.
+#
+# A push that leaves the version unchanged is a no-op: both packages are already on npm, so ordinary
+# merges publish nothing and never ask for an approval. The registry probe is its own job for exactly
+# that reason — the `npm-publish` environment (required reviewers) only gates a run that will publish.
+#
+# Core is published before the CLI because the CLI pins the exact core version it ships with, and a
+# release that finds only one of the two on npm publishes the missing one instead of skipping.
+# Provenance and trusted publishing need a public repository; `NPM_TOKEN` (write access to the
+# @thaodangspace scope) is the fallback, and npm 11 is what carries OIDC.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run every gate and a publish dry run, but do not publish
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-  id-token: write # npm provenance (OIDC)
 
+# One release at a time, whatever triggered it: a tag pushed next to the merge that bumped the same
+# version must not start a second publish in parallel.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-npm
   cancel-in-progress: false
 
 jobs:
-  publish:
+  resolve:
+    name: Resolve release
+    if: github.repository == 'thaodangspace/argos'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      dry_run: ${{ steps.release.outputs.dry_run }}
+      enabled: ${{ steps.release.outputs.enabled }}
+      publish_core: ${{ steps.release.outputs.publish_core }}
+      publish_cli: ${{ steps.release.outputs.publish_cli }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release
+        id: release
+        env:
+          REQUESTED_DRY_RUN: ${{ inputs.dry_run }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+          core="@thaodangspace/argos-core"
+          cli="@thaodangspace/argos"
+
+          # A tag push must match package.json, otherwise the tag and the published artifact would
+          # disagree. The workspace guard (scripts/check-version.mjs) repeats this check and also
+          # proves the five manifests are lockstep.
+          if [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "$tag" ]; then
+            echo "::error::tag ${REF_NAME} does not match package.json version ${version} (expected ${tag})"
+            exit 1
+          fi
+
+          # Releases are built from main. A tag on an unmerged branch is rejected.
+          if git rev-parse --verify --quiet origin/main >/dev/null; then
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::${REF_NAME} is not contained in origin/main; release from main"
+              exit 1
+            fi
+          fi
+
+          dry_run="${REQUESTED_DRY_RUN:-false}"
+          if [ "$dry_run" != "true" ]; then dry_run=false; fi
+
+          # --prefer-online: a cached packument would make this guard wrong in both directions, so
+          # always revalidate against the registry.
+          published() {
+            if npm view "$1@${version}" version --prefer-online >/dev/null 2>&1; then
+              echo true
+            else
+              echo false
+            fi
+          }
+
+          core_published=$(published "$core")
+          cli_published=$(published "$cli")
+
+          if [ "$dry_run" = "true" ]; then
+            # A dry run exercises both publish paths even when the version is already live.
+            publish_core=true
+            publish_cli=true
+            enabled=true
+          else
+            publish_core=false
+            publish_cli=false
+            if [ "$core_published" = "false" ]; then publish_core=true; fi
+            if [ "$cli_published" = "false" ]; then publish_cli=true; fi
+            enabled=false
+            if [ "$publish_core" = "true" ] || [ "$publish_cli" = "true" ]; then enabled=true; fi
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+          echo "publish_core=${publish_core}" >> "$GITHUB_OUTPUT"
+          echo "publish_cli=${publish_cli}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release ${cli}@${version}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| trigger | \`${REF_TYPE}\` \`${REF_NAME}\` |"
+            echo "| core on npm | \`${core_published}\` |"
+            echo "| cli on npm | \`${cli_published}\` |"
+            echo "| publish core | \`${publish_core}\` |"
+            echo "| publish cli | \`${publish_cli}\` |"
+            echo "| dry run | \`${dry_run}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A half-published release (core live, CLI missing) is the failure mode this workflow used to
+      # leave behind, so it publishes the missing side instead of skipping as "already published".
+      - name: Nothing to publish
+        if: steps.release.outputs.enabled != 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: echo "::notice::@thaodangspace/argos@${VERSION} is already published; nothing to do"
+
+      - name: Warn when the tag and the release disagree
+        if: steps.release.outputs.enabled != 'true' && github.ref_type == 'tag'
+        run: echo "::warning::tag ${{ github.ref_name }} already matches a published version"
+
+  publish:
+    name: Publish to npm
+    needs: resolve
+    if: needs.resolve.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Create this environment in repository settings and add required reviewers to keep a human
+    # approval between a merge and a publish.
+    environment: npm-publish
+    permissions:
+      contents: write # create the tag and the GitHub release
+      id-token: write # npm provenance, and trusted publishing when configured
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
-      - run: npm ci
-      - name: version guard
-        run: node scripts/check-version.mjs "$GITHUB_REF_NAME"
-      - run: npm test
-      - run: npm run typecheck
-      - name: publish @thaodangspace/argos-core
-        run: npm publish -w @thaodangspace/argos-core --provenance
+
+      # npm 11.5+ is needed for OIDC trusted publishing; token auth works on it too.
+      - name: Upgrade npm
+        run: npm install --global npm@^11
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Version guard
+        run: node scripts/check-version.mjs "${{ needs.resolve.outputs.tag }}"
+
+      - name: Tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The CLI tarball carries the built SPA (`files: ["dist", "ui"]`). Building it here is what
+      # lets `prepublishOnly` copy it; without this step the CLI publish failed after core was
+      # already live, leaving a half-finished release.
+      - name: Build the UI that ships inside the CLI
+        run: npm run build:ui
+
+      - name: Stage the UI into the CLI package
+        run: |
+          set -euo pipefail
+          node packages/cli/scripts/copy-ui.mjs
+          test -f packages/cli/ui/index.html
+
+      - name: End-to-end crash/restart suite
+        run: npm run test:e2e
+
+      - name: Publish @thaodangspace/argos-core
+        if: needs.resolve.outputs.publish_core == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: publish @thaodangspace/argos
-        run: npm publish -w @thaodangspace/argos --provenance
+          DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--provenance)
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+            echo "::notice::dry run: @thaodangspace/argos-core@${VERSION}"
+          fi
+          npm publish -w @thaodangspace/argos-core "${args[@]}"
+
+      - name: Publish @thaodangspace/argos
+        if: needs.resolve.outputs.publish_cli == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The CLI pins core to this exact version, so core must be readable from npm: either this
+          # run just published it, or the resolve job found it live (the half-release repair path).
+          args=(--provenance)
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+            echo "::notice::dry run: @thaodangspace/argos@${VERSION}"
+          fi
+          npm publish -w @thaodangspace/argos "${args[@]}"
+
+      - name: Verify the published versions
+        if: needs.resolve.outputs.dry_run != 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          for name in @thaodangspace/argos-core @thaodangspace/argos; do
+            found=false
+            # Registry propagation can lag, and --prefer-online keeps npm from answering from the
+            # packument cached earlier in this job.
+            for attempt in $(seq 1 12); do
+              published=$(npm view "${name}@${VERSION}" version --prefer-online 2>/dev/null || true)
+              if [ "$published" = "$VERSION" ]; then
+                echo "::notice::${name}@${VERSION} is live on npm (attempt ${attempt})"
+                echo "- published: \`${name}@${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+                found=true
+                break
+              fi
+              sleep 15
+            done
+            if [ "$found" != "true" ]; then
+              echo "::error::${name}@${VERSION} is not readable from npm after publishing"
+              exit 1
+            fi
+          done
+
+      - name: Create tag and GitHub release
+        # always(): a publish that succeeded while the registry read lagged must still get its tag,
+        # and a re-run over an already-published version repairs a missing release instead of
+        # skipping it.
+        if: always() && needs.resolve.outputs.dry_run != 'true' && needs.resolve.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          assets=()
+          for name in @thaodangspace/argos-core @thaodangspace/argos; do
+            published=$(npm view "${name}@${VERSION}" version --prefer-online 2>/dev/null || true)
+            if [ "$published" != "$VERSION" ]; then
+              echo "::notice::${name}@${VERSION} is not on npm; nothing to attach"
+              continue
+            fi
+            # Attach the tarball npm actually published, not a fresh repack, so the release asset
+            # provably matches the registry.
+            npm pack "${name}@${VERSION}" --pack-destination dist > /dev/null
+            tarball=$(ls -t dist/*.tgz | head -n 1)
+            expected=$(npm view "${name}@${VERSION}" dist.integrity --prefer-online)
+            actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::${tarball} does not match the published integrity of ${name}@${VERSION}"
+              exit 1
+            fi
+            echo "- tarball ${name}@${VERSION}: \`${expected}\`" >> "$GITHUB_STEP_SUMMARY"
+            assets+=("$tarball")
+          done
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::notice::nothing on npm for ${TAG}; skipping the release"
+            exit 0
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::release ${TAG} already exists; uploading the tarballs"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            # A release tag means "this version is on npm". Publishing core and failing on the CLI
+            # must not mint a tag that claims a complete release; the repair run finishes it.
+            if [ "${#assets[@]}" -ne 2 ]; then
+              echo "::notice::only ${#assets[@]}/2 packages are on npm for ${TAG}; not creating the release yet"
+              exit 0
+            fi
+            target=$(git log -S"\"version\": \"${VERSION}\"" --format=%H -- package.json | tail -n 1)
+            gh release create "$TAG" "${assets[@]}" \
+              --target "${target:-$GITHUB_SHA}" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+          echo "- release: ${TAG}" >> "$GITHUB_STEP_SUMMARY"

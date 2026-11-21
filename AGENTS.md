@@ -105,6 +105,7 @@ npm run check:ui  # svelte-kit sync + svelte-check for packages/web
 npm run local:restart # rebuild CLI + UI, copy ui/, then restart the detached local `argos serve`
 node -e "import('@thaodangspace/argos-core')"   # workspace-link check; requires a build first
 npm run version:check -- v0.1.0                 # release guard: tag must match every manifest
+npm run version:bump -- patch                   # release switch: bump all manifests + lockfile
 ```
 
 `npm test` stays fast and process-free. The E2E suite is deliberately a separate project
@@ -170,19 +171,36 @@ Two workspaces are public on npm and two are not:
 The bare names `argos` and `argos-cli` are taken on npm by unrelated projects, which is why both
 packages live under the `@thaodangspace` scope. `argos` remains the command name.
 
-- **Lockstep versions.** The root (private), the two published packages, and the plugin share one
-  version; the CLI pins `@thaodangspace/argos-core` to exactly that version and the plugin pins it
-  too, because npm resolves a workspace by specifier + version.
+- **Lockstep versions.** The root (private), the two published packages, the plugin, and the web UI
+  share one version; the CLI, the plugin, and the web UI pin `@thaodangspace/argos-core` to exactly
+  that version, because npm resolves a workspace by specifier + version. `scripts/bump-version.mjs`
+  (`npm run version:bump -- 0.2.0|patch|minor|major`) moves all five manifests and all three pins in
+  one command and then runs `npm install --package-lock-only`, because the lockfile embeds the same
+  versions and `npm ci` (the first release step) refuses a mismatch. `--dry-run` prints the plan and
+  writes nothing.
 - **Release guard.** `scripts/check-version.mjs` (`npm run version:check [-- vX.Y.Z]`) fails when a
   workspace drifts, when a published package is still `private` or `0.0.0`, when
-  `publishConfig.access`/`engines.node`/`files`/`repository` is missing, or when the tag does not
-  match. CI runs it on every push; the release workflow runs it again with the tag. The
-  `GITHUB_REF_NAME` fallback applies only to a `refs/tags/` ref: a branch push (`main`) and a
-  `pull_request` merge ref (`2/merge`) both set it too, and reading those as tags failed every run.
-- **Release workflow.** Pushing a `v*` tag runs `.github/workflows/release.yml`: install, version
-  guard, `npm test`, `npm run typecheck`, then `npm publish -w @thaodangspace/argos-core` and
-  `npm publish -w @thaodangspace/argos` (in that order, `--provenance`, `NODE_AUTH_TOKEN` from the
-  `NPM_TOKEN` secret). `npm run release:publish` is the same two publishes by hand.
+  `publishConfig.access`/`engines.node`/`files`/`repository` is missing, when any workspace's
+  `@thaodangspace/argos-core` pin is not the released version, or when the tag does not match. CI
+  runs it on every push; the release workflow runs it again with the tag. The `GITHUB_REF_NAME`
+  fallback applies only to a `refs/tags/` ref: a branch push (`main`) and a `pull_request` merge ref
+  (`2/merge`) both set it too, and reading those as tags failed every run.
+- **Release workflow.** `.github/workflows/release.yml` has two triggers and one publish path. A push
+  to `main` (or a `v*` tag, or a `workflow_dispatch` with `dry_run`) first runs the `resolve` job:
+  it rejects a tag that disagrees with `package.json`, rejects a commit outside `origin/main`, and
+  probes npm (`npm view --prefer-online`) for **both** packages. Nothing on npm → the `publish` job
+  runs everything (install, version guard with the tag, `npm test`, `npm run typecheck`, `npm run
+  build:ui`, the `copy-ui.mjs` staging + `ui/index.html` check, `npm run test:e2e`) and then
+  publishes core before the CLI (`--provenance`, `NODE_AUTH_TOKEN` from `NPM_TOKEN`, `--dry-run` when
+  dispatched as one). Both versions are re-read from the registry, then the tag and the GitHub
+  release are created with the tarballs npm actually published (integrity checked against
+  `dist.integrity`). A version already on npm is a no-op, and a **half-published** release (core live,
+  CLI missing) publishes only the missing side. `publish` sits behind the `npm-publish` environment,
+  so a human approval sits between merge and publish; the no-op path never asks. `npm run
+  release:publish` is the same two publishes by hand.
+- **The release switch is the version bump.** Merging an ordinary PR changes nothing on npm; merge a
+  `npm run version:bump -- patch` commit (and the lockfile it rewrites) and CI publishes. `main` is
+  protected, so the bump arrives through a PR.
 - **What a tarball contains.** `files: ["dist", "!dist/.tsbuildinfo"]` plus `package.json`, the
   package's own `README.md`, and its own `LICENSE` (a copy of the repository licence — npm only
   packs what is inside the package directory; `packages/cli/test/publish.test.ts` keeps the copies
