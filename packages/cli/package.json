@@ -1,6 +1,6 @@
 {
   "name": "@thaodangspace/argos",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Durable YAML playbook engine CLI for Paseo agents",
   "license": "MIT",
@@ -50,6 +50,6 @@
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "@thaodangspace/argos-core": "0.1.1"
+    "@thaodangspace/argos-core": "0.1.2"
   }
 }
