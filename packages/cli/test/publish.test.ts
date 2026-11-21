@@ -140,6 +140,10 @@ describe("npm package manifests", () => {
     // A half-published release (core live, CLI missing) publishes the missing side.
     expect(workflow).toContain("publish_core");
     expect(workflow).toContain("publish_cli");
+    // Auth must not be a long-lived secret: only export NODE_AUTH_TOKEN when NPM_TOKEN exists, so
+    // npm 11 can fall back to OIDC trusted publishing instead of an empty credential.
+    expect(workflow).toContain("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}");
+    expect(workflow).toContain("export NODE_AUTH_TOKEN=\"$NPM_TOKEN\"");
     // Registry propagation lags; the release asset is the tarball npm actually published.
     expect(workflow).toContain("dist.integrity");
     expect(workflow).toContain("gh release create");

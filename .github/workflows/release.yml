@@ -204,11 +204,21 @@ jobs:
       - name: Publish @thaodangspace/argos-core
         if: needs.resolve.outputs.publish_core == 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
+          # Trusted publishing (OIDC) is the default: npm 11 exchanges the job's `id-token` for a
+          # short-lived credential, so no long-lived secret has to exist. Setting NODE_AUTH_TOKEN to
+          # an empty string is not the same as leaving it unset, so a missing secret must not export
+          # the variable at all.
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+            echo "::notice::publishing with the NPM_TOKEN secret"
+          else
+            echo "::notice::no NPM_TOKEN secret; publishing with OIDC trusted publishing"
+          fi
           args=(--provenance)
           if [ "$DRY_RUN" = "true" ]; then
             args+=(--dry-run)
@@ -219,11 +229,15 @@ jobs:
       - name: Publish @thaodangspace/argos
         if: needs.resolve.outputs.publish_cli == 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
+          # Same auth rule as the core publish: a missing secret means OIDC trusted publishing.
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          fi
           # The CLI pins core to this exact version, so core must be readable from npm: either this
           # run just published it, or the resolve job found it live (the half-release repair path).
           args=(--provenance)

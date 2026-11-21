@@ -191,8 +191,8 @@ packages live under the `@thaodangspace` scope. `argos` remains the command name
   probes npm (`npm view --prefer-online`) for **both** packages. Nothing on npm → the `publish` job
   runs everything (install, version guard with the tag, `npm test`, `npm run typecheck`, `npm run
   build:ui`, the `copy-ui.mjs` staging + `ui/index.html` check, `npm run test:e2e`) and then
-  publishes core before the CLI (`--provenance`, `NODE_AUTH_TOKEN` from `NPM_TOKEN`, `--dry-run` when
-  dispatched as one). Both versions are re-read from the registry, then the tag and the GitHub
+  publishes core before the CLI (`--provenance`; a `NPM_TOKEN` secret is used when one exists,
+  otherwise npm 11 OIDC trusted publishing, and `--dry-run` when dispatched as one). Both versions are re-read from the registry, then the tag and the GitHub
   release are created with the tarballs npm actually published (integrity checked against
   `dist.integrity`). A version already on npm is a no-op, and a **half-published** release (core live,
   CLI missing) publishes only the missing side. `publish` sits behind the `npm-publish` environment,
