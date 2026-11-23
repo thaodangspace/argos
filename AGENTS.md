@@ -1425,8 +1425,9 @@ suite green.
   startup: when the core is unreachable or speaks another protocol generation, `hc` is not
   registered and a run pinned to `hc` (or a schedule that pins it) is refused
   `executor_unavailable` until the server is restarted with a reachable core. A core that goes
-  down mid-run is `executor_unreachable` in both phases: a poll-time failure parks to the deadline,
-  and a launch-time failure parks and retries the same terminal adoption until it.
+  down mid-run is `executor_unreachable` in both phases: a poll-time failure parks to the step
+  deadline, and a launch-time failure parks and retries the same adopt-or-create call (adopting a
+  terminal the failed call already created) until the same deadline.
 - **hc runs as the operator.** The socket is same-user trust and a terminal program has the user's
   filesystem access; `hc` is opt-in per run, playbook, or schedule (see
   `docs/architecture.md#security`).
