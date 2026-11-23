@@ -5,7 +5,25 @@
   import StatusGlyph from "./StatusGlyph.svelte";
   import { runHref } from "../paths.js";
 
-  let { run, showPlaybook = false }: { run: RunView; showPlaybook?: boolean } = $props();
+  let {
+    run,
+    showPlaybook = false,
+    showProject = false,
+    relative = "start",
+  }: {
+    run: RunView;
+    showPlaybook?: boolean;
+    showProject?: boolean;
+    /** Which timestamp the row reads: the timeline's start, or the last activity. */
+    relative?: "start" | "activity";
+  } = $props();
+
+  const relativeLabel = $derived(
+    relative === "activity" ? run.updatedRelative : run.startedRelative,
+  );
+  const relativeTitle = $derived(
+    relative === "activity" ? `updated ${run.updatedLabel}` : `started ${run.createdLabel}`,
+  );
 </script>
 
 <a class="row" href={runHref(run.id)} aria-label={`Run ${run.runIdShort} of ${run.playbookId}: ${run.statusLabel}`}>
@@ -15,6 +33,7 @@
 
   <span class="main">
     <span class="title">
+      {#if showProject && run.project !== ""}<span class="project">{run.project}</span>{/if}
       {#if showPlaybook}<span class="playbook">{run.playbookId}</span>{/if}
       <span class="detail">{run.detail}</span>
       <span class="id">#{run.runIdShort}</span>
@@ -31,7 +50,7 @@
 
   <span class="times">
     <span class="duration">{run.durationLabel}</span>
-    <span class="relative">{run.updatedRelative}</span>
+    <span class="relative" title={relativeTitle}>{relativeLabel}</span>
   </span>
 </a>
 
@@ -71,6 +90,15 @@
 
   .playbook {
     font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .project {
+    padding: 0 5px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 11px;
     white-space: nowrap;
   }
 

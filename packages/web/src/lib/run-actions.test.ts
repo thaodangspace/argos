@@ -32,6 +32,7 @@ function api(overrides: Partial<ArgosApi> = {}): ArgosApi {
       decidedAt: 1,
     }),
     listPlaybooks: async (cwd) => ({ cwd, playbooks: [], errors: [] }),
+    listSchedules: async () => [],
     info: async () => {
       throw new Error("unused");
     },

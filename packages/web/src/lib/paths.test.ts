@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 
 import { UI_BASE } from "./base.js";
-import { href, runHref, stepHref } from "./paths.js";
+import { href, runHref, stepHref, workflowHref } from "./paths.js";
 
 describe("paths", () => {
   it("uses one base constant, never a relative BASE_URL", () => {
@@ -21,5 +21,10 @@ describe("paths", () => {
     expect(stepHref("01J", "step id")).toBe("/ui/runs/01J?step=step%20id");
     // A relative link would resolve to /ui/runs/runs/<id> from /ui/runs/<old>.
     expect(runHref("x").startsWith("/")).toBe(true);
+  });
+
+  it("links a workflow scope back to the list", () => {
+    expect(workflowHref("release")).toBe("/ui/?workflow=release");
+    expect(workflowHref("note forms")).toBe("/ui/?workflow=note%20forms");
   });
 });

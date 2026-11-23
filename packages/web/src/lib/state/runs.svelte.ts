@@ -5,7 +5,7 @@
  */
 
 import type { RunSummary } from "@thaodangspace/argos-core/rpc/contracts";
-import type { PanelError, RunFilter } from "@thaodangspace/argos-core/view";
+import type { PanelError } from "@thaodangspace/argos-core/view";
 
 import { toApiError, type ArgosApi } from "../api.js";
 import { subscribeEvents, type EventStatus, type EventSubscription } from "../events.js";
@@ -18,7 +18,6 @@ export class RunsStore {
   loading = $state(false);
   /** The first successful read happened: the empty state is real, not "not loaded yet". */
   loaded = $state(false);
-  filter = $state<RunFilter>("all");
 
   #subscription: EventSubscription | undefined;
   #api: ArgosApi | undefined;

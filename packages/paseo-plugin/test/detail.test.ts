@@ -107,6 +107,8 @@ describe("step log", () => {
       attempts: runView(detail, { now: 5_000 }).steps[0]?.attempts ?? [],
       outputs: runView(detail, { now: 5_000 }).steps[0]?.outputs ?? [],
       ...(step.outcome === undefined ? {} : { outcome: step.outcome }),
+      // Pinned to UTC: the log prints the reader's zone, and a test may not assume the machine's.
+      timeZone: "UTC",
     });
     expect(entries.map((entry) => entry.text)).toEqual([
       "Dispatched (attempt 1)",
@@ -316,12 +318,14 @@ describe("formatting", () => {
     expect(formatDuration(62_000)).toBe("1m 2s");
     expect(formatDuration(3_600_000)).toBe("1h");
     expect(formatDuration(-1)).toBe("—");
-    expect(formatClock(1_000)).toBe("00:00:01");
+    expect(formatClock(1_000, "UTC")).toBe("00:00:01");
+    // The default is the reader's zone: eight hours east is 08:00:01, not 00:00:01.
+    expect(formatClock(1_000, "Asia/Saigon")).toBe("08:00:01");
     expect(formatClock(null)).toBe("");
     expect(formatRelative(0, 30_000)).toBe("just now");
     expect(formatRelative(0, 180_000)).toBe("3m ago");
     expect(formatRelative(0, 7_200_000)).toBe("2h ago");
-    expect(formatRelative(0, 40 * 86_400_000)).toBe("1970-01-01");
+    expect(formatRelative(0, 40 * 86_400_000, "UTC")).toBe("1970-01-01");
   });
 
   it("formats usage and short ids", () => {

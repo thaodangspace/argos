@@ -18,10 +18,14 @@ import {
   attemptViews,
   buildRunLog,
   buildStepLog,
+  daySections,
+  filterRunViews,
   groupRuns,
   outputViews,
   panelView,
+  runFacets,
   runView,
+  sortRunViews,
   sortRuns,
   type PanelViewInput,
 } from "../src/view/index.js";
@@ -118,6 +122,15 @@ describe("read model", () => {
       }),
       bench(`groupRuns over ${String(FLEET)} run views`, () => {
         groupRuns(runViews);
+      }),
+      bench(`list timeline over ${String(FLEET)} run views`, () => {
+        sortRunViews(filterRunViews(runViews, { status: "completed" }), "start");
+      }),
+      bench(`facets over ${String(FLEET)} run views`, () => {
+        runFacets(runViews);
+      }),
+      bench(`day sections over ${String(FLEET)} run views`, () => {
+        daySections(sortRunViews(runViews, "start"), BENCH_NOW);
       }),
     );
   });

@@ -11,6 +11,7 @@ export * from "./errors.js";
 export * from "./format.js";
 export * from "./gates.js";
 export * from "./labels.js";
+export * from "./list.js";
 export * from "./run-view.js";
 export * from "./start-form.js";
 export * from "./step-log.js";

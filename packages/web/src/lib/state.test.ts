@@ -9,6 +9,12 @@ import type { RunDetail, RunSummary } from "@thaodangspace/argos-core/rpc/contra
 import { mergeRun, replaceRuns, shouldRefetchDetail } from "./state/reducers.js";
 import { addRecent, RECENTS_LIMIT } from "./state/recents.js";
 import { preferredTheme } from "./state/theme.svelte.js";
+import {
+  resolveTimeZone,
+  TIMEZONE_STORAGE_KEY,
+  timeZoneChoices,
+  TimeZoneStore,
+} from "./state/timezone.svelte.js";
 
 function run(id: string, updatedAt: number): RunSummary {
   return {
@@ -59,6 +65,50 @@ describe("theme resolution", () => {
     expect(preferredTheme(null, true)).toBe("dark");
     expect(preferredTheme(null, false)).toBe("light");
     expect(preferredTheme("nonsense", false)).toBe("light");
+  });
+});
+
+describe("timezone preference", () => {
+  it("follows the browser until this browser chooses a zone", () => {
+    // Unset, empty, and unreadable all mean "the reader's own zone", never UTC.
+    expect(resolveTimeZone(null)).toBeUndefined();
+    expect(resolveTimeZone("")).toBeUndefined();
+    expect(resolveTimeZone("   ")).toBeUndefined();
+    expect(resolveTimeZone("Mars/Olympus_Mons")).toBeUndefined();
+    expect(resolveTimeZone("UTC")).toBe("UTC");
+    expect(resolveTimeZone(" Asia/Saigon ")).toBe("Asia/Saigon");
+  });
+
+  it("offers UTC and every other known zone, the local one once", () => {
+    const choices = timeZoneChoices("Asia/Saigon");
+    expect(choices).toContain("UTC");
+    expect(choices).toContain("America/New_York");
+    // The browser's own zone is the picker's "Local" entry, so it is not listed twice.
+    expect(choices).not.toContain("Asia/Saigon");
+  });
+
+  it("persists the choice through the storage seam", () => {
+    const memory = new Map<string, string>();
+    const storage = {
+      getItem: (key: string): string | null => memory.get(key) ?? null,
+      setItem: (key: string, value: string): void => void memory.set(key, value),
+    };
+    const store = new TimeZoneStore();
+    store.init(storage);
+    expect(TIMEZONE_STORAGE_KEY).toBe("argos.ui.timezone");
+    // No stored choice: the browser's own zone, and the picker's "Local" entry names it.
+    expect(store.timeZone).toBeUndefined();
+    expect(store.system).not.toBe("");
+    expect(store.choices.length).toBeGreaterThan(1);
+
+    store.select("Europe/Berlin", storage);
+    expect(store.timeZone).toBe("Europe/Berlin");
+    expect(memory.get(TIMEZONE_STORAGE_KEY)).toBe("Europe/Berlin");
+
+    // Back to "Local": the empty value keeps the key present but means "follow the browser".
+    store.select("", storage);
+    expect(store.timeZone).toBeUndefined();
+    expect(memory.get(TIMEZONE_STORAGE_KEY)).toBe("");
   });
 });
 

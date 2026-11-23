@@ -37,6 +37,7 @@ function api(overrides: Partial<ArgosApi> = {}): ArgosApi {
     forkRun: async () => ({ runId: "r", taskId: "t" }),
     decideGate: async () => ({ runId: "r", gateId: "g", decision: "approve", decidedAt: 1 }),
     listPlaybooks: async () => ({ cwd: "/repo", playbooks: [playbook], errors: [] }),
+    listSchedules: async () => [],
     info: async () => {
       throw new Error("no info");
     },

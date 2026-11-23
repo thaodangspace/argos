@@ -21,6 +21,21 @@ import type { PanelError } from "./errors.js";
 import { formatDateTime, formatDuration, formatRelative, formatScalar, formatUsage } from "./format.js";
 import { gateKey, gateView, type GateView } from "./gates.js";
 import {
+  daySections,
+  filterRunViews,
+  projectOf,
+  runMatchesQuery,
+  runFacets,
+  runTriggerFacet,
+  sortRunViews,
+  unsectioned,
+  type DaySectionView,
+  type RunFacets,
+  type RunListQuery,
+  type RunSort,
+  type RunTriggerFacet,
+} from "./list.js";
+import {
   isActiveRun,
   RUN_FILTER_LABELS,
   RUN_FILTERS,
@@ -124,6 +139,8 @@ export interface RunView {
   readonly glyph: string;
   readonly createdAt: number;
   readonly createdLabel: string;
+  /** `createdAt` against the injected `now`, so a start-ordered row reads chronologically. */
+  readonly startedRelative: string;
   readonly updatedAt: number;
   readonly updatedLabel: string;
   readonly updatedRelative: string;
@@ -131,12 +148,16 @@ export interface RunView {
   readonly durationLabel: string;
   /** `manual`, or `schedule <id>` (FR8.2 provenance). */
   readonly triggerLabel: string;
+  /** The trigger as one facet value (`manual` / `schedule` / `fork`), for the list's filter. */
+  readonly triggerFacet: RunTriggerFacet;
   readonly scheduleId?: string;
   /** FR8: the non-default substrate this run used (`hc`); absent when it ran on `paseo`. */
   readonly executor?: string;
   /** Fork provenance (S-FR1): the parent run and the step this one was forked at. */
   readonly forkedFrom?: { readonly runId: string; readonly stepId: string };
   readonly cwd: string;
+  /** The last segment of `cwd`: the project facet a multi-checkout server groups by. */
+  readonly project: string;
   readonly worktree?: string;
   readonly inputs: readonly { readonly name: string; readonly value: string }[];
   readonly after: readonly AfterView[];
@@ -183,8 +204,16 @@ export interface RunDetailView {
 
 export interface PanelView {
   readonly runs: readonly RunView[];
-  /** Runs the current filter keeps, grouped by playbook. */
+  /** Runs the status chip keeps, grouped by playbook (the Paseo panel's CI view). */
   readonly groups: readonly WorkflowGroupView[];
+  /** The visible timeline: every facet of `query`, ordered by `sort`. */
+  readonly list: readonly RunView[];
+  /** `list` split into reader-zone day sections (`Today`, `Yesterday`, …) for a chronological list. */
+  readonly days: readonly DaySectionView[];
+  /** Fragment inventory for the rail and the facet selects (counted over every run). */
+  readonly facets: RunFacets;
+  readonly query: RunListQuery;
+  readonly sort: RunSort;
   readonly filter: RunFilter;
   readonly filters: readonly {
     readonly id: RunFilter;
@@ -221,6 +250,15 @@ export interface PanelViewInput {
   readonly loading: boolean;
   readonly connected: boolean;
   readonly error: PanelError | null;
+  /** Facet selectors; each one is optional and an absent key matches every run. */
+  readonly project?: string;
+  readonly workflow?: string;
+  readonly trigger?: RunTriggerFacet;
+  readonly executor?: string;
+  /** The list order; `start` (the timeline) when omitted. */
+  readonly sort?: RunSort;
+  /** Playbook ids with an enabled schedule: a sleeping scheduled workflow is still "in use". */
+  readonly liveWorkflows?: readonly string[];
 }
 
 /** `updatedAt` desc, then id, so the list is stable even when two runs share a timestamp. */
@@ -242,6 +280,7 @@ function stepView(
     readonly history?: readonly HistoryEvent[];
     readonly gates?: readonly GateSummary[];
     readonly now: number;
+    readonly timeZone?: string | undefined;
   },
 ): StepView {
   const detail = detailFields(step);
@@ -256,6 +295,7 @@ function stepView(
           attempts: detail.attempts,
           outputs: detail.outputs,
           ...(detail.outcome === undefined ? {} : { outcome: detail.outcome }),
+          timeZone: context.timeZone,
         });
   const end =
     step.endedAt ??
@@ -336,7 +376,7 @@ function asRunDetail(run: RunSummary): RunDetail | undefined {
   return Array.isArray(candidate.history) ? (candidate as RunDetail) : undefined;
 }
 
-/** One run as the list and the run page render it. */
+/** One run as the list and the run page render it. `timeZone` is the reader's zone. */
 export function runView(
   run: RunSummary,
   options: {
@@ -345,11 +385,13 @@ export function runView(
     readonly gates?: readonly GateSummary[];
     readonly detail?: RunDetail;
     readonly now?: number;
+    readonly timeZone?: string | undefined;
   } = {},
 ): RunView {
   const inFlight = options.inFlight ?? [];
   const busyRuns = options.busyRuns ?? [];
   const now = options.now ?? Date.now();
+  const timeZone = options.timeZone;
   const detail = options.detail ?? asRunDetail(run);
   // The detail projection is fresher than the list entry and carries attempts/outputs/history.
   const steps = detail?.id === run.id ? detail.steps : run.steps;
@@ -375,12 +417,14 @@ export function runView(
     tone: runStatusTone(run.status),
     glyph: RUN_STATUS_GLYPHS[run.status],
     createdAt: run.createdAt,
-    createdLabel: formatDateTime(run.createdAt),
+    createdLabel: formatDateTime(run.createdAt, timeZone),
+    startedRelative: formatRelative(run.createdAt, now, timeZone),
     updatedAt: run.updatedAt,
-    updatedLabel: new Date(run.updatedAt).toISOString(),
-    updatedRelative: formatRelative(run.updatedAt, now),
+    updatedLabel: formatDateTime(run.updatedAt, timeZone),
+    updatedRelative: formatRelative(run.updatedAt, now, timeZone),
     durationLabel: formatDuration((active ? now : run.updatedAt) - run.createdAt),
     triggerLabel: triggerLabel(run),
+    triggerFacet: runTriggerFacet(run),
     ...(run.trigger === undefined ? {} : { scheduleId: run.trigger.scheduleId }),
     // FR8: the list carries it only for a non-default substrate, so a paseo row renders as before.
     ...(run.executor === undefined ? {} : { executor: run.executor }),
@@ -388,6 +432,7 @@ export function runView(
       ? {}
       : { forkedFrom: { runId: run.forkedFrom.runId, stepId: run.forkedFrom.stepId } }),
     cwd: run.cwd,
+    project: projectOf(run.cwd),
     ...(run.worktree === undefined ? {} : { worktree: run.worktree.path }),
     inputs: Object.entries(run.inputs).map(([name, value]) => ({
       name,
@@ -412,6 +457,7 @@ export function runView(
         ...(detail === undefined ? {} : { history: detail.history }),
         gates: gateSummaries,
         now,
+        timeZone,
       }),
     ),
     gates,
@@ -459,21 +505,34 @@ export function groupRuns(runs: readonly RunView[]): WorkflowGroupView[] {
 /** Map the model to labels/tones. Pure: same model in, same view out (snapshot-testable). */
 export function panelView(
   model: PanelViewInput,
-  options: { readonly now?: number } = {},
+  options: { readonly now?: number; readonly timeZone?: string | undefined } = {},
 ): PanelView {
   const now = options.now ?? Date.now();
+  const timeZone = options.timeZone;
   const runs = model.runs.map((run) =>
     runView(run, {
       now,
       inFlight: model.inFlight,
       busyRuns: model.busyRuns,
       ...(model.detail?.id === run.id ? { detail: model.detail } : {}),
+      timeZone,
     }),
   );
   const gates = model.gates.map((gate) =>
     gateView(gate, { deciding: model.inFlight.includes(gateKey(gate.runId, gate.gateId)) }),
   );
-  const visible = runs.filter((run) => runMatchesFilter(run.status, model.filter));
+  const sort: RunSort = model.sort ?? "start";
+  const query: RunListQuery = {
+    status: model.filter,
+    ...(model.project === undefined ? {} : { project: model.project }),
+    ...(model.workflow === undefined ? {} : { workflow: model.workflow }),
+    ...(model.trigger === undefined ? {} : { trigger: model.trigger }),
+    ...(model.executor === undefined ? {} : { executor: model.executor }),
+  };
+  // The CI grouping the Paseo panel renders keeps its own order (newest *activity* first), so the
+  // timeline's sort never changes what that surface shows.
+  const statusOnly = runs.filter((run) => runMatchesFilter(run.status, model.filter));
+  const list = sortRunViews(filterRunViews(runs, query), sort);
   const running = runs.filter((run) => run.status === "running").length;
   const pending = gates.filter((gate) => gate.status === "pending").length;
   const statusLabel =
@@ -486,14 +545,26 @@ export function panelView(
       : undefined;
   return {
     runs,
-    groups: groupRuns(visible),
+    groups: groupRuns(sortRunViews(statusOnly, "activity")),
+    list,
+    // A day header is only truthful when the list is ordered by start; the activity order
+    // interleaves days, so it renders one unlabeled section instead.
+    days: sort === "start" ? daySections(list, now, timeZone) : unsectioned(list),
+    facets: runFacets(
+      runs,
+      model.liveWorkflows === undefined ? {} : { liveWorkflows: model.liveWorkflows },
+    ),
+    query,
+    sort,
     filter: model.filter,
+    // The chips count inside the current scope, so "Failed 7" is 7 of the 14 runs on screen and
+    // never the whole server.
     filters: RUN_FILTERS.map((id) => ({
       id,
       label: RUN_FILTER_LABELS[id],
-      count: runs.filter((run) => runMatchesFilter(run.status, id)).length,
+      count: runs.filter((run) => runMatchesQuery(run, { ...query, status: id })).length,
     })),
-    visibleCount: visible.length,
+    visibleCount: list.length,
     selected:
       selectedRun === undefined
         ? null
