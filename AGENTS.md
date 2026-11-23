@@ -42,17 +42,61 @@ compilation and `parseStepResult`), which both adapters use.
 
 `packages/core/src/view/` is the shared, DOM-free UI projection (`@thaodangspace/argos-core/view`):
 status labels/tones/glyphs, filters, `sortRuns`/`pendingGates`, `runView`/`groupRuns`/`panelView`,
-`buildStepLog`/`buildRunLog`/`historyText`, `gateView`, and `parseStartForm`. The Paseo panel
-re-exports it and the SvelteKit UI imports it, so a new status or history event is one edit for both
-(and the Paseo plugin's exhaustive `historyText` switch is now the core one). It imports only
-`rpc/contracts` — never the durable host, engine, adapters, or a Node built-in
-(`test/view/purity.test.ts`).
+`buildStepLog`/`buildRunLog`/`historyText`, `gateView`, the timestamp formatters, and
+`parseStartForm`. The Paseo panel re-exports it and the SvelteKit UI imports it, so a new status or
+history event is one edit for both (and the Paseo plugin's exhaustive `historyText` switch is now the
+core one). It imports only `rpc/contracts` — never the durable host, engine, adapters, or a Node
+built-in (`test/view/purity.test.ts`).
+
+**Time is the reader's, never UTC by default.** `format.ts` takes an optional IANA `timeZone`:
+`undefined` means the runtime's own zone (the browser's, or the daemon's `TZ`), and an unknown id
+falls back to it rather than throwing. The strings are built from
+`Intl.DateTimeFormat.formatToParts` with an explicit `en-CA` and `hourCycle: h23`, so two clients in
+two zones differ in the value and never in the shape (`2026-11-14 22:15 UTC` /
+`2026-11-15 05:15 +07:00`; the offset is the zone's offset at that instant, DST included).
+`runView`/`panelView`/`buildStepLog`/`buildRunLog`/`daySections` take the zone in their options bag
+and hand it down, so `createdLabel`, `updatedLabel`, every log `timeLabel`, and every day key follow
+one choice. `systemTimeZone`, `isTimeZone`, and `listTimeZones` (cached; `UTC` first, then
+`Intl.supportedValuesOf`) are what a picker needs, and the formatters cache one `Intl` instance per
+zone because a list row formats twice.
+
+`view/list.ts` is the list model, and it draws the GitHub-Actions line: **time is the axis, a
+workflow is a facet.** `RunListQuery` (`status` + optional `project`/`workflow`/`trigger`/`executor`),
+`runMatchesQuery`/`filterRunViews`, `sortRunViews` (`start` = the timeline by `createdAt`, `activity`
+= by `updatedAt`), `runFacets` (per-value inventory with active/failed counts over **every** run, and
+a `live` flag: a facet is in use when one of its runs is active or its workflow id is passed as
+`liveWorkflows` — the enabled schedules — so a sleeping nightly workflow is never "idle"),
+`projectOf` (last `cwd` segment), `daySections` (reader-zone `Today`/`Yesterday`/`YYYY-MM-DD`, cut
+by `formatDate` so a header never disagrees with the `3h ago` label under it, and `Yesterday` is a
+calendar step, not 86 400 000 ms), and `scopeTitle`/`scopeSubtitle`.
+`panelView` returns `list`/`days`/`facets`/`query`/`sort` beside the older `groups`, and its status
+chips count **inside** the scope. `groups`/`groupRuns` stay for the Paseo panel's native CI view
+(the web list is flat, `packages/web/src/lib/components/RunList.svelte`).
 
 `packages/web` is deliberately outside the root `tsc -b` graph (Svelte files are not `tsc` inputs):
 it typechecks with `svelte-kit sync && svelte-check` and builds with Vite/`adapter-static` under
 base `/ui`. It pins its own `typescript@6.0.3` because SvelteKit/svelte-check peer on TS 6 while the
 repository compiles with TS 7.0.2; its only core subpaths are `/rpc/contracts` and `/view`
-(`test import graph in src/lib/import-graph.test.ts`).
+(`test import graph in src/lib/import-graph.test.ts`). **The list's filter state lives in the URL**
+(`?status=&project=&workflow=&trigger=&executor=&sort=`, parsed and serialized by
+`src/lib/list-query.ts`), so a scope is shareable and the back button works; the page writes it with
+`history.replaceState` and re-reads it on `popstate`. The scope rail
+(`components/WorkflowRail.svelte`), the facet selects and order toggle
+(`components/ListToolbar.svelte`) and the flat day-sectioned list (`components/RunList.svelte`) all
+write that one state; the rail hides under 900 px, where the selects are the only way in. The rail
+splits the inventory into **in use** (a live run, or a playbook with an enabled schedule, read from
+`GET /schedules` through `api.listSchedules`) and **idle** (old one-off runs), keeps idle collapsed
+while anything is in use, and offers `✕` per workflow: hiding is a **per-browser `localStorage`
+preference** (`lib/state/hidden-workflows.ts`), so nothing is deleted and a hidden schedule keeps
+firing. The server never learns about it, which is exactly why it is not called "archive".
+
+**The timezone picker is the topbar's, and it is not URL state.**
+`components/TimeZoneSelect.svelte` (options from `listTimeZones()`, Local first) writes
+`state/timezone.svelte.ts`, one module store both pages read; the choice persists in this browser's
+`localStorage` (`argos.ui.timezone`, empty = follow the browser) exactly like the theme and the
+hidden list, because it is a *rendering* choice, not a *scope* — the URL answers "which runs", this
+answers "which clock". The default is the browser's own zone, so a reader eight hours east of
+Greenwich no longer sees UTC; `argos` never learns the zone, and nothing but the labels changes.
 
 `packages/core/src/hc/` is the herdr-core adapter, exposed on `@thaodangspace/argos-core/hc`, never
 from the package root: `port.ts` (the typed JSON-RPC surface and the one `kind` → Argos code table),
@@ -1264,7 +1308,9 @@ manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload su
 CI-style grouping/filters/step log and the one-fetch detail sync (`test/detail.test.ts`), and the
 import graph. The web suite (`packages/web`) covers the API client (schema validation, stable codes, the 401 hook),
 the SSE client (frames, malformed payloads, capped backoff), the run/detail reducers, the typed start
-form, and component rendering of the list, run page, gate card, and start dialog in jsdom; the web
+form, the list query round trip in the URL (`lib/list-query.test.ts`), the timeline list (day sections,
+`Load more`, the scope rail, the facet selects, the order toggle), and component rendering of the run
+page, gate card, and start dialog in jsdom; the web
 import-graph test pins its core subpaths. The CLI suite covers validate exit codes, golden JSON shapes (including
 `ls-schedule`, every `schedule-*` command, and `db-stats`/`db-purge`/`db-purge-dry`/`db-vacuum`),
 the no-storage import graph, the fire-line
@@ -1422,8 +1468,19 @@ suite green.
 
 - **The web UI covers watching, gates, and run controls, not the operator console.** It has no
   schedules, worktrees, database, or doctor screen, and no run deletion; those stay in the CLI (and
-  the Paseo panel for removal). It renders the same read model as the CLI, so it never shows agent
-  prompts or transcripts — a step's log ends at its declared outputs, attempts, and history.
+  the Paseo panel for removal). It reads the schedule roster only to label a workflow "in use" — it
+  cannot create, pause, or remove one. It renders the same read model as the CLI, so it never shows
+  agent prompts or transcripts — a step's log ends at its declared outputs, attempts, and history.
+- **Hiding a workflow in the UI is a view preference, not an archive.** `✕` in the rail writes a
+  workflow id into this browser's `localStorage`; the workflow keeps its schedule and can still be
+  started from the CLI, another browser profile, or the Paseo panel, and the hidden list is not
+  shared. The real cleanup for a dead workflow is removing its runs (`argos rm`) or letting
+  `argos db purge --older-than` retire them — the rail is derived from runs, so it shrinks when the
+  runs go.
+- **The timezone choice is per browser and display-only.** It changes labels, log clocks, and day
+  headers, never a stored timestamp (records, history, and the API stay epoch ms) and never the
+  schedule's `tz`. It is remembered only in this browser, so the Paseo panel and the CLI keep their
+  own host's zone, and two people looking at the same run may legitimately see different hours.
 - **The UI is a static SPA that needs a built artifact.** A published CLI carries one in `ui/`; a
   development checkout must `npm run build:ui` and set `ARGOS_UI_DIR` (or run
   `node packages/cli/scripts/copy-ui.mjs`). Without it `argos serve` is API-only with one warning.
