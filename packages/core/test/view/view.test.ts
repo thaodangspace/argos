@@ -22,21 +22,35 @@ import {
   buildRunLog,
   buildStepLog,
   compactUsage,
+  daySections,
+  dayKey,
+  filterRunViews,
+  formatClock,
+  formatDate,
+  formatDateTime,
   formatDuration,
   formatRelative,
   formatTokens,
   gateView,
   groupRuns,
   historyText,
+  isTimeZone,
+  listTimeZones,
   logText,
   panelView,
   parseStartForm,
+  projectOf,
+  runFacets,
   runMatchesFilter,
   runStatusTone,
   runView,
+  scopeSubtitle,
+  scopeTitle,
   shortId,
+  sortRunViews,
   sortRuns,
   pendingGates,
+  systemTimeZone,
   RUN_FILTERS,
   RUN_STATUS_LABELS,
   STEP_STATUS_LABELS,
@@ -341,6 +355,234 @@ describe("run views", () => {
     expect(view.statusLabel).toBe("Live");
     expect(view.statusTone).toBe("success");
     expect(view.empty).toBe(false);
+  });
+});
+
+describe("timestamps", () => {
+  // 2023-11-14T22:15:00Z: the 14th 22:15 in UTC, the 15th 05:15 in Saigon (+07:00).
+  const AT = Date.UTC(2023, 10, 14, 22, 15, 0);
+
+  it("renders the reader's zone, and UTC only when it is asked for", () => {
+    expect(formatDateTime(AT, "UTC")).toBe("2023-11-14 22:15 UTC");
+    expect(formatDateTime(AT, "Asia/Saigon")).toBe("2023-11-15 05:15 +07:00");
+    // A northern-hemisphere winter instant carries the DST-correct offset, not the zone's summer one.
+    expect(formatDateTime(AT, "America/New_York")).toBe("2023-11-14 17:15 -05:00");
+    expect(formatClock(AT, "Asia/Saigon")).toBe("05:15:00");
+    expect(formatClock(AT, "UTC")).toBe("22:15:00");
+    expect(formatClock(null, "UTC")).toBe("");
+    expect(formatDate(AT, "Asia/Saigon")).toBe("2023-11-15");
+    // The default is this runtime's zone: the same shape, whatever the machine is set to.
+    expect(formatDateTime(AT)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} (UTC|[+-]\d{2}:\d{2})$/);
+    // The far-away fallback of a relative label is a zone date too.
+    expect(formatRelative(AT, AT + 40 * 86_400_000, "UTC")).toBe("2023-11-14");
+  });
+
+  it("vets a zone id and falls back instead of throwing", () => {
+    expect(isTimeZone("Asia/Saigon")).toBe(true);
+    expect(isTimeZone("Mars/Olympus_Mons")).toBe(false);
+    expect(isTimeZone("")).toBe(false);
+    // A hand-edited preference must render, never crash a row.
+    expect(formatDateTime(AT, "Mars/Olympus_Mons")).toBe(formatDateTime(AT));
+    expect(systemTimeZone()).not.toBe("");
+    expect(listTimeZones()).toContain("UTC");
+    expect(listTimeZones()).toContain("America/New_York");
+  });
+
+  it("threads the zone through a run view and its step log", () => {
+    const row = runView(summary({ createdAt: AT, updatedAt: AT }), {
+      now: AT,
+      timeZone: "Asia/Saigon",
+    });
+    expect(row.createdLabel).toBe("2023-11-15 05:15 +07:00");
+    expect(row.updatedLabel).toBe("2023-11-15 05:15 +07:00");
+
+    const detailView = runView(detail(), { now: AT, timeZone: "UTC" });
+    const first = detailView.steps[0]?.log[0];
+    expect(first?.timeLabel).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    const localized = runView(detail(), { now: AT, timeZone: "Asia/Saigon" });
+    expect(localized.steps[0]?.log[0]?.timeLabel).not.toBe(first?.timeLabel);
+
+    const runLog = buildRunLog(detail().history, { timeZone: "UTC" });
+    expect(runLog[0]?.timeLabel).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+describe("run list model", () => {
+  const view = (overrides: Partial<RunSummary> = {}): ReturnType<typeof runView> =>
+    runView(summary(overrides), { now: NOW });
+
+  it("derives the project from the last cwd segment", () => {
+    expect(projectOf("/Users/dt/code/vsee")).toBe("vsee");
+    expect(projectOf("/Users/dt/code/vsee/")).toBe("vsee");
+    expect(projectOf("/")).toBe("/");
+    expect(projectOf("relative/path")).toBe("path");
+    expect(projectOf("C:\\work\\argos")).toBe("argos");
+    expect(view({ cwd: "/Users/dt/code/vsee" }).project).toBe("vsee");
+  });
+
+  it("carries the start timestamp and the trigger facet", () => {
+    const manual = view();
+    expect(manual.startedRelative).toBe("2m ago");
+    expect(manual.triggerFacet).toBe("manual");
+    const scheduled = view({
+      trigger: { kind: "schedule", scheduleId: "nightly", fireAt: NOW, reason: "cron" },
+    });
+    expect(scheduled.triggerFacet).toBe("schedule");
+  });
+
+  it("orders by start or by activity", () => {
+    const longRunning = view({ id: "a", createdAt: NOW - 3_600_000, updatedAt: NOW - 1_000 });
+    const fresh = view({ id: "b", createdAt: NOW - 60_000, updatedAt: NOW - 60_000 });
+    expect(sortRunViews([longRunning, fresh], "start").map((run) => run.id)).toEqual(["b", "a"]);
+    expect(sortRunViews([longRunning, fresh], "activity").map((run) => run.id)).toEqual(["a", "b"]);
+  });
+
+  it("filters by every facet and by status", () => {
+    const vsee = view({ id: "a", cwd: "/code/vsee" });
+    const argos = view({ id: "b", cwd: "/code/argos", playbookId: "docs", status: "completed" });
+    const hc = view({ id: "c", executor: "hc" });
+    const runs = [vsee, argos, hc];
+    expect(filterRunViews(runs, { status: "all" })).toHaveLength(3);
+    expect(filterRunViews(runs, { status: "all", project: "vsee" }).map((r) => r.id)).toEqual([
+      "a",
+    ]);
+    expect(filterRunViews(runs, { status: "all", workflow: "docs" }).map((r) => r.id)).toEqual([
+      "b",
+    ]);
+    expect(filterRunViews(runs, { status: "completed" }).map((r) => r.id)).toEqual(["b"]);
+    // An absent `executor` key means `paseo`, so the hc run is the only one that matches.
+    expect(filterRunViews(runs, { status: "all", executor: "hc" }).map((r) => r.id)).toEqual([
+      "c",
+    ]);
+  });
+
+  it("counts every facet over all runs, in a declared order", () => {
+    const runs = [
+      view({ id: "a", cwd: "/code/vsee" }),
+      view({ id: "b", cwd: "/code/vsee", playbookId: "docs", status: "failed" }),
+      view({
+        id: "c",
+        cwd: "/code/argos",
+        trigger: { kind: "schedule", scheduleId: "nightly", fireAt: NOW, reason: "cron" },
+      }),
+    ];
+    const facets = runFacets(runs);
+    expect(facets.workflows.map((entry) => [entry.id, entry.count])).toEqual([
+      ["release", 2],
+      ["docs", 1],
+    ]);
+    expect(facets.projects.map((entry) => entry.id)).toEqual(["vsee", "argos"]);
+    expect(facets.projects[0]?.active).toBe(1);
+    expect(facets.projects[0]?.failed).toBe(1);
+    expect(facets.triggers.map((entry) => entry.id)).toEqual(["manual", "schedule"]);
+    expect(facets.executors.map((entry) => entry.id)).toEqual(["paseo"]);
+  });
+
+  it("marks a facet in use from a live run or an enabled schedule", () => {
+    const runs = [
+      view({ id: "a", cwd: "/code/vsee", playbookId: "release" }),
+      view({ id: "b", cwd: "/code/vsee", playbookId: "nightly", status: "completed" }),
+      view({ id: "c", cwd: "/code/argos", playbookId: "one-off", status: "completed" }),
+    ];
+    const idle = runFacets(runs);
+    expect(idle.workflows.find((entry) => entry.id === "release")?.live).toBe(true);
+    // A finished one-shot run is not "in use" on its own.
+    expect(idle.workflows.find((entry) => entry.id === "one-off")?.live).toBe(false);
+    expect(idle.projects.find((entry) => entry.id === "argos")?.live).toBe(false);
+
+    // A sleeping scheduled workflow is still in use, and so is its project.
+    const scheduled = runFacets(runs, { liveWorkflows: ["nightly"] });
+    expect(scheduled.workflows.find((entry) => entry.id === "nightly")?.live).toBe(true);
+    expect(scheduled.projects.find((entry) => entry.id === "vsee")?.live).toBe(true);
+    expect(scheduled.projects.find((entry) => entry.id === "argos")?.live).toBe(false);
+  });
+
+  it("splits the list into labeled reader-zone days", () => {
+    const today = view({ id: "a", createdAt: NOW - 60_000 });
+    const yesterday = view({ id: "b", createdAt: NOW - 86_400_000 });
+    const older = view({ id: "c", createdAt: NOW - 3 * 86_400_000 });
+    const sections = daySections([today, yesterday, older], NOW);
+    // "Today"/"Yesterday" are zone independent (exactly 24h apart); an older day keeps its
+    // `YYYY-MM-DD` label, whose exact value depends on the zone the reader renders in.
+    expect(sections.slice(0, 2).map((section) => section.label)).toEqual(["Today", "Yesterday"]);
+    expect(sections[2]?.label).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(sections.map((section) => section.runs.length)).toEqual([1, 1, 1]);
+  });
+
+  it("cuts the day sections in the reader's zone, not in UTC", () => {
+    // 2023-11-14T22:15Z is still the 14th in UTC and already the 15th in Saigon (+07:00).
+    const late = view({ id: "a", createdAt: Date.UTC(2023, 10, 14, 22, 15, 0) });
+    const early = view({ id: "b", createdAt: Date.UTC(2023, 10, 15, 1, 0, 0) });
+    expect(daySections([late, early], Date.UTC(2023, 10, 15, 2, 0, 0), "UTC")).toHaveLength(2);
+    expect(daySections([late, early], Date.UTC(2023, 10, 15, 2, 0, 0), "Asia/Saigon")).toHaveLength(
+      1,
+    );
+    expect(dayKey(Date.UTC(2023, 10, 14, 22, 15, 0), "Asia/Saigon")).toBe("2023-11-15");
+    expect(dayKey(Date.UTC(2023, 10, 14, 22, 15, 0), "UTC")).toBe("2023-11-14");
+  });
+
+  it("projects the visible timeline into the panel view", () => {
+    const first = summary({ id: "01J0000000000000000000000A", createdAt: NOW - 10_000 });
+    const second = summary({
+      id: "01J0000000000000000000000B",
+      status: "completed",
+      createdAt: NOW - 120_000,
+      updatedAt: NOW - 60_000,
+    });
+    const model = {
+      runs: [first, second],
+      gates: [],
+      inFlight: [],
+      busyRuns: [],
+      detail: null,
+      selectedRunId: null,
+      detailLoading: false,
+      filter: "all" as const,
+      loading: false,
+      connected: true,
+      error: null,
+    };
+    const all = panelView(model, { now: NOW });
+    expect(all.list.map((run) => run.id)).toEqual([first.id, second.id]);
+    expect(all.query).toEqual({ status: "all" });
+    expect(all.sort).toBe("start");
+    expect(all.days).toHaveLength(1);
+    expect(all.visibleCount).toBe(2);
+
+    const scoped = panelView(
+      { ...model, workflow: "release", sort: "activity" },
+      { now: NOW },
+    );
+    expect(scoped.list.map((run) => run.id)).toEqual([first.id, second.id]);
+    expect(scoped.groups).toHaveLength(1);
+    // The activity order renders one unlabeled section: a day header would be a lie.
+    expect(scoped.days.map((section) => section.label)).toEqual([""]);
+
+    // The status chips count inside the scope, not over the whole server.
+    const narrowed = panelView({ ...model, workflow: "docs" }, { now: NOW });
+    expect(narrowed.filters.map((filter) => filter.count)).toEqual([0, 0, 0, 0]);
+
+    const withSchedule = panelView(
+      { ...model, liveWorkflows: ["release"] },
+      { now: NOW },
+    );
+    expect(withSchedule.facets.workflows[0]?.live).toBe(true);
+
+    const missing = panelView({ ...model, workflow: "docs" }, { now: NOW });
+    expect(missing.list).toEqual([]);
+    expect(missing.visibleCount).toBe(0);
+    // The CI grouping the Paseo panel renders is status-only, so it is not emptied by a facet.
+    expect(missing.groups).toHaveLength(1);
+  });
+
+  it("names the scope for the list header", () => {
+    expect(scopeTitle({ status: "all" })).toBe("All workflows");
+    expect(scopeTitle({ status: "all", workflow: "release" })).toBe("release");
+    expect(scopeTitle({ status: "all", project: "vsee" })).toBe("vsee");
+    expect(scopeSubtitle({ status: "all" }, 132)).toBe("132 runs · all workflows, newest start first");
+    expect(scopeSubtitle({ status: "all", workflow: "release", project: "vsee" }, 1)).toBe(
+      "1 run · release in vsee",
+    );
   });
 });
 

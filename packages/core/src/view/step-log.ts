@@ -152,13 +152,16 @@ function historyEntry(event: HistoryEvent): PendingLogEntry {
 }
 
 /** Log entries carry a display time; a continuation line (an output's second line) has none. */
-function toLogEntries(entries: readonly PendingLogEntry[]): StepLogEntry[] {
+function toLogEntries(
+  entries: readonly PendingLogEntry[],
+  timeZone: string | undefined,
+): StepLogEntry[] {
   return entries
     .map((entry, index) => ({ entry, index }))
     .sort((left, right) => left.entry.sortAt - right.entry.sortAt || left.index - right.index)
     .map(({ entry }) => ({
       at: entry.at,
-      timeLabel: formatClock(entry.at),
+      timeLabel: formatClock(entry.at, timeZone),
       text: entry.text,
       tone: entry.tone,
     }));
@@ -193,7 +196,8 @@ export function outputViews(outputs: StepDetailSummary["outputs"]): StepOutputVi
 
 /**
  * The step's log, built from the detail projection alone: its history events, its attempts (with
- * target + usage), its declared outputs, its outcome/error, and the gates opened for it.
+ * target + usage), its declared outputs, its outcome/error, and the gates opened for it. `timeZone`
+ * is the reader's zone (`undefined` = this runtime's), applied to every line's timestamp.
  */
 export function buildStepLog(input: {
   readonly step: StepSummary;
@@ -202,6 +206,7 @@ export function buildStepLog(input: {
   readonly attempts: readonly StepAttemptView[];
   readonly outputs: readonly StepOutputView[];
   readonly outcome?: string;
+  readonly timeZone?: string | undefined;
 }): StepLogEntry[] {
   const entries: PendingLogEntry[] = [];
   for (const event of input.history) {
@@ -278,7 +283,7 @@ export function buildStepLog(input: {
     }
   }
 
-  return toLogEntries(entries);
+  return toLogEntries(entries, input.timeZone);
 }
 
 /** `01:49:00  Attempt 1 started on claude/opus` — the copyable text of a log. */
@@ -308,10 +313,14 @@ export function compactUsage(usage: Readonly<Record<string, number>> | undefined
 }
 
 /** Run-level lines: everything that is not tied to one step. */
-export function buildRunLog(history: readonly HistoryEvent[]): StepLogEntry[] {
+export function buildRunLog(
+  history: readonly HistoryEvent[],
+  options: { readonly timeZone?: string | undefined } = {},
+): StepLogEntry[] {
   return toLogEntries(
     history
       .filter((event) => event.stepId === null && event.type !== "select")
       .map((event) => historyEntry(event)),
+    options.timeZone,
   );
 }

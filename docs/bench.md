@@ -33,7 +33,7 @@ so piping `npm run bench` elsewhere would otherwise look like a run that produce
 |---|---|---|
 | `packages/core/bench/engine.bench.ts` | `next(record, event)` — `tick`, `stepSettled`, `cancel`-free terminal guard; `readySteps`; `createRunRecord`; a whole 25-step run | The reducer runs on **every** task wake. Each call deep-clones the frozen checkpoint and re-freezes it, so the per-event cost has to stay linear in the step count. A quadratic readiness scan would only show up in a large playbook. |
 | `packages/core/bench/playbook.bench.ts` | `discoverPlaybooks`, `loadPlaybook` (parse → zod → resolve → expand → validate → hash → deep-freeze), `playbookHash` | Once per `POST /runs`, once per schedule fire, once per file for `argos validate`. It is the fixed price of starting anything. |
-| `packages/core/bench/view.bench.ts` | `toRunSummary`, `stepDetailSummaries`, `runView`, `panelView`, `sortRuns`, `groupRuns`, `buildStepLog`, `buildRunLog` | The panel polls every 2 s and re-projects the whole snapshot each frame; the web UI renders the same functions. |
+| `packages/core/bench/view.bench.ts` | `toRunSummary`, `stepDetailSummaries`, `runView`, `panelView`, `sortRuns`, `groupRuns`, the list timeline (`sortRunViews`+`filterRunViews`), `runFacets`, `daySections`, `buildStepLog`, `buildRunLog` | The panel polls every 2 s and re-projects the whole snapshot each frame; the web UI renders the same functions, and the list projection runs on every one of those frames. |
 
 Deliberately **not** benchmarked:
 
@@ -102,6 +102,9 @@ milliseconds per call; `hz` is calls per second. Treat them as an order of magni
 | `panelView` — 200 runs × 10 steps | 1.4543 | 714 |
 | `sortRuns` — 200 summaries | 0.0017 | 594 657 |
 | `groupRuns` — 200 run views | 0.0034 | 301 431 |
+| list timeline (filter + sort) — 200 run views | 0.0047 | 213 347 |
+| `runFacets` — 200 run views | 0.0154 | 67 091 |
+| `daySections` — 200 run views | 0.0172 | 57 373 |
 | `buildStepLog` — 500 history events | 0.1917 | 5 234 |
 | `buildRunLog` — 500 history events | 0.0002 | 4 599 667 |
 
@@ -115,6 +118,12 @@ The one number that looks surprising is `panelView` at ~1.5 ms for 200 runs: eac
 run through `runView`, and a selected run's detail adds avoidable-looking work. It stays cheap
 because the projection copies scalars only — the day someone puts a transcript in `RunDetail`, this
 bench (and the ceiling below) is what notices.
+
+The list model is the newest consumer of the same frame: `runFacets` and `daySections` are each
+~15 µs over 200 run views because both are one pass with a map, while filtering and sorting the
+whole 200-run timeline is ~5 µs (a copy plus a comparison). They are measured separately from `panelView` so a future facet
+that scans the list per run (an O(n²) regrouping) shows up as its own regression instead of hiding
+inside the frame total.
 
 ## The budget guard
 
