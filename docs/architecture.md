@@ -197,6 +197,18 @@ Per-step `timeout` (default 30m) is resolved at use time; a timed-out attempt is
 from a fully ticking scheduler: the run record sees one dispatch per child task, while local
 attempts are visible in the step checkpoint/history.
 
+A **transient executor outage at launch** shares the 1s/2s/4s… backoff but not the attempt
+bookkeeping. Nothing ran, so the step parks in `phase: "launch"` and re-enters the same
+adopt-or-create call with the **same** request id: `retries` is untouched, no new agent is minted
+(a create whose reply was lost is adopted, and a daemon that cannot filter labels still refuses
+`launch_uncertain`), and the step `timeout` is the only cap. At the deadline the step fails with
+the **transient code** (`paseo_unreachable` / `executor_unreachable`), never `step_timeout`, and
+the receipt's `detail` records how many launches the outage cost; `launchFailures` stays in the
+checkpoint as the step's outage history and `launchErrorCode` is dropped once a retry succeeds.
+Every other launch failure is terminal on the first throw, and a `launch()` that hangs without
+throwing is still unbounded — only a thrown transient failure parks. Poll-time unreachability
+keeps its old rule: the attempt exists, so it parks and ends in `step_timeout` after `retries`.
+
 ### Fork at a step
 
 `argos fork <runId> <stepId>` is the iterate loop: edit a step's prompt, branch the finished run at
@@ -384,10 +396,11 @@ disappears gets exactly one handover relaunch (new name, `argos/handover=1`, a h
 
 **Completion depends on the program.** hc learns that work finished from the program's own OSC 7501
 status report. A template whose command never reports status never looks done, so its step runs to
-its deadline (`step_timeout`); the step deadline, not the adapter, is the bound. A launch-time
-transport failure fails the step (`executor_unreachable`) while poll-time unreachability parks it
-until the deadline, exactly as Paseo does. hc has no structured-output channel and no provider
-counters, so `usage`/cost stays absent for its steps.
+its deadline (`step_timeout`); the step deadline, not the adapter, is the bound. A transport failure
+is `executor_unreachable` in both phases: at launch the step parks and retries the same
+adopt-or-create call — adopting a terminal `terminal.run` already created — until the step
+deadline, and at poll time it parks to the same deadline. That is Paseo's rule. hc has no
+structured-output channel and no provider counters, so `usage`/cost stays absent for its steps.
 
 **Trust boundary.** hc runs the template's command as the same user, with that user's filesystem
 access, in the run's `cwd`/worktree. The socket is same-user trust: whoever can connect to it can

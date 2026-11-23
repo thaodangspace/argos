@@ -366,7 +366,7 @@ Every deliberate failure is an `ArgosError` with one of these codes. The HTTP co
 | `playbook_missing` | unknown playbook id or unreadable file | 400 |
 | `model_unavailable` | resolved `provider/model` absent from `providers.snapshot()` (or an `hc/<template>` absent from `templates.list`); refused before any task | 422 |
 | `executor_unavailable` | the resolved executor id is not registered (or an hc core reports `incompatible`/`unsupported_generation`/`needs_update`/`hc_missing`); refused before any task | 422 |
-| `executor_unreachable` | the hc transport cannot connect/read/write (launch-time fails the step; poll-time parks until the deadline) | 503 |
+| `executor_unreachable` | the hc transport cannot connect/read/write (launch and poll both park to the step deadline; a launch retry keeps the request id) | 503 |
 | `storage_locked` | another live process owns the home/SQLite (or host already closed) | 503 |
 | `paseo_unreachable` | Paseo client cannot connect | 503 |
 | `agent_missing` | agent archived/unknown after the one allowed handover | 409 |
@@ -610,8 +610,8 @@ argos.run  v1: "select" | "await" | "settle" | "gate" | "done"
 argos.step v1: "locate" | "launch" | "await" | "collect"
   { phase, requestId, attempt, label, deadlineAt, polls,
     agentId?, target?, executor?, launchedAt?, status?, errorCode?,
-    launchAttempted, handoverAttempted?, exhausted, snapshotBefore?,
-    readonlyViolation?, detail? }
+    launchAttempted, launchFailures?, launchErrorCode?, handoverAttempted?,
+    exhausted, snapshotBefore?, readonlyViolation?, detail? }
 
 argos.script v1: "prepare" | "run" | "collect"
   { phase, attempt, runs, deadlineAt, scriptPath?, exitCode?, signal?,
@@ -643,7 +643,8 @@ id. `done` creates `auto` after-task children and commits the terminal outcome.
    (and the read-only snapshot, if `readonly`); the id selects the registry entry, so a restart
    resumes on the frozen substrate.
 2. `launch` commits `launchAttempted` **before** the executor call, calls `launch()` (adopt by
-   `requestId`, never create twice), and commits `agentId`.
+   `requestId`, never create twice), and commits `agentId`. A transient refusal parks the step and
+   re-enters this phase with the same intent ("Retries/timeouts deviation" below).
 3. `await` calls `status()` and parks in `sleeping { until: now + pollMs }` while running (D3 step
    default 3000). The first call happens on entry, then on every wake.
 4. `collect` optionally calls `collect()`, normalizes outputs to scalars (`invalid_output` on a
@@ -664,6 +665,17 @@ one dispatch attempt per child task; local attempts are visible in the step chec
 The first local attempt keeps the engine's `argos:<runId>:<stepId>:<n>` request id; a local retry
 gets `<n>.<k>`, so a later dispatch (loop, `argos retry`, gate rerun) can never reuse the request id
 of a finished retry agent.
+
+A **transient executor outage at launch** (`paseo_unreachable`, `executor_unreachable`) is the one
+failure this backoff does not retry an attempt for: nothing ran, so the step parks and re-enters
+`launch` with the same `requestId` and `launchAttempted: true` (an agent or hc terminal a lost reply
+created is adopted; a daemon that cannot filter labels refuses `launch_uncertain` instead of risking
+a duplicate), `retries` is untouched, and the step `timeout` is the only cap. At the deadline the
+step fails with the transient code, never `step_timeout`, and the receipt's `detail` reads `launch
+failed <n> time(s); last: <code>; step deadline reached`; the checkpoint keeps `launchFailures` and
+drops `launchErrorCode` once a retry succeeds. Every other launch code stays terminal on the first
+throw, and a `launch()` that hangs without throwing is still unbounded — only a thrown transient
+failure parks.
 
 ### Gates and after-tasks
 
@@ -785,7 +797,7 @@ interface PaseoPort {
 
 | Port error | Argos code / behavior |
 |---|---|
-| `PaseoUnreachableError` | `paseo_unreachable` (poll-time parks until deadline; launch-time fails the step) |
+| `PaseoUnreachableError` | `paseo_unreachable` (launch and poll both park to the deadline; a launch retry adopts by request id) |
 | `LabelFilterUnsupportedError` | `launch_uncertain` in the crash window |
 | `QuotaError` | next fallback target; all blocked → `provider_exhausted` |
 | `AgentMissingError` | one handover relaunch, then `agent_missing` |
@@ -873,7 +885,7 @@ interface HcPort {
 
 | Port error | Argos code / behavior |
 |---|---|
-| `HcTransportError` (connect/read/write/timeout/closed) | `executor_unreachable` (launch fails the step; poll parks until the deadline) |
+| `HcTransportError` (connect/read/write/timeout/closed) | `executor_unreachable` (launch and poll both park to the deadline; a launch retry adopts the terminal a failed call created) |
 | kind `unreachable` | `executor_unreachable` |
 | kinds `hc_missing`, `incompatible`, `unsupported_generation`, `needs_update`, `unavailable`, `unknown` | `executor_unavailable` (the registry refuses to advertise the core) |
 | kinds `not_found`, `machine_unknown` | the handover path: one relaunch, then `agent_missing` |
@@ -1380,8 +1392,9 @@ suite green.
 
 - **No exactly-once across the daemon boundary.** At-most-once launch *attempt* + label
   reconciliation; a daemon that cannot filter labels yields `launch_uncertain` rather than a
-  duplicate. A launch-time `paseo_unreachable` fails the step; only poll-time unreachability parks
-  and retries until the deadline.
+  duplicate. A `paseo_unreachable` at launch parks the step and re-enters the same adopt-or-create
+  call until the step deadline (then fails with that code), exactly as a poll-time outage parks; a
+  `launch()` that hangs without throwing is not bounded by that deadline.
 - **Gate role deciders are metadata only.** `decider: {by: role}` is parsed/validated/preserved,
   but v1 gates always wait for an external decision (CLI/plugin/HTTP). Human gates and loop-limit
   gates are fully implemented.
@@ -1458,8 +1471,9 @@ suite green.
   startup: when the core is unreachable or speaks another protocol generation, `hc` is not
   registered and a run pinned to `hc` (or a schedule that pins it) is refused
   `executor_unavailable` until the server is restarted with a reachable core. A core that goes
-  down mid-run is a poll-time `executor_unreachable` (parks to the deadline) or a launch-time
-  failure of that step.
+  down mid-run is `executor_unreachable` in both phases: a poll-time failure parks to the step
+  deadline, and a launch-time failure parks and retries the same adopt-or-create call (adopting a
+  terminal the failed call already created) until the same deadline.
 - **hc runs as the operator.** The socket is same-user trust and a terminal program has the user's
   filesystem access; `hc` is opt-in per run, playbook, or schedule (see
   `docs/architecture.md#security`).
