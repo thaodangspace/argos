@@ -11,7 +11,7 @@
  * reproduce the crash window between the launch intent commit and the `agentId` commit.
  */
 
-import type { ArgosErrorCode } from "../../src/errors.js";
+import { ArgosError, type ArgosErrorCode } from "../../src/errors.js";
 import type { Scalar } from "../../src/playbook/ir.js";
 import type {
   AgentLaunch,
@@ -71,6 +71,12 @@ function gate(): LaunchGate {
   return { promise, release };
 }
 
+interface LaunchFailure {
+  readonly code: ArgosErrorCode;
+  /** Calls still to refuse before the adopt-or-create path runs. */
+  remaining: number;
+}
+
 export class FakeExecutor implements StepExecutor {
   readonly agents = new Map<string, FakeAgent>();
   /** Every `launch()` invocation, in order. A second entry for one id means "adopted". */
@@ -78,6 +84,7 @@ export class FakeExecutor implements StepExecutor {
   /** Request ids that actually created an agent (exactly once per step). */
   readonly creations: string[] = [];
   readonly #gates = new Map<string, LaunchGate>();
+  readonly #launchFailures = new Map<string, LaunchFailure>();
   readonly #options: FakeExecutorOptions;
   #nextAgent = 1;
 
@@ -87,6 +94,15 @@ export class FakeExecutor implements StepExecutor {
 
   async launch(input: LaunchInput): Promise<AgentLaunch> {
     this.launchCalls.push(input.requestId);
+    const failure = this.#launchFailures.get(input.requestId);
+    if (failure !== undefined && failure.remaining > 0) {
+      failure.remaining -= 1;
+      if (failure.remaining === 0) this.#launchFailures.delete(input.requestId);
+      throw new ArgosError(
+        failure.code,
+        `FakeExecutor: ${failure.code} while launching ${input.requestId}`,
+      );
+    }
     let agent = this.agents.get(input.requestId);
     if (agent === undefined) {
       const created: FakeAgent = {
@@ -165,6 +181,15 @@ export class FakeExecutor implements StepExecutor {
   /** Hold `launch` for this request id (the process "crashes" while launch is in flight). */
   blockLaunch(requestId: string): void {
     if (!this.#gates.has(requestId)) this.#gates.set(requestId, gate());
+  }
+
+  /**
+   * Refuse the next `times` (default 1) `launch()` calls for this request id with `code`, then
+   * behave normally (adopt-or-create). Models a transiently unreachable executor, which
+   * `blockLaunch` cannot: that one models the crash window instead.
+   */
+  failLaunch(requestId: string, code: ArgosErrorCode, times = 1): void {
+    this.#launchFailures.set(requestId, { code, remaining: times });
   }
 
   /** Release a blocked launch (a later launch for the same id then adopts and returns). */

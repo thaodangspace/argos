@@ -27,6 +27,12 @@
  * task's local counter are independent, so sharing one namespace let a later dispatch reuse the
  * request id of a finished retry and adopt that agent. (Phase 5/6 can move retry scheduling back
  * into the engine once the host wakes parked runs on backoff.)
+ *
+ * A **transient** executor outage at launch does not consume `retries`: no agent ran, so the step
+ * parks and re-enters `launch` with the same `requestId` (the adopt-or-create path), bounded by
+ * the step deadline, and fails with the transient code — never `step_timeout`. The checkpoint's
+ * `launchFailures`/`launchErrorCode` are the evidence; a later success keeps the count and drops
+ * the code.
  */
 
 import { defineTask } from "@earendil-works/pi-durable";
@@ -62,11 +68,16 @@ const DEFAULT_QUOTA_WINDOW_MS = 15 * 60_000;
 const MIN_QUOTA_WAIT_MS = 30_000;
 
 /**
- * Poll-time unreachability parks the step instead of failing it: the substrate is transiently
- * down (Paseo's daemon, an hc core) and the durable deadline bounds the wait and owns retries.
- * A *launch*-time unreachable is still a step failure (FR7/FR17).
+ * The one set of codes that mean "the substrate is transiently down" (Paseo's daemon, an hc
+ * core), shared by both phases. What differs is what happens at the deadline:
+ *
+ * - at **launch** nothing ran yet, so the step parks and re-enters the same adopt-or-create launch
+ *   (same `requestId`) until the step deadline, then fails with the transient code — the code names
+ *   the substrate that was down, never `step_timeout`;
+ * - at **poll** the agent attempt exists, so the deadline/`retries` machinery owns the outcome and
+ *   a step that never settles fails `step_timeout`.
  */
-const POLL_RETRYABLE_CODES: ReadonlySet<ArgosErrorCode> = new Set<ArgosErrorCode>([
+const TRANSIENT_EXECUTOR_CODES: ReadonlySet<ArgosErrorCode> = new Set<ArgosErrorCode>([
   "paseo_unreachable",
   "executor_unreachable",
 ]);
@@ -134,6 +145,15 @@ export interface StepCheckpointFields {
    * instead of creating a possible duplicate (the crash window, FR16).
    */
   readonly launchAttempted: boolean;
+  /**
+   * FR5: how many consecutive transient launch failures this step has parked on. Written only on
+   * a transient `launch` failure (an absent key means zero), incremented per retry, and kept after
+   * a later success as the step's outage history — so a checkpoint of a step that never hit the
+   * case stays byte-identical to one written before this field existed.
+   */
+  readonly launchFailures?: number;
+  /** FR5: the code of the last transient launch failure; dropped by the successful launch commit. */
+  readonly launchErrorCode?: ArgosErrorCode;
   /** True after the one allowed handover relaunch (agent archived mid-step). */
   readonly handoverAttempted?: boolean;
   readonly agentId?: string;
@@ -426,6 +446,42 @@ function quotaWait(
   return { until, checkpoint: reset };
 }
 
+/**
+ * FR1–FR4/FR6/FR7: a **transient** executor failure at launch parks the step instead of failing
+ * it. Nothing ran, so the retry keeps every identity field (`requestId`, `attempt`, label,
+ * `launchAttempted`, `deadlineAt`, `executor`, the read-only snapshot, target, quota bookkeeping)
+ * and only records the outage; `retries` is untouched and a new request id is never minted, so a
+ * create whose reply was lost is adopted rather than duplicated. The step deadline is the only
+ * cap. Returns `undefined` when the failure is not transient or the deadline has passed — the
+ * caller then commits the terminal checkpoint with the stable code.
+ */
+function launchRetry(
+  input: StepTaskInput,
+  checkpoint: StepCheckpoint,
+  status: StepAgentStatus,
+  now: number,
+): { readonly until: number; readonly checkpoint: StepCheckpoint } | undefined {
+  if (status.state !== "done" || status.errorCode === undefined) return undefined;
+  if (!TRANSIENT_EXECUTOR_CODES.has(status.errorCode)) return undefined;
+  if (now >= checkpoint.deadlineAt) return undefined;
+  const launchFailures = (checkpoint.launchFailures ?? 0) + 1;
+  return {
+    until: now + retryBackoffMs(launchFailures),
+    checkpoint: {
+      ...checkpoint,
+      phase: "launch",
+      launchFailures,
+      launchErrorCode: status.errorCode,
+    },
+  };
+}
+
+/** Bounded diagnostic of a launch that never got an agent before the step deadline (FR3). */
+function launchDeadlineDetail(checkpoint: StepCheckpoint, code: ArgosErrorCode): string {
+  const failures = (checkpoint.launchFailures ?? 0) + 1;
+  return `launch failed ${failures} ${failures === 1 ? "time" : "times"}; last: ${code}; step deadline reached`;
+}
+
 // ------------------------------------------------------------------ definition
 
 export interface StepTaskOptions {
@@ -533,8 +589,11 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
         };
         try {
           const launched = await withAbort(executor.launch(launchInput), runtime.signal);
+          // FR9: a step that eventually launched is not carrying an error. The outage count stays
+          // (it is a step-level fact); only the code is dropped, so no key is written as undefined.
+          const { launchErrorCode: _launchErrorCode, ...settled } = checkpoint;
           const next: StepCheckpoint = {
-            ...checkpoint,
+            ...settled,
             phase: "await",
             agentId: launched.agentId,
             launchedAt: now,
@@ -552,6 +611,32 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           if (wait !== undefined) {
             await runtime.commit(
               () => ({ status: "sleeping", until: wait.until, checkpoint: wait.checkpoint }),
+              context,
+            );
+            return;
+          }
+          // FR1–FR4: a transient outage parks the step and re-enters this phase with the same
+          // request id until the step deadline; only the codes decide, never the executor id.
+          const retry = launchRetry(task.input, checkpoint, status, now);
+          if (retry !== undefined) {
+            await runtime.commit(
+              () => ({ status: "sleeping", until: retry.until, checkpoint: retry.checkpoint }),
+              context,
+            );
+            return;
+          }
+          if (
+            status.state === "done" &&
+            status.errorCode !== undefined &&
+            TRANSIENT_EXECUTOR_CODES.has(status.errorCode)
+          ) {
+            // FR3: the deadline branch names the transient code and how many launches it cost. The
+            // detail rides on the status too, so `collect` carries it into the task receipt (the
+            // checkpoint itself is dropped when the task settles).
+            const detail = launchDeadlineDetail(checkpoint, status.errorCode);
+            const failed = doneCheckpoint(checkpoint, { ...status, detail });
+            await runtime.commit(
+              () => ({ status: "running", checkpoint: { ...failed, detail } }),
               context,
             );
             return;
@@ -599,7 +684,7 @@ export function createStepTaskDefinition(options: StepTaskOptions) {
           // bounded by the deadline (spec: the step parks and retries with backoff). A terminal
           // executor failure becomes a step failure with its stable code.
           status =
-            isArgosError(error) && !POLL_RETRYABLE_CODES.has(error.code)
+            isArgosError(error) && !TRANSIENT_EXECUTOR_CODES.has(error.code)
               ? failureStatus(error)
               : { state: "running" };
         }
