@@ -244,8 +244,9 @@ window/tab, so during a run they appear in `hc ls` (and can be watched with
   step deadline still governs.
 - Declared `outputs` use the same fenced-JSON fallback as Paseo; `usage`/cost stays absent.
 - A lost terminal gets one handover relaunch, then `agent_missing`; a transport failure is
-  `executor_unreachable` (503) — failing the step at launch, parking it until the deadline at poll
-  time.
+  `executor_unreachable` (503) and parks the step until its `timeout`: a failed launch retries the
+  same adopt-or-create call (adopting a terminal the failed call already made), a failed poll parks
+  to the same deadline.
 
 A runnable example lives in [`.argos/demo/README.md`](.argos/demo/README.md) (two opencode agent
 steps and one script step, all on `hc`).

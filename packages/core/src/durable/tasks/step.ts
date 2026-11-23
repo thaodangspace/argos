@@ -30,9 +30,13 @@
  *
  * A **transient** executor outage at launch does not consume `retries`: no agent ran, so the step
  * parks and re-enters `launch` with the same `requestId` (the adopt-or-create path), bounded by
- * the step deadline, and fails with the transient code — never `step_timeout`. The checkpoint's
+ * the step deadline, and fails with the transient code — never `step_timeout`. Because the retry
+ * is a create re-entry (`priorCreateAttempt`), an agent or hc terminal that the failed call already
+ * created is adopted instead of duplicated, while a daemon that cannot filter labels refuses with
+ * `launch_uncertain` rather than risk the duplicate. The checkpoint's
  * `launchFailures`/`launchErrorCode` are the evidence; a later success keeps the count and drops
- * the code.
+ * the code, and the deadline receipt's `detail` reads
+ * `launch failed <n> time(s); last: <code>; step deadline reached`.
  */
 
 import { defineTask } from "@earendil-works/pi-durable";
