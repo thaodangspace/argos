@@ -1,6 +1,9 @@
 <script lang="ts">
   import StartRunDialog from "#lib/components/StartRunDialog.svelte";
+  import TimeZoneSelect from "#lib/components/TimeZoneSelect.svelte";
+  import { browserStorage } from "#lib/state/hidden-workflows";
   import { ThemeStore } from "#lib/state/theme.svelte";
+  import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { href, runHref } from "#lib/paths";
   import "../app.css";
 
@@ -8,6 +11,10 @@
 
   const theme = new ThemeStore();
   theme.init();
+
+  // The reader's zone: the browser's own until this browser chooses one (never UTC by default).
+  const storage = browserStorage();
+  timeZoneStore.init(storage);
 
   let startOpen = $state(false);
 
@@ -25,6 +32,12 @@
     <span class="name">Argos</span>
   </a>
   <span class="spacer"></span>
+  <TimeZoneSelect
+    system={timeZoneStore.system}
+    value={timeZoneStore.timeZone}
+    zones={timeZoneStore.choices}
+    onSelect={(zone) => timeZoneStore.select(zone, storage)}
+  />
   <button type="button" class="cta" onclick={() => (startOpen = true)}>Run workflow</button>
   <button
     type="button"

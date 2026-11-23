@@ -17,6 +17,7 @@ import {
   PlaybookListResponseSchema,
   RunDetailSchema,
   RunListResponseSchema,
+  ScheduleListResponseSchema,
   ServerInfoSchema,
   StartRunResponseSchema,
   type CancelRunResponse,
@@ -25,6 +26,7 @@ import {
   type RunDetail,
   type RunListResponse,
   type RunSummary,
+  type ScheduleSummary,
   type ServerInfo,
   type StartRunRequest,
   type StartRunResponse,
@@ -73,6 +75,8 @@ export interface ArgosApi {
     body: { readonly decision: string; readonly comment?: string; readonly clientRequestId?: string },
   ): Promise<GateDecisionResponse>;
   listPlaybooks(cwd: string): Promise<PlaybookListResponse>;
+  /** The schedule roster: the rail uses the enabled ones to tell "in use" from "idle". */
+  listSchedules(): Promise<ScheduleSummary[]>;
   info(): Promise<ServerInfo>;
 }
 
@@ -191,6 +195,7 @@ export function createApi(options: ArgosApiOptions = {}): ArgosApi {
       ),
     listPlaybooks: (cwd) =>
       request(`/playbooks?cwd=${encodeURIComponent(cwd)}`, PlaybookListResponseSchema),
+    listSchedules: async () => (await request("/schedules", ScheduleListResponseSchema)).schedules,
     info: () => request("/info", ServerInfoSchema),
   };
 }

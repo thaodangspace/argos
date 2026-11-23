@@ -12,16 +12,18 @@
   import { createApi, toApiError } from "#lib/api";
   import EmptyState from "#lib/components/EmptyState.svelte";
   import GateCard from "#lib/components/GateCard.svelte";
+  import RunFacts from "#lib/components/RunFacts.svelte";
   import RunHeader from "#lib/components/RunHeader.svelte";
   import RunLog from "#lib/components/RunLog.svelte";
   import StepLog from "#lib/components/StepLog.svelte";
   import StepRail from "#lib/components/StepRail.svelte";
   import StartRunDialog from "#lib/components/StartRunDialog.svelte";
   import Toasts from "#lib/components/Toasts.svelte";
-  import { href, runHref } from "#lib/paths";
+  import { href, runHref, workflowHref } from "#lib/paths";
   import { RunActions } from "#lib/run-actions.svelte";
   import { DetailStore } from "#lib/state/detail.svelte";
   import { RunsStore } from "#lib/state/runs.svelte";
+  import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { ToastStore } from "#lib/state/toasts.svelte";
   import type { PageProps } from "./$types";
 
@@ -83,11 +85,14 @@
       : runView(summary, {
           ...(detail.detail?.id === data.runId ? { detail: detail.detail } : {}),
           now,
+          timeZone: timeZoneStore.timeZone,
         }),
   );
 
   const runLog = $derived(
-    run === null ? [] : buildRunLog(detail.detail?.history ?? []),
+    run === null
+      ? []
+      : buildRunLog(detail.detail?.history ?? [], { timeZone: timeZoneStore.timeZone }),
   );
 
   // A summary frame is the trigger to re-read the detail only when its `seq` moved.
@@ -174,18 +179,22 @@
       title="Run not found"
       hint="It may have been removed from Argos. Go back to the workflow list to pick another run."
     />
-    <p class="back"><a href={href("/")}>← All workflow runs</a></p>
+    <p class="back"><a href={href("/")}>← All workflows</a></p>
   {:else if detail.error !== null}
     <div class="banner" role="alert">
       <strong>{detail.error.code}</strong>
       <span>{detail.error.message}</span>
     </div>
-    <p class="back"><a href={href("/")}>← All workflow runs</a></p>
+    <p class="back"><a href={href("/")}>← All workflows</a></p>
   {:else}
     <div class="loading" aria-busy="true">Loading run…</div>
   {/if}
 {:else}
-  <p class="back"><a href={href("/")}>← All workflow runs</a></p>
+  <p class="back">
+    <a href={workflowHref(run.playbookId)}>← {run.playbookId}</a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href={href("/")}>All workflows</a>
+  </p>
 
   <RunHeader {run} actions={headerActions} />
 
@@ -202,7 +211,10 @@
   {/if}
 
   <div class="layout">
-    <StepRail steps={run.steps} selectedId={currentStep?.id ?? null} onSelect={selectStep} />
+    <div class="side">
+      <StepRail steps={run.steps} selectedId={currentStep?.id ?? null} onSelect={selectStep} />
+      <RunFacts {run} />
+    </div>
     <div class="pane">
       {#if currentStep !== null}
         <StepLog step={currentStep} />
@@ -232,6 +244,9 @@
 
 <style>
   .back {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin: 0 0 12px;
     font-size: 12px;
     color: var(--muted);
@@ -239,6 +254,17 @@
 
   .back a:hover {
     color: var(--text);
+  }
+
+  .sep {
+    opacity: 0.5;
+  }
+
+  .side {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
   }
 
   .layout {

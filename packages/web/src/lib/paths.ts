@@ -15,6 +15,11 @@ export function runHref(runId: string): string {
   return href(`/runs/${encodeURIComponent(runId)}`);
 }
 
+/** The list scoped to one workflow (`?workflow=<id>`), the run page's back-link target. */
+export function workflowHref(workflowId: string): string {
+  return `${href("/")}?workflow=${encodeURIComponent(workflowId)}`;
+}
+
 export function stepHref(runId: string, stepId: string): string {
   return `${runHref(runId)}?step=${encodeURIComponent(stepId)}`;
 }

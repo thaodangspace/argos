@@ -1,20 +1,30 @@
 // @vitest-environment jsdom
 /**
- * The runs list surface (spec FR8/FR15): rows, filters, grouping, the live pill, and the empty state.
- * Rendered with the host components, no real server and no real EventSource.
+ * The runs list surface (spec FR8/FR15): the chronological list with day sections, the scope rail,
+ * the filter toolbar, the rows, the live pill, and the empty state.
+ *
+ * Rendered with the host components, no real server and no real EventSource. The assertions pin the
+ * GitHub-Actions shape: time is the axis, a workflow is a facet.
  */
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RunSummary, StepSummary } from "@thaodangspace/argos-core/rpc/contracts";
-import { groupRuns, runView, type RunView } from "@thaodangspace/argos-core/view";
+import {
+  daySections,
+  runFacets,
+  runView,
+  sortRunViews,
+  type RunView,
+} from "@thaodangspace/argos-core/view";
 
 import ConnectionPill from "./ConnectionPill.svelte";
 import EmptyState from "./EmptyState.svelte";
-import FilterChips from "./FilterChips.svelte";
-import RunGroup from "./RunGroup.svelte";
+import ListToolbar from "./ListToolbar.svelte";
+import RunList from "./RunList.svelte";
 import RunRow from "./RunRow.svelte";
+import WorkflowRail from "./WorkflowRail.svelte";
 
 const NOW = 1_700_000_100_000;
 
@@ -62,57 +72,229 @@ describe("RunRow", () => {
     render(RunRow, { props: { run } });
     expect(screen.getByText("hc")).toBeTruthy();
   });
+
+  it("reads the start time on the timeline and the activity time on the other order", () => {
+    const run = view({ createdAt: NOW - 3_600_000, updatedAt: NOW - 1_000 });
+    const first = render(RunRow, { props: { run, relative: "start" } });
+    expect(first.getByText("1h ago")).toBeTruthy();
+    cleanup();
+    const second = render(RunRow, { props: { run, relative: "activity" } });
+    expect(second.getByText("just now")).toBeTruthy();
+  });
+
+  it("adds the project and workflow labels the flat list needs", () => {
+    const run = view({ cwd: "/Users/dt/code/vsee" });
+    render(RunRow, { props: { run, showPlaybook: true, showProject: true } });
+    expect(screen.getByText("vsee")).toBeTruthy();
+    expect(screen.getByText("release")).toBeTruthy();
+  });
 });
 
-describe("FilterChips", () => {
+describe("FilterChips (via ListToolbar)", () => {
   it("marks the active chip and reports a click", async () => {
-    const onSelect = vi.fn();
-    render(FilterChips, {
+    const onStatus = vi.fn();
+    const runs = [view()];
+    render(ListToolbar, {
       props: {
-        filters: [
-          { id: "all", label: "All", count: 3 },
-          { id: "running", label: "Running", count: 1 },
-        ],
-        active: "all",
-        onSelect,
+        filters: [{ id: "all", label: "All", count: 1 }],
+        query: { status: "all" },
+        facets: runFacets(runs),
+        sort: "start",
+        total: 1,
+        running: 1,
+        onStatus,
+        onFacet: vi.fn(),
+        onSort: vi.fn(),
       },
     });
     const all = screen.getByRole("button", { name: /All/ });
-    const running = screen.getByRole("button", { name: /Running/ });
     expect(all.getAttribute("aria-pressed")).toBe("true");
-    expect(running.getAttribute("aria-pressed")).toBe("false");
-    await fireEvent.click(running);
-    expect(onSelect).toHaveBeenCalledWith("running");
+    await fireEvent.click(all);
+    expect(onStatus).toHaveBeenCalledWith("all");
   });
 });
 
-describe("RunGroup", () => {
-  it("collapses, expands, and pages long run lists", async () => {
-    const runs = Array.from({ length: 22 }, (_, index) =>
-      view({ id: `01J00000000000000000000${String(index).padStart(2, "0")}`, updatedAt: NOW - index }),
+describe("RunList", () => {
+  const listDay = (runs: readonly RunView[]) => daySections(sortRunViews(runs, "start"), NOW);
+
+  it("renders day sections and loads more globally", async () => {
+    const runs = Array.from({ length: 30 }, (_, index) =>
+      view({
+        id: `01J00000000000000000000${String(index).padStart(2, "0")}`,
+        createdAt: NOW - index * 1_000,
+      }),
     );
-    const group = groupRuns(runs)[0];
-    expect(group).toBeDefined();
-    if (group === undefined) return;
-    render(RunGroup, { props: { group, pageSize: 20 } });
+    render(RunList, { props: { days: listDay(runs), pageSize: 25 } });
 
-    expect(screen.getAllByRole("link")).toHaveLength(20);
-    const more = screen.getByRole("button", { name: /Show 2 more/ });
-    await fireEvent.click(more);
-    expect(screen.getAllByRole("link")).toHaveLength(22);
-
-    const toggle = screen.getByRole("button", { name: /release/ });
-    await fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryAllByRole("link")).toHaveLength(0);
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+    expect(screen.getAllByRole("link")).toHaveLength(25);
+    await fireEvent.click(screen.getByRole("button", { name: /Load 5 more/ }));
+    expect(screen.getAllByRole("link")).toHaveLength(30);
   });
 
-  it("shows active, failed and gate counts", () => {
-    const failed = view({ id: "01J0000000000000000000000B", status: "failed" });
-    const group = groupRuns([failed])[0];
-    if (group === undefined) return;
-    render(RunGroup, { props: { group } });
-    expect(screen.getByText("1 failed")).toBeTruthy();
+  it("separates yesterday from today", () => {
+    const today = view({ id: "01J0000000000000000000000A", createdAt: NOW - 1_000 });
+    const yesterday = view({ id: "01J0000000000000000000000B", createdAt: NOW - 86_400_000 });
+    render(RunList, { props: { days: listDay([yesterday, today]) } });
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Yesterday" })).toBeTruthy();
+  });
+});
+
+describe("WorkflowRail", () => {
+  const runs = [
+    view({ id: "01J0000000000000000000000A", playbookId: "release", cwd: "/code/vsee" }),
+    view({
+      id: "01J0000000000000000000000B",
+      playbookId: "docs",
+      cwd: "/code/argos",
+      status: "failed",
+    }),
+  ];
+
+  const railProps = (overrides: Record<string, unknown> = {}) => ({
+    facets: runFacets(runs),
+    query: { status: "all" as const },
+    total: 2,
+    onSelect: vi.fn(),
+    onHide: vi.fn(),
+    onShowHidden: vi.fn(),
+    ...overrides,
+  });
+
+  it("offers every scope with its count and reports the selection", async () => {
+    const onSelect = vi.fn();
+    render(WorkflowRail, { props: railProps({ onSelect }) });
+    expect(screen.getByRole("button", { name: /All workflows/ })).toBeTruthy();
+    const release = screen.getByRole("button", { name: /^release/ });
+    await fireEvent.click(release);
+    expect(onSelect).toHaveBeenCalledWith({ workflow: "release" });
+    await fireEvent.click(screen.getByRole("button", { name: /argos/ }));
+    expect(onSelect).toHaveBeenCalledWith({ project: "argos" });
+  });
+
+  it("marks the active scope and clears both dimensions from the top entry", async () => {
+    const onSelect = vi.fn();
+    render(WorkflowRail, {
+      props: railProps({ query: { status: "all", workflow: "release" }, onSelect }),
+    });
+    expect(screen.getByRole("button", { name: /^release/ }).getAttribute("aria-current")).toBe(
+      "true",
+    );
+    await fireEvent.click(screen.getByRole("button", { name: /All workflows/ }));
+    expect(onSelect).toHaveBeenCalledWith({ workflow: undefined, project: undefined });
+  });
+
+  it("keeps idle workflows collapsed while something is in use", async () => {
+    const mixed = [
+      view({ id: "01J0000000000000000000000A", playbookId: "release" }),
+      view({ id: "01J0000000000000000000000B", playbookId: "one-off", status: "completed" }),
+    ];
+    render(WorkflowRail, {
+      props: railProps({
+        facets: runFacets(mixed, { liveWorkflows: ["release"] }),
+        total: 2,
+      }),
+    });
+    // "release" is scheduled, so it is in use; "one-off" is a finished one-shot run.
+    expect(screen.getByRole("button", { name: /^release/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^one-off/ })).toBeNull();
+    const toggle = screen.getByRole("button", { name: /Idle/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: /^one-off/ })).toBeTruthy();
+  });
+
+  it("shows every workflow when none of them is in use", () => {
+    render(WorkflowRail, {
+      props: railProps({
+        facets: runFacets([view({ playbookId: "release", status: "completed" })]),
+        total: 1,
+      }),
+    });
+    expect(screen.getByRole("button", { name: /^release/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Idle/ })).toBeNull();
+  });
+
+  it("hides a workflow, leaves the active one alone, and offers to show them again", async () => {
+    const onHide = vi.fn();
+    const onShowHidden = vi.fn();
+    const hiddenRun = [
+      view({ id: "01J0000000000000000000000A", playbookId: "release" }),
+      view({ id: "01J0000000000000000000000B", playbookId: "demo-hc" }),
+      view({ id: "01J0000000000000000000000C", playbookId: "one-off", status: "completed" }),
+    ];
+    render(WorkflowRail, {
+      props: railProps({
+        facets: runFacets(hiddenRun, { liveWorkflows: ["release"] }),
+        hidden: ["demo-hc"],
+        total: 3,
+        onHide,
+        onShowHidden,
+      }),
+    });
+    expect(screen.queryByRole("button", { name: /^demo-hc/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Hide release" }));
+    expect(onHide).toHaveBeenCalledWith("release");
+    await fireEvent.click(screen.getByRole("button", { name: /1 hidden/ }));
+    expect(onShowHidden).toHaveBeenCalled();
+  });
+
+  it("does not offer to hide the workflow the list is scoped to", () => {
+    render(WorkflowRail, {
+      props: railProps({ query: { status: "all", workflow: "release" } }),
+    });
+    expect(screen.queryByRole("button", { name: "Hide release" })).toBeNull();
+  });
+});
+
+describe("ListToolbar", () => {
+  const runs = [
+    view({ id: "01J0000000000000000000000A", cwd: "/code/vsee" }),
+    view({ id: "01J0000000000000000000000B", cwd: "/code/argos", playbookId: "docs" }),
+  ];
+
+  it("shows the visible count and switches the order", async () => {
+    const onSort = vi.fn();
+    render(ListToolbar, {
+      props: {
+        filters: [{ id: "all", label: "All", count: 2 }],
+        query: { status: "all" },
+        facets: runFacets(runs),
+        sort: "start",
+        total: 2,
+        running: 2,
+        onStatus: vi.fn(),
+        onFacet: vi.fn(),
+        onSort,
+      },
+    });
+    expect(screen.getByText("2", { selector: ".count strong" })).toBeTruthy();
+    expect(screen.getByText("2 in progress")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Recent activity" }));
+    expect(onSort).toHaveBeenCalledWith("activity");
+  });
+
+  it("reports a facet select change, including clearing it", async () => {
+    const onFacet = vi.fn();
+    render(ListToolbar, {
+      props: {
+        filters: [{ id: "all", label: "All", count: 2 }],
+        query: { status: "all" },
+        facets: runFacets(runs),
+        sort: "start",
+        total: 2,
+        running: 2,
+        onStatus: vi.fn(),
+        onFacet,
+        onSort: vi.fn(),
+      },
+    });
+    const project = screen.getByLabelText(/Project/);
+    await fireEvent.change(project, { target: { value: "vsee" } });
+    expect(onFacet).toHaveBeenCalledWith("project", "vsee");
+    await fireEvent.change(project, { target: { value: "" } });
+    expect(onFacet).toHaveBeenCalledWith("project", undefined);
   });
 });
 
