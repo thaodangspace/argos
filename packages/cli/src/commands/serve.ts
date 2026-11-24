@@ -16,6 +16,7 @@ import { argosHome, isArgosError } from "@thaodangspace/argos-core";
 import {
   DEFAULT_EXECUTOR_ID,
   EXECUTOR_IDS,
+  EXECUTOR_TEMPLATE_LIMIT,
   executorIdFor,
   type ExecutorId,
   type ExecutorInfo,
@@ -151,8 +152,25 @@ interface HcRegistration {
   readonly executor: ArgosHostOptions["executor"];
   readonly catalog: HcCatalog;
   /** FR9: the reachability/version the registry publishes (`GET /info`, `argos doctor`). */
-  readonly info: { readonly reachable: boolean; readonly version?: string; readonly error?: string };
+  readonly info: {
+    readonly reachable: boolean;
+    readonly version?: string;
+    readonly error?: string;
+    /** FR16: the live `hc/<template>` roster, sorted and capped where it is built. */
+    readonly templates?: readonly string[];
+  };
   readonly close: () => Promise<void>;
+}
+
+/**
+ * FR16: the roster `/info` publishes for `hc`, from the catalog the executor was built with.
+ *
+ * `HcCatalog.targets` is already sorted; sorting again is free and keeps the producer's contract
+ * ("sorted, capped, truncated silently" — D6) true no matter what a future catalog returns. No new
+ * probe and no new socket call: this is the same list `templates.list` answered at startup.
+ */
+function hcTemplateRoster(catalog: HcCatalog): readonly string[] {
+  return [...catalog.targets].sort().slice(0, EXECUTOR_TEMPLATE_LIMIT);
 }
 
 function errorText(error: unknown): string {
@@ -211,7 +229,7 @@ async function buildHcRegistration(
         ...(herdr === undefined ? {} : { herdr }),
       }),
       catalog,
-      info: { reachable: true, version: FAKE_HC_VERSION },
+      info: { reachable: true, version: FAKE_HC_VERSION, templates: hcTemplateRoster(catalog) },
       close: async () => undefined,
     };
   }
@@ -238,6 +256,7 @@ async function buildHcRegistration(
       info: {
         reachable: true,
         ...(status.version.length === 0 ? {} : { version: status.version }),
+        templates: hcTemplateRoster(catalog),
       },
       close: () => client.close(),
     };

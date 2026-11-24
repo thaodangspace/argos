@@ -205,6 +205,7 @@ Usage:
   argos hc templates install [pack ...] [--from <dir>] [--link] [--force] [--dry-run]
                              [--dir <path>] [--json]
   argos hc templates uninstall <pack ...> [--prune] [--dry-run] [--dir <path>] [--json]
+  argos hc templates verify [--require-server] [--dir <path>] [--json]
   argos serve [--port N] [--home dir] [--default-executor paseo|hc] [--json]
   argos doctor [--home dir] [--port N] [--json]
 

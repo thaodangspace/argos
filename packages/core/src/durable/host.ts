@@ -44,6 +44,7 @@ import {
   DEFAULT_EXECUTOR_CAPABILITIES,
   DEFAULT_EXECUTOR_ID,
   EXECUTOR_IDS,
+  EXECUTOR_TEMPLATE_LIMIT,
   executorIdFor,
   type ExecutorId,
   type ExecutorInfo,
@@ -163,6 +164,20 @@ function registeredExecutorList(
 ): string {
   const registered = EXECUTOR_IDS.filter((id) => executors[id] !== undefined);
   return registered.length === 0 ? "(none)" : registered.join(", ");
+}
+
+/**
+ * FR18: the `model_unavailable` message, in one place because two throws share it (start and fork).
+ *
+ * The install hint is appended **only** when every missing target is an `hc/<template>`: an hc
+ * target is a machine-level asset an operator installs with `argos hc templates install`, while a
+ * Paseo `provider/model` comes from the daemon's catalog and its message stays byte-identical. The
+ * error code, its HTTP status, and `issues` are untouched — callers match on the code, never text.
+ */
+function modelUnavailableMessage(playbookId: string, missing: readonly string[]): string {
+  const message = `playbook ${playbookId}: unknown provider/model target(s): ${missing.join(", ")}; check providers.snapshot()`;
+  const allHc = missing.length > 0 && missing.every((target) => target.startsWith("hc/"));
+  return allHc ? `${message}; install it with \`argos hc templates install\`` : message;
 }
 
 // ------------------------------------------------------------------ host
@@ -423,6 +438,7 @@ export class ArgosHost {
   get executors(): readonly ExecutorInfo[] {
     return EXECUTOR_IDS.filter((id) => this.#executors[id] !== undefined).map((id) => {
       const descriptor = this.#executorInfo[id];
+      const templates = descriptor?.templates;
       return {
         id,
         default: id === this.#defaultExecutor,
@@ -430,6 +446,10 @@ export class ArgosHost {
         ...(descriptor?.version === undefined ? {} : { version: descriptor.version }),
         capabilities: { ...DEFAULT_EXECUTOR_CAPABILITIES[id], ...descriptor?.capabilities },
         ...(descriptor?.error === undefined ? {} : { error: descriptor.error }),
+        // FR16: a roster is sorted and capped where it is published, never rejected (D6).
+        ...(templates === undefined || templates.length === 0
+          ? {}
+          : { templates: [...templates].sort().slice(0, EXECUTOR_TEMPLATE_LIMIT) }),
       };
     });
   }
@@ -649,7 +669,7 @@ export class ArgosHost {
       if (missing.length > 0) {
         throw new ArgosError(
           "model_unavailable",
-          `playbook ${input.ir.id}: unknown provider/model target(s): ${missing.join(", ")}; check providers.snapshot()`,
+          modelUnavailableMessage(input.ir.id, missing),
         );
       }
     }
@@ -1451,10 +1471,7 @@ export class ArgosHost {
     if (catalog !== undefined) {
       const missing = catalog.missingTargets(ir, parent.inputs);
       if (missing.length > 0) {
-        throw new ArgosError(
-          "model_unavailable",
-          `playbook ${ir.id}: unknown provider/model target(s): ${missing.join(", ")}; check providers.snapshot()`,
-        );
+        throw new ArgosError("model_unavailable", modelUnavailableMessage(ir.id, missing));
       }
     }
     const closure = downstreamClosure(parent.ir, [stepId]);

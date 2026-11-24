@@ -1,9 +1,10 @@
 /**
- * `argos hc templates list|install|uninstall` (spec FR10–FR12, FR15; plan Phase 2).
+ * `argos hc templates list|install|uninstall|verify` (spec FR10–FR14, FR15; plan Phases 2–3).
  *
  * Templates are **machine-level** assets: `hc` reads a directory, so an Argos install puts files
  * there once instead of every repository vendoring a script. Nothing on this path talks to `hc`,
- * opens a socket, reads SQLite, or spawns a process — `node:fs` only, plus Argos' own manifest at
+ * opens a socket, reads SQLite, or spawns a process — `node:fs` plus HTTP to `argos serve` for the
+ * one question that is about the running server (`verify`), and Argos' own manifest at
  * `$ARGOS_HOME/hc/packs.json`.
  *
  * The command is deliberately a thin shell around the pure planner: `--dry-run` prints the plan that
@@ -11,13 +12,23 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  statSync,
+} from "node:fs";
 import { basename, join, resolve } from "node:path";
+
+import { RpcClient } from "@thaodangspace/argos-core/rpc";
 
 import { flag, hasFlag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
 import {
   EXIT_OK,
   EXIT_RUNTIME,
+  EXIT_UNREACHABLE,
   EXIT_VALIDATION,
   printJson,
   printJsonError,
@@ -31,6 +42,7 @@ import {
   parsePack,
   parseTemplate,
   type PackManifest,
+  type PackManifestPack,
 } from "../packs/pack.js";
 import {
   planInstall,
@@ -544,16 +556,285 @@ function humanUninstall(
   return lines.join("\n");
 }
 
+// ------------------------------------------------------------------ verify
+
+/**
+ * FR13: one template's three answers. `inServer` is `null` when the answer is unknown — no server,
+ * an older server that does not publish its roster, or a server that does not register `hc` at all.
+ */
+interface VerifyTemplateView {
+  readonly name: string;
+  readonly file: string;
+  readonly present: boolean;
+  readonly executable: boolean;
+  readonly hashMatches: boolean;
+  readonly inServer: boolean | null;
+  readonly status: "ok" | "warn" | "error";
+  readonly messages: readonly string[];
+}
+
+interface VerifyPackView {
+  readonly name: string;
+  readonly version: number;
+  readonly templates: readonly VerifyTemplateView[];
+}
+
+interface VerifyView {
+  readonly dir: string;
+  readonly server: { readonly reachable: boolean; readonly templates: readonly string[] | null };
+  readonly packs: readonly VerifyPackView[];
+  readonly ok: boolean;
+  readonly warnings: number;
+  readonly errors: number;
+}
+
+/** What `/health` + `GET /info` answered. `templates: null` means "cannot tell", never "empty". */
+interface ServerProbe {
+  readonly reachable: boolean;
+  readonly url: string;
+  readonly templates: readonly string[] | null;
+  /** Why the roster is unknown, when it is (one sentence, no path or token). */
+  readonly note: string | undefined;
+  /** Why `/health` failed, when it did. */
+  readonly error: string | undefined;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** FR13's third question: is `argos serve` there, and what roster does it publish? */
+async function probeServer(home: string): Promise<ServerProbe> {
+  const client = new RpcClient({ home });
+  const url = client.baseUrl;
+  try {
+    await client.health();
+  } catch (error) {
+    return { reachable: false, url, templates: null, note: undefined, error: errorText(error) };
+  }
+  try {
+    const info = await client.info();
+    const hc = info.executors?.find((executor) => executor.id === "hc");
+    if (hc === undefined) {
+      return {
+        reachable: true,
+        url,
+        templates: null,
+        note: "the running server does not register the hc executor; cannot tell whether it has seen them (restart `argos serve` with a reachable herdr-core)",
+        error: undefined,
+      };
+    }
+    if (hc.templates === undefined) {
+      return {
+        reachable: true,
+        url,
+        templates: null,
+        note: "the running server does not publish its hc templates; cannot tell whether it has seen them (restart `argos serve`)",
+        error: undefined,
+      };
+    }
+    return { reachable: true, url, templates: hc.templates, note: undefined, error: undefined };
+  } catch (error) {
+    // `/health` answered, so the server is up; `/info` is what carries the roster.
+    return {
+      reachable: true,
+      url,
+      templates: null,
+      note: `the running server answered /health but not /info (${errorText(error)}); cannot tell`,
+      error: undefined,
+    };
+  }
+}
+
+/** A `hc/<template>` roster entry for one manifest template name (the canonical spelling). */
+function inRoster(roster: readonly string[], name: string): boolean {
+  return roster.includes(`hc/${name}`) || roster.includes(name);
+}
+
+/** FR13's first question, per pack: the program is one file shared by every template in it. */
+function programFacts(entry: PackManifestPack): {
+  readonly present: boolean;
+  readonly executable: boolean;
+  readonly hashMatches: boolean;
+  readonly messages: readonly string[];
+} {
+  const messages: string[] = [];
+  const link = entry.link;
+  const installed = lstatSync(entry.program, { throwIfNoEntry: false });
+  if (installed === undefined) {
+    return {
+      present: false,
+      executable: false,
+      hashMatches: false,
+      messages: [`program missing: ${entry.program}`],
+    };
+  }
+  // `stat` follows a symlink, so this is the target's mode for a `--link` pack and the file's for
+  // a copied one. A dangling link resolves to nothing, which is the `--link` drift FR13 reports.
+  const followed = statSync(entry.program, { throwIfNoEntry: false });
+  if (followed === undefined) {
+    return {
+      present: false,
+      executable: false,
+      hashMatches: false,
+      messages: [`link target missing: ${link ?? entry.program}`],
+    };
+  }
+  const executable = (followed.mode & 0o111) !== 0;
+  if (!executable) messages.push(`program is not executable: ${entry.program}`);
+  if (link !== undefined) {
+    // A linked pack records a target instead of a hash (FR11), so there is no digest to compare.
+    return { present: true, executable, hashMatches: true, messages };
+  }
+  const content = readIfPresent(entry.program);
+  const hashMatches =
+    content !== undefined &&
+    entry.programSha256 !== undefined &&
+    sha256(content) === entry.programSha256;
+  if (!hashMatches) {
+    messages.push("program sha256 differs from the manifest; run `argos hc templates install`");
+  }
+  return { present: true, executable, hashMatches, messages };
+}
+
+/** FR13: the three independent answers, as one report and its counts. */
+function verifyReport(
+  manifest: PackManifest,
+  dir: string,
+  probe: ServerProbe,
+  requireServer: boolean,
+): VerifyView {
+  let warnings = 0;
+  let errors = 0;
+  const packs = Object.keys(manifest.packs)
+    .sort()
+    .map((name): VerifyPackView => {
+      const entry = manifest.packs[name];
+      if (entry === undefined) throw new Error(`manifest lost pack ${name}`);
+      const program = programFacts(entry);
+      const roster = probe.templates;
+      const templates = Object.keys(entry.templates)
+        .sort()
+        .map((templateName): VerifyTemplateView => {
+          const template = entry.templates[templateName];
+          if (template === undefined) throw new Error(`manifest lost template ${templateName}`);
+          const present = existsSync(template.file);
+          const inServer = roster === null ? null : inRoster(roster, templateName);
+          const messages = [...program.messages];
+          if (!present) messages.push(`template file missing: ${template.file}`);
+          if (inServer === false) {
+            messages.push(
+              `installed but not in the running server's catalog; restart \`argos serve\``,
+            );
+          } else if (inServer === null) {
+            messages.push(
+              probe.reachable
+                ? (probe.note ?? "cannot tell")
+                : "argos serve is not reachable; cannot tell whether it has seen them",
+            );
+          }
+          const broken =
+            !present || !program.present || !program.executable || !program.hashMatches;
+          const status: VerifyTemplateView["status"] = broken
+            ? "error"
+            : inServer === true
+              ? "ok"
+              : "warn";
+          if (status === "error") errors += 1;
+          else if (status === "warn") warnings += 1;
+          return {
+            name: templateName,
+            file: template.file,
+            present,
+            executable: program.executable,
+            hashMatches: program.hashMatches,
+            inServer,
+            status,
+            messages,
+          };
+        });
+      return { name, version: entry.version, templates };
+    });
+  return {
+    dir,
+    server: { reachable: probe.reachable, templates: probe.templates },
+    packs,
+    ok: errors === 0 && (probe.reachable || !requireServer),
+    warnings,
+    errors,
+  };
+}
+
+function countLine(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function humanVerify(report: VerifyView, probe: ServerProbe, requireServer: boolean): string {
+  const server = !report.server.reachable
+    ? `${probe.url} (not reachable${probe.error === undefined ? "" : `: ${probe.error}`})`
+    : report.server.templates === null
+      ? `${probe.url} (reachable, no hc templates published)`
+      : `${probe.url} (reachable, ${countLine(report.server.templates.length, "hc template")})`;
+  const lines = [
+    "argos hc templates verify",
+    `  templates  ${report.dir}`,
+    `  server     ${server}`,
+  ];
+  if (report.packs.length === 0) {
+    lines.push("  no packs installed; run `argos hc templates install`");
+  }
+  for (const pack of report.packs) {
+    lines.push(`  ${pack.name} ${pack.version}`);
+    for (const template of pack.templates) {
+      const detail = template.messages.length === 0 ? "" : `  ${template.messages.join("; ")}`;
+      lines.push(`    ${template.name}  ${template.status}${detail}`);
+    }
+  }
+  lines.push(`  ${countLine(report.errors, "error")}, ${countLine(report.warnings, "warning")}`);
+  if (!report.server.reachable) {
+    lines.push(
+      requireServer
+        ? "  `--require-server` was given and `argos serve` is not reachable"
+        : "  start it with `argos serve` to check the live catalog",
+    );
+  }
+  return lines.join("\n");
+}
+
+async function verifyCommand(args: ParsedArgs, io: CliIo): Promise<number> {
+  const unknown = rejectUnknownFlags(args, ["dir", "require-server"]);
+  if (unknown !== undefined) return usage(io, unknown);
+  if (args.positionals.length > 2) return usage(io, "hc templates verify takes no arguments");
+
+  const dir = templatesDir(flag(args, "dir"));
+  const home = argosStateDir();
+  const requireServer = hasFlag(args, "require-server");
+
+  const read = readManifestDocument(home);
+  if (!read.ok) return refuse(io, args.json, read.refusals);
+
+  const probe = await probeServer(home);
+  const report = verifyReport(read.manifest, dir, probe, requireServer);
+
+  if (args.json) printJson(io, report);
+  else io.stdout(`${humanVerify(report, probe, requireServer)}\n`);
+
+  // FR14/D13: 3 is `--require-server`'s alone; a broken install is an ordinary failure (1).
+  if (!probe.reachable && requireServer) return EXIT_UNREACHABLE;
+  return report.errors > 0 ? EXIT_RUNTIME : EXIT_OK;
+}
+
 // ------------------------------------------------------------------ entry
 
 export async function hcCommand(args: ParsedArgs, io: CliIo): Promise<number> {
   const group = args.positionals[0];
   if (group !== "templates") {
-    return usage(io, "hc needs a sub-command: hc templates list|install|uninstall");
+    return usage(io, "hc needs a sub-command: hc templates list|install|uninstall|verify");
   }
   const sub = args.positionals[1];
   if (sub === "list") return listCommand(args, io);
   if (sub === "install") return installCommand(args, io);
   if (sub === "uninstall") return uninstallCommand(args, io);
-  return usage(io, "hc templates needs a sub-command: list|install|uninstall");
+  if (sub === "verify") return verifyCommand(args, io);
+  return usage(io, "hc templates needs a sub-command: list|install|uninstall|verify");
 }

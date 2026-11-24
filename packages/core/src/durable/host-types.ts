@@ -34,6 +34,12 @@ export interface ExecutorDescriptor {
   readonly capabilities?: Partial<ExecutorCapabilities>;
   /** Why `reachable` is false; never a credential (the adapters redact). */
   readonly error?: string;
+  /**
+   * FR16: the executor's live target roster, when its catalog is a roster (`hc`'s templates).
+   * Published on `GET /info` sorted and truncated to `EXECUTOR_TEMPLATE_LIMIT`; omitted for an
+   * executor whose catalog is a provider/model matrix. Additive: an address without it is "unknown".
+   */
+  readonly templates?: readonly string[];
 }
 
 export interface ArgosHostOptions {

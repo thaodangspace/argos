@@ -27,7 +27,8 @@ import { ArgosHost } from "../../src/durable/host.js";
 import { createRunRecord, hydrateRunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import { isArgosError } from "../../src/errors.js";
-import { executorIdFor, normalizeExecutorId } from "../../src/executor/model.js";
+import { ExecutorInfoSchema, executorIdFor, normalizeExecutorId } from "../../src/executor/model.js";
+import type { TargetCatalog } from "../../src/paseo/model-catalog.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeClock } from "../fakes/clock.js";
 import { FakeExecutor } from "../fakes/executor.js";
@@ -503,6 +504,163 @@ describe("executor registry (FR2, FR6, FR7)", () => {
       expect((await host.getRun(runId))?.record.executor).toBe("hc");
     } finally {
       await host.close();
+    }
+  });
+});
+
+/**
+ * FR16: `ExecutorInfo.templates` is the live roster of an executor whose catalog *is* a roster.
+ * Additive on the wire (an older server omits it, and `paseo` never carries it), sorted and capped
+ * where it is published — never rejected.
+ */
+describe("GET /info templates (FR16)", () => {
+  const PASEO_CAPABILITIES = {
+    structuredOutput: true,
+    quota: true,
+    interactiveBlocked: false,
+    scheduleSafe: true,
+  };
+  const HC_CAPABILITIES = {
+    structuredOutput: false,
+    quota: false,
+    interactiveBlocked: true,
+    scheduleSafe: true,
+  };
+
+  it("keeps the roster optional on the schema, and accepts a producer that fills it", () => {
+    const without = ExecutorInfoSchema.parse({
+      id: "paseo",
+      default: true,
+      reachable: true,
+      capabilities: PASEO_CAPABILITIES,
+    });
+    expect(Object.hasOwn(without, "templates")).toBe(false);
+
+    const withRoster = ExecutorInfoSchema.parse({
+      id: "hc",
+      default: false,
+      reachable: true,
+      capabilities: HC_CAPABILITIES,
+      templates: ["hc/smoke"],
+    });
+    expect(withRoster.templates).toEqual(["hc/smoke"]);
+  });
+
+  it("publishes a descriptor's roster sorted and capped at 100, and never for paseo", async () => {
+    // 101 entries, newest first, so both the sort and the truncation are observable.
+    const templates = Array.from(
+      { length: 101 },
+      (_unused, index) => `hc/t${String(100 - index).padStart(3, "0")}`,
+    );
+    const clock = new FakeClock();
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock,
+      executor: new RecordingExecutor(new FakeExecutor()),
+      executors: { hc: new RecordingExecutor(new FakeExecutor()) },
+      executorInfo: { hc: { reachable: true, templates } },
+    });
+    try {
+      const [paseoInfo, hcInfo] = host.executors;
+      expect(paseoInfo?.id).toBe("paseo");
+      expect(paseoInfo).not.toHaveProperty("templates");
+      expect(hcInfo?.id).toBe("hc");
+      expect(hcInfo?.templates).toHaveLength(100);
+      expect(hcInfo?.templates).toEqual([...templates].sort().slice(0, 100));
+      // The published descriptor is what the RPC contract accepts.
+      expect(() => ExecutorInfoSchema.parse(hcInfo)).not.toThrow();
+    } finally {
+      await host.close();
+    }
+  });
+});
+
+/**
+ * FR18/D14: a `model_unavailable` names the install command when — and only when — every missing
+ * target is a machine-level `hc/<template>`. A Paseo target's message stays byte-identical, since
+ * its catalog comes from the daemon.
+ */
+describe("model_unavailable hint (FR18)", () => {
+  function catalogOf(missing: readonly string[]): TargetCatalog {
+    return { missingTargets: () => missing };
+  }
+
+  it("appends the install command when every missing target is an hc template", async () => {
+    const clock = new FakeClock();
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock,
+      executor: new RecordingExecutor(new FakeExecutor()),
+      executors: { hc: new RecordingExecutor(new FakeExecutor()) },
+      catalogs: { hc: catalogOf(["hc/smoke"]) },
+    });
+    try {
+      const error = await errorOf(
+        host.startRun({
+          ir: pinnedPlaybook(),
+          inputs: {},
+          cwd: "/tmp/argos-hc-hint",
+          id: "run-hc-hint",
+        }),
+      );
+      expect(isArgosError(error) && error.code).toBe("model_unavailable");
+      expect((error as Error).message).toBe(
+        "playbook single: unknown provider/model target(s): hc/smoke; check providers.snapshot(); install it with `argos hc templates install`",
+      );
+      // The refusal still precedes every task and index entry.
+      expect(await host.listRuns()).toEqual([]);
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("leaves a Paseo message byte-identical and stays silent on a mixed set", async () => {
+    const paseo = new RecordingExecutor(new FakeExecutor());
+    const paseoHost = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock: new FakeClock(),
+      executor: paseo,
+      modelCatalog: catalogOf(["claude/ghost"]),
+    });
+    try {
+      const error = await errorOf(
+        paseoHost.startRun({
+          ir: singleStepPlaybook(),
+          inputs: {},
+          cwd: "/tmp/argos-paseo-hint",
+          id: "run-paseo-hint",
+        }),
+      );
+      expect(isArgosError(error) && error.code).toBe("model_unavailable");
+      expect((error as Error).message).toBe(
+        "playbook single: unknown provider/model target(s): claude/ghost; check providers.snapshot()",
+      );
+    } finally {
+      await paseoHost.close();
+    }
+
+    // One Paseo target in the set: installing an hc pack would not fix it, so the hint stays away.
+    const mixed = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      clock: new FakeClock(),
+      executor: new RecordingExecutor(new FakeExecutor()),
+      executors: { hc: new RecordingExecutor(new FakeExecutor()) },
+      catalogs: { hc: catalogOf(["claude/ghost", "hc/smoke"]) },
+    });
+    try {
+      const error = await errorOf(
+        mixed.startRun({
+          ir: pinnedPlaybook(),
+          inputs: {},
+          cwd: "/tmp/argos-mixed-hint",
+          id: "run-mixed-hint",
+        }),
+      );
+      expect((error as Error).message).toBe(
+        "playbook single: unknown provider/model target(s): claude/ghost, hc/smoke; check providers.snapshot()",
+      );
+    } finally {
+      await mixed.close();
     }
   });
 });

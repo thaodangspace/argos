@@ -147,6 +147,7 @@ async function openHost(options: {
   readonly executors?: Partial<Record<"paseo" | "hc", FakeExecutor>>;
   readonly home?: string;
   readonly modelCatalog?: TargetCatalog;
+  readonly catalogs?: Partial<Record<"paseo" | "hc", TargetCatalog>>;
 }): Promise<ArgosHost> {
   const host = await ArgosHost.open({
     storage: new MemoryStorage(),
@@ -155,6 +156,7 @@ async function openHost(options: {
     ...(options.executors === undefined ? {} : { executors: options.executors }),
     ...(options.home === undefined ? {} : { home: options.home }),
     ...(options.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
+    ...(options.catalogs === undefined ? {} : { catalogs: options.catalogs }),
   });
   hosts.push(host);
   return host;
@@ -484,6 +486,41 @@ describe("forkRun: refusals (S-FR4, S-FR10)", () => {
     forbid = true;
     const error = await errorOf(host.forkRun(started.runId, "b", { id: "run-fork" }));
     expect(codeOf(error)).toBe("model_unavailable");
+    expect((await host.listRuns()).map((doc) => doc.record.id)).toEqual(["run-parent"]);
+    // A Paseo target's catalog comes from the daemon: the message carries no install hint (FR18).
+    expect(messageOf(error)).toBe(
+      "playbook fork: unknown provider/model target(s): claude/ghost; check providers.snapshot()",
+    );
+  });
+
+  it("names `argos hc templates install` when every missing target is hc/ (FR18)", async () => {
+    const repo = makeRepo({ fork: book() });
+    let forbid = false;
+    const hcCatalog: TargetCatalog = {
+      missingTargets: () => (forbid ? ["hc/smoke"] : []),
+    };
+    const clock = new FakeClock();
+    const host = await openHost({
+      clock,
+      executor: makeExecutor(),
+      executors: { hc: makeExecutor() },
+      catalogs: { hc: hcCatalog },
+    });
+    const started = await host.startRun({
+      ir: loadPlaybook(repo, "fork"),
+      inputs: { topic: "v1" },
+      cwd: repo,
+      id: "run-parent",
+      executor: "hc",
+    });
+    await driveToTerminal(host, clock, started.runId);
+
+    forbid = true;
+    const error = await errorOf(host.forkRun(started.runId, "b", { id: "run-fork" }));
+    expect(codeOf(error)).toBe("model_unavailable");
+    expect(messageOf(error)).toBe(
+      "playbook fork: unknown provider/model target(s): hc/smoke; check providers.snapshot(); install it with `argos hc templates install`",
+    );
     expect((await host.listRuns()).map((doc) => doc.record.id)).toEqual(["run-parent"]);
   });
 

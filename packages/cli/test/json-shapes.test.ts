@@ -7,26 +7,34 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { DoctorReport, GateListResponse, RunDetail, RunListResponse } from "@thaodangspace/argos-core/rpc";
+import type { DoctorCheck, DoctorReport, GateListResponse, RunDetail, RunListResponse } from "@thaodangspace/argos-core/rpc";
 
+import { hcTemplatesCheck } from "../src/commands/doctor.js";
+import type { PackManifest } from "../src/packs/pack.js";
 import { runCli } from "../src/main.js";
 import { capture, makeTempHome, scrubVolatile, withEnv, type TempHome } from "./support/cli.js";
 import {
   FORKED_RUN_DETAIL,
   FORKED_RUN_SUMMARY,
+  HC_EXECUTOR,
   HC_RUN_SUMMARY,
+  PASEO_EXECUTOR,
   REFUSED_SCHEDULE_SUMMARY,
   RUN_DETAIL,
   RUN_ID,
   SCHEDULE_ID,
+  SCHEDULE_SUMMARY,
   SCHEDULED_RUN_SUMMARY,
   USAGE_RUN_DETAIL,
   USAGE_RUN_SUMMARY,
+  serverInfo,
 } from "./support/fixtures.js";
 import { startStubServer, type StubServer } from "./support/stub-server.js";
 
@@ -394,6 +402,110 @@ describe("argos db", () => {
   });
 });
 
+/** Write a pack manifest into `home` (the shape `install` produces, without the files). */
+function writeManifest(
+  home: string,
+  packs: Readonly<Record<string, { readonly version: number; readonly templates: readonly string[] }>>,
+): void {
+  mkdirSync(join(home, "hc"), { recursive: true });
+  const manifest = {
+    version: 1,
+    packs: Object.fromEntries(
+      Object.entries(packs).map(([name, pack]) => [
+        name,
+        {
+          version: pack.version,
+          source: "bundled",
+          program: join(home, "hc", "packs", `${name}@${pack.version}`, `${name}-step.mjs`),
+          programSha256: "0".repeat(64),
+          templates: Object.fromEntries(
+            pack.templates.map((template) => [
+              template,
+              { file: join(home, "templates", `${template}.md`), minStepTimeoutMs: 60_000 },
+            ]),
+          ),
+        },
+      ]),
+    ),
+  };
+  writeFileSync(join(home, "hc", "packs.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+/**
+ * A stand-in server whose `hc` executor publishes a roster — the one thing the default stub
+ * deliberately omits, so every other golden keeps its `executors` shape.
+ */
+async function startRosterServer(
+  templates: readonly string[],
+): Promise<{ readonly port: number; close(): Promise<void> }> {
+  const token = current().stub.token;
+  let port = 0;
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+    const send = (value: unknown): void => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "unauthorized", message: "token" } }));
+      return;
+    }
+    if (path === "/health") {
+      send({ status: "ok" });
+      return;
+    }
+    if (path === "/info") {
+      send({
+        ...serverInfo(port),
+        executors: [PASEO_EXECUTOR, { ...HC_EXECUTOR, templates }],
+      });
+      return;
+    }
+    if (path === "/schedules") {
+      send({ schedules: [SCHEDULE_SUMMARY] });
+      return;
+    }
+    send({});
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve();
+    });
+  });
+  port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+        server.closeAllConnections();
+      });
+    },
+  };
+}
+
+/** Run `doctor --json` against an alternate server, restoring `ARGOS_PORT` afterwards. */
+async function doctorAgainst(port: number): Promise<DoctorReport> {
+  const restore = withEnv({
+    ARGOS_HOME: current().home.home,
+    ARGOS_PORT: String(port),
+  });
+  try {
+    const result = await invoke(["doctor", "--json"]);
+    expect(result.code).toBe(0);
+    return result.json as DoctorReport;
+  } finally {
+    restore();
+  }
+}
+
+function hcCheck(report: DoctorReport): DoctorCheck | undefined {
+  return report.checks.find((check) => check.name === "hc templates");
+}
+
 describe("argos doctor --json", () => {
   it("reports storage, schema, port, daemons, providers, and pending gates", async () => {
     const result = await invoke(["doctor", "--json"]);
@@ -417,6 +529,10 @@ describe("argos doctor --json", () => {
     expect(schedules?.detail).toBe(
       "1 enabled, 0 paused, 0 refused; next 2026-11-13T07:00:00.000Z",
     );
+    // FR17: the hc pack check is absent-safe — this home has no manifest, so "not installed".
+    const templates = hcCheck(report);
+    expect(templates?.ok).toBe(true);
+    expect(templates?.detail).toBe("not installed; run `argos hc templates install`");
 
     const scrubbed = scrubVolatile(report, {
       home: current().home.home,
@@ -434,6 +550,7 @@ describe("argos doctor --json", () => {
     expect(captured.stdout()).toContain(
       "schedules  1 enabled, 0 paused, 0 refused; next 2026-11-13T07:00:00.000Z",
     );
+    expect(captured.stdout()).toContain("templates  not installed; run `argos hc templates install`");
     // FR9: the executor line names the registry, the default, and each adapter's version.
     expect(captured.stdout()).toContain("executors  paseo (default, reachable), hc (reachable, v0.9.1)");
   });
@@ -448,6 +565,101 @@ describe("argos doctor --json", () => {
     const human = capture();
     expect(await runCli(["doctor"], human.io)).toBe(0);
     expect(human.stdout()).not.toContain("executors");
+  });
+
+  it("marks hc templates ok when every installed template is in the live roster (FR17)", async () => {
+    writeManifest(current().home.home, {
+      claude: { version: 1, templates: ["claude-opus-high"] },
+      smoke: { version: 1, templates: ["smoke"] },
+    });
+    const roster = await startRosterServer(["hc/claude-opus-high", "hc/smoke"]);
+    try {
+      const check = hcCheck(await doctorAgainst(roster.port));
+      expect(check?.ok).toBe(true);
+      expect(check?.detail).toBe("2 templates in the running server's catalog");
+    } finally {
+      await roster.close();
+    }
+  });
+
+  it("warns when a template is installed but the running server has not seen it (FR17)", async () => {
+    writeManifest(current().home.home, {
+      claude: { version: 1, templates: ["claude-opus-high"] },
+      smoke: { version: 1, templates: ["smoke"] },
+    });
+    const stale = await startRosterServer(["hc/smoke"]);
+    try {
+      const check = hcCheck(await doctorAgainst(stale.port));
+      expect(check?.ok).toBe(false);
+      expect(check?.detail).toBe(
+        "2 templates; not in the running server's catalog: claude-opus-high (restart `argos serve`)",
+      );
+    } finally {
+      await stale.close();
+    }
+
+    // An older server (the default stub) publishes no roster at all: unknown, not empty.
+    const older = hcCheck(await doctorAgainst(current().stub.port));
+    expect(older?.ok).toBe(false);
+    expect(older?.detail).toBe(
+      "2 templates; the running server does not publish its hc templates, so this cannot be checked (restart `argos serve`)",
+    );
+  });
+
+  it("warns when an installed pack is behind the bundled one (FR17)", () => {
+    const manifest: PackManifest = {
+      version: 1,
+      packs: {
+        claude: {
+          version: 1,
+          source: "bundled",
+          program: "/tmp/hc/claude-step.mjs",
+          programSha256: "0".repeat(64),
+          templates: {
+            "claude-opus-high": { file: "/tmp/t/claude-opus-high.md", minStepTimeoutMs: 60_000 },
+          },
+        },
+      },
+    };
+    const executors = [
+      {
+        id: "hc" as const,
+        default: false,
+        reachable: true,
+        capabilities: {
+          structuredOutput: false,
+          quota: false,
+          interactiveBlocked: true,
+          scheduleSafe: true,
+        },
+        templates: ["hc/claude-opus-high"],
+      },
+    ];
+    const behind = hcTemplatesCheck({ manifest, executors, bundled: { claude: 2 } });
+    expect(behind.ok).toBe(false);
+    expect(behind.detail).toBe(
+      "1 template; claude 1 installed, 2 bundled; run `argos hc templates install`",
+    );
+
+    // Equal to the bundle: nothing to say, and the roster answer is the whole detail.
+    expect(hcTemplatesCheck({ manifest, executors, bundled: { claude: 1 } }).detail).toBe(
+      "1 template in the running server's catalog",
+    );
+    // A pack the binary does not ship (installed with `--from`) is never "behind".
+    expect(hcTemplatesCheck({ manifest, executors, bundled: {} }).ok).toBe(true);
+  });
+
+  it("omits the hc templates check when the server is unreachable (FR17)", async () => {
+    writeManifest(current().home.home, { smoke: { version: 1, templates: ["smoke"] } });
+    const { stub } = current();
+    await stub.close();
+    const result = await invoke(["doctor", "--json"]);
+    expect(result.code).toBe(0);
+    expect(hcCheck(result.json as DoctorReport)).toBeUndefined();
+
+    const human = capture();
+    expect(await runCli(["doctor"], human.io)).toBe(0);
+    expect(human.stdout()).not.toContain("templates");
   });
 
   it("fails the schedules check when an enabled schedule last fire was refused", async () => {

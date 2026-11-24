@@ -64,10 +64,24 @@ export const ExecutorCapabilitiesSchema = z.strictObject({
 export type ExecutorCapabilities = z.infer<typeof ExecutorCapabilitiesSchema>;
 
 /**
+ * FR16: how many roster entries `/info` publishes per executor. A roster, not a catalog dump: the
+ * field is read by `argos doctor` and `argos hc templates verify`, both of which only ask "has the
+ * running server seen this template?". The cap is applied **where the list is built** (sorted, then
+ * truncated silently), never by refusing a server that sends more.
+ */
+export const EXECUTOR_TEMPLATE_LIMIT = 100;
+
+/**
  * FR9: one registered executor, with its identity, reachability, and capabilities.
  *
  * `default` marks the substrate a run without an override starts on. `error` carries the adapter's
  * own message when `reachable` is false (never a credential — the adapters redact).
+ *
+ * `templates` (FR16) is the live roster of an executor whose catalog **is** a template roster —
+ * `hc`, one canonical `hc/<template>` per entry — so an operator can tell "installed, but this
+ * server has not seen it yet" from "not installed". It is optional and additive on purpose: an
+ * executor with a different catalog shape (`paseo`'s provider/model matrix) omits the key, and so
+ * does an older server, so a consumer must read "absent" as "cannot tell", never as "empty".
  */
 export const ExecutorInfoSchema = z.strictObject({
   id: ExecutorIdSchema,
@@ -76,6 +90,7 @@ export const ExecutorInfoSchema = z.strictObject({
   version: z.string().min(1).optional(),
   capabilities: ExecutorCapabilitiesSchema,
   error: z.string().optional(),
+  templates: z.array(z.string().min(1)).max(EXECUTOR_TEMPLATE_LIMIT).optional(),
 });
 export type ExecutorInfo = z.infer<typeof ExecutorInfoSchema>;
 

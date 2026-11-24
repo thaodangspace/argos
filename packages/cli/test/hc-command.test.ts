@@ -1,12 +1,16 @@
 /**
- * `argos hc templates list|install|uninstall` (spec FR10–FR12, FR14/FR15; plan Phase 2).
+ * `argos hc templates list|install|uninstall|verify` (spec FR10–FR14, FR15; plan Phases 2–3).
  *
  * Every test runs the real CLI in a temp `HOME`, `XDG_CONFIG_HOME`, and `ARGOS_HOME`, and asserts a
  * recursive snapshot of the workspace: `--dry-run` and a refusal must leave the filesystem byte
- * identical, and nothing outside the three roots may move.
+ * identical, and nothing outside the three roots may move. `verify` additionally talks to a local
+ * stand-in for `argos serve` (`/health` + `GET /info`), because its second question is about the
+ * roster the *running* server published.
  */
 
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -37,6 +41,8 @@ function makeWorkspace(): Workspace {
   const outside = join(root, "outside");
   for (const dir of [home, xdg, argos, outside]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(outside, "keep.txt"), "untouched\n");
+  // `verify` reads the bearer token from `$ARGOS_HOME` before it asks `/health`.
+  writeFileSync(join(argos, "token"), "stub-token\n", { mode: 0o600 });
   const restore = withEnv({ HOME: home, XDG_CONFIG_HOME: xdg, ARGOS_HOME: argos });
   return {
     root,
@@ -134,6 +140,109 @@ function writePack(root: string, name: string): string {
     mode: 0o755,
   });
   return dir;
+}
+
+interface InfoStub {
+  readonly port: number;
+  readonly requests: string[];
+  close(): Promise<void>;
+}
+
+/** The `/info` an older server sends: an `hc` entry whose roster predates the field (FR16). */
+type StubHc = { readonly templates?: readonly string[] } | "unregistered";
+
+/**
+ * A one-route stand-in for `argos serve`: `/health`, `GET /info`, and a token check. `verify` asks
+ * the live server whether it has seen the installed templates, so the three answers (seen, unseen,
+ * unknown) are three payloads here — no durable host, no socket of the CLI's own.
+ */
+async function startInfoStub(token: string, hc: StubHc): Promise<InfoStub> {
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+    requests.push(path);
+    const send = (status: number, value: unknown): void => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.headers.authorization !== `Bearer ${token}`) {
+      send(401, { error: { code: "unauthorized", message: "a valid bearer token is required" } });
+      return;
+    }
+    if (path === "/health") {
+      send(200, { status: "ok" });
+      return;
+    }
+    if (path === "/info") {
+      send(200, {
+        executors: [
+          {
+            id: "paseo",
+            default: true,
+            reachable: true,
+            capabilities: {
+              structuredOutput: true,
+              quota: true,
+              interactiveBlocked: false,
+              scheduleSafe: true,
+            },
+          },
+          ...(hc === "unregistered"
+            ? []
+            : [
+                {
+                  id: "hc",
+                  default: false,
+                  reachable: true,
+                  capabilities: {
+                    structuredOutput: false,
+                    quota: false,
+                    interactiveBlocked: true,
+                    scheduleSafe: true,
+                  },
+                  ...(hc.templates === undefined ? {} : { templates: hc.templates }),
+                },
+              ]),
+        ],
+      });
+      return;
+    }
+    send(200, {});
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve();
+    });
+  });
+  return {
+    port: (server.address() as AddressInfo).port,
+    requests,
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+        server.closeAllConnections();
+      });
+    },
+  };
+}
+
+/** Run `verify` against `hc`'s payload, restoring `ARGOS_PORT` afterwards. */
+async function verifyWith(
+  argv: readonly string[],
+  hc: StubHc,
+): Promise<{ code: number; stdout: string; stderr: string; json<T>(): T }> {
+  const stub = await startInfoStub("stub-token", hc);
+  const restore = withEnv({ ARGOS_PORT: String(stub.port) });
+  try {
+    const result = await invoke(["hc", "templates", "verify", ...argv]);
+    expect(stub.requests.length, "verify must ask the live server").toBeGreaterThan(0);
+    return result;
+  } finally {
+    restore();
+    await stub.close();
+  }
 }
 
 beforeEach(() => {
@@ -416,6 +525,204 @@ describe("argos hc templates uninstall", () => {
   });
 });
 
+interface VerifyTemplateJson {
+  readonly name: string;
+  readonly file: string;
+  readonly present: boolean;
+  readonly executable: boolean;
+  readonly hashMatches: boolean;
+  readonly inServer: boolean | null;
+  readonly status: "ok" | "warn" | "error";
+  readonly messages: readonly string[];
+}
+
+interface VerifyJson {
+  readonly dir: string;
+  readonly server: { readonly reachable: boolean; readonly templates: readonly string[] | null };
+  readonly packs: readonly {
+    readonly name: string;
+    readonly version: number;
+    readonly templates: readonly VerifyTemplateJson[];
+  }[];
+  readonly ok: boolean;
+  readonly warnings: number;
+  readonly errors: number;
+}
+
+/** Every installed template name, as the bundle installs it. */
+const BUNDLED_TEMPLATES = [
+  "claude-fable-high",
+  "claude-opus-high",
+  "claude-opus-xhigh",
+  "claude-sonnet-medium",
+  "smoke",
+];
+
+function roster(except: readonly string[] = []): string[] {
+  return BUNDLED_TEMPLATES.filter((name) => !except.includes(name))
+    .map((name) => `hc/${name}`)
+    .sort();
+}
+
+describe("argos hc templates verify", () => {
+  it("is ok when every installed template is in the running server's catalog", async () => {
+    expect((await invoke(["hc", "templates", "install"])).code).toBe(0);
+
+    const result = await verifyWith(["--json"], { templates: roster() });
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    const json = result.json<VerifyJson>();
+    expect(Object.keys(json).sort()).toEqual([
+      "dir",
+      "errors",
+      "ok",
+      "packs",
+      "server",
+      "warnings",
+    ]);
+    expect(json.dir).toBe(workspace.templates);
+    expect(json.server).toEqual({ reachable: true, templates: roster() });
+    expect(json.packs.map((pack) => pack.name)).toEqual(["claude", "smoke"]);
+    expect(json.ok).toBe(true);
+    expect(json.warnings).toBe(0);
+    expect(json.errors).toBe(0);
+
+    const smoke = json.packs[1]?.templates[0];
+    expect(smoke?.name).toBe("smoke");
+    expect(smoke?.file).toBe(join(workspace.templates, "smoke.md"));
+    expect(smoke).toMatchObject({
+      present: true,
+      executable: true,
+      hashMatches: true,
+      inServer: true,
+      status: "ok",
+    });
+    expect(smoke?.messages).toEqual([]);
+
+    const human = await verifyWith([], { templates: roster() });
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain("argos hc templates verify");
+    expect(human.stdout).toContain(`templates  ${workspace.templates}`);
+    expect(human.stdout).toContain("5 hc templates");
+    expect(human.stdout).toContain("smoke  ok");
+    expect(human.stdout).toContain("0 errors, 0 warnings");
+  });
+
+  it("warns (exit 0) when a template is installed but the server has not seen it", async () => {
+    expect((await invoke(["hc", "templates", "install"])).code).toBe(0);
+
+    // Without the flag: a stale server is a warning, never a failure (D13).
+    const stale = await verifyWith(["--json"], { templates: roster(["smoke"]) });
+    expect(stale.code).toBe(0);
+    const json = stale.json<VerifyJson>();
+    expect(json.server).toEqual({ reachable: true, templates: roster(["smoke"]) });
+    expect(json.ok).toBe(true);
+    expect(json.errors).toBe(0);
+    expect(json.warnings).toBe(1);
+    const smoke = json.packs[1]?.templates[0];
+    expect(smoke?.inServer).toBe(false);
+    expect(smoke?.status).toBe("warn");
+    expect(smoke?.messages.join("\n")).toContain("restart `argos serve`");
+    // The templates the server does report stay ok.
+    expect(json.packs[0]?.templates.every((template) => template.status === "ok")).toBe(true);
+
+    // `--require-server` is about reachability only, so a reachable server still exits 0.
+    const required = await verifyWith(["--require-server", "--json"], { templates: roster(["smoke"]) });
+    expect(required.code).toBe(0);
+    expect(required.json<VerifyJson>().warnings).toBe(1);
+
+    const human = await verifyWith([], { templates: roster(["smoke"]) });
+    expect(human.stdout).toContain("smoke  warn");
+    expect(human.stdout).toContain("0 errors, 1 warning");
+  });
+
+  it("cannot tell when the server answers without a roster (older server or no hc)", async () => {
+    expect((await invoke(["hc", "templates", "install"])).code).toBe(0);
+
+    const older = await verifyWith(["--json"], {});
+    expect(older.code).toBe(0);
+    const json = older.json<VerifyJson>();
+    expect(json.server).toEqual({ reachable: true, templates: null });
+    expect(json.ok).toBe(true);
+    expect(json.warnings).toBe(5);
+    for (const pack of json.packs) {
+      for (const template of pack.templates) {
+        expect(template.inServer, template.name).toBeNull();
+        expect(template.status, template.name).toBe("warn");
+        expect(template.messages.join("\n")).toContain("does not publish its hc templates");
+        expect(template.messages.join("\n")).toContain("cannot tell");
+      }
+    }
+
+    const unregistered = await verifyWith(["--json"], "unregistered");
+    expect(unregistered.code).toBe(0);
+    const noHc = unregistered.json<VerifyJson>();
+    expect(noHc.server).toEqual({ reachable: true, templates: null });
+    expect(noHc.packs[0]?.templates[0]?.messages.join("\n")).toContain(
+      "does not register the hc executor",
+    );
+  });
+
+  it("warns without --require-server and exits 3 with it when argos serve is not reachable", async () => {
+    expect((await invoke(["hc", "templates", "install"])).code).toBe(0);
+    // A port that was just released: nothing listens there, so the refusal is immediate.
+    const closed = await startInfoStub("stub-token", {});
+    await closed.close();
+    const restore = withEnv({ ARGOS_PORT: String(closed.port) });
+    try {
+      const soft = await invoke(["hc", "templates", "verify", "--json"]);
+      expect(soft.code).toBe(0);
+      const json = soft.json<VerifyJson>();
+      expect(json.server).toEqual({ reachable: false, templates: null });
+      expect(json.ok).toBe(true);
+      expect(json.errors).toBe(0);
+      expect(json.warnings).toBe(5);
+      expect(json.packs[0]?.templates[0]?.inServer).toBeNull();
+      expect(json.packs[0]?.templates[0]?.messages.join("\n")).toContain("not reachable");
+
+      const human = await invoke(["hc", "templates", "verify"]);
+      expect(human.code).toBe(0);
+      expect(human.stdout).toContain("start it with `argos serve`");
+
+      const hard = await invoke(["hc", "templates", "verify", "--require-server", "--json"]);
+      expect(hard.code).toBe(3);
+      expect(hard.json<VerifyJson>().ok).toBe(false);
+      expect(hard.json<VerifyJson>().server.reachable).toBe(false);
+
+      expect((await invoke(["hc", "templates", "verify", "--require-server"])).code).toBe(3);
+    } finally {
+      restore();
+    }
+  });
+
+  it("reports a broken install as errors (exit 1) and a hand-edited manifest as a refusal", async () => {
+    expect((await invoke(["hc", "templates", "install"])).code).toBe(0);
+    rmSync(join(workspace.templates, "smoke.md"));
+    const program = join(workspace.argos, "hc", "packs", "claude@1", "claude-step.mjs");
+    writeFileSync(program, "#!/usr/bin/env node\nprocess.exit(9);\n", { mode: 0o700 });
+
+    const broken = await verifyWith(["--json"], { templates: roster() });
+    expect(broken.code).toBe(1);
+    const json = broken.json<VerifyJson>();
+    expect(json.ok).toBe(false);
+    // The program is shared by its whole pack, so every one of its rows is red; the missing
+    // template file is the fifth.
+    expect(json.errors).toBe(5);
+    const claude = json.packs[0]?.templates[0];
+    expect(claude?.hashMatches).toBe(false);
+    expect(claude?.messages.join("\n")).toContain("sha256 differs from the manifest");
+    const smoke = json.packs[1]?.templates[0];
+    expect(smoke?.present).toBe(false);
+    if (smoke === undefined) throw new Error("the smoke row is missing from the verify report");
+    expect(smoke.messages.join("\n")).toContain(`template file missing: ${smoke.file}`);
+
+    writeFileSync(join(workspace.argos, "hc", "packs.json"), "{ not json\n");
+    const refused = await invoke(["hc", "templates", "verify", "--json"]);
+    expect(refused.code).toBe(2);
+    expect(refused.json<{ error: { code: string } }>().error.code).toBe("manifest_invalid");
+  });
+});
+
 describe("argos hc templates usage", () => {
   it.each([
     [["hc"]],
@@ -424,6 +731,8 @@ describe("argos hc templates usage", () => {
     [["hc", "templates", "list", "--bogus"]],
     [["hc", "templates", "uninstall"]],
     [["hc", "templates", "install", "--bogus"]],
+    [["hc", "templates", "verify", "--bogus"]],
+    [["hc", "templates", "verify", "extra"]],
   ])("exits 1 for %j", async (argv) => {
     const result = await invoke(argv);
     expect(result.code).toBe(1);
