@@ -108,6 +108,7 @@ const ESCAPES: Readonly<Record<string, string>> = {
   ">": "#gt;",
   "&": "&amp;",
   "\n": "<br/>",
+  "\r": "<br/>",
   "`": "'",
 };
 
@@ -173,7 +174,8 @@ function baseKey(id: string): string {
  * `end_node`; a step that sanitizes to the same key was seen first and therefore keeps a suffix.
  *
  * The `taken` set is the caller's, in the order the keys are handed out: a graph-wide pass over
- * `graph.nodes` is what makes the assignment deterministic.
+ * `graph.nodes` is what makes the assignment deterministic. It is one namespace, shared with the
+ * subgraph ids `renderMermaid` claims before the nodes, because Mermaid has only one.
  */
 export function mermaidNodeKey(id: string, taken: Set<string>): string {
   if (id === END_NODE_ID) {
@@ -181,7 +183,14 @@ export function mermaidNodeKey(id: string, taken: Set<string>): string {
     taken.add(END_NODE_KEY);
     return END_NODE_KEY;
   }
-  const base = baseKey(id);
+  return claimKey(baseKey(id), taken);
+}
+
+/**
+ * Hand out `base` from a shared id namespace: the bare id when it is free, else `_2`, `_3`… The
+ * resolved id is recorded in `taken`, so a later node or subgraph cannot reuse it.
+ */
+function claimKey(base: string, taken: Set<string>): string {
   let key = base;
   for (let suffix = 2; taken.has(key); suffix += 1) key = `${base}_${suffix}`;
   taken.add(key);
@@ -266,8 +275,17 @@ export function renderMermaid(graph: PlaybookGraph, options: MermaidOptions = {}
   const direction = options.direction ?? "LR";
   const keys = new Map<string, string>();
   const taken = new Set<string>();
+  // Mermaid has one id namespace, so the ids are claimed in a fixed order: the synthetic key, then
+  // the subgraphs, then the nodes. A step and a subgraph can sanitize to the same id (`block_pr`),
+  // and two after-task ids can too (`a-b` and `a_b` both become `after_a_b`), so each claimant
+  // takes a `_2`, `_3`… suffix instead of drawing a duplicate.
   // Reserve the synthetic key first so a step that sanitizes to `end_node` cannot take it (D7).
   if (graph.nodes.some((node) => node.id === END_NODE_ID)) taken.add(END_NODE_KEY);
+  const groupIds = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (node.group === undefined || groupIds.has(node.group)) continue;
+    groupIds.set(node.group, claimKey(groupKey(node.group), taken));
+  }
   for (const node of graph.nodes) keys.set(node.id, mermaidNodeKey(node.id, taken));
 
   const toneByNode = new Map<string, GraphTone>();
@@ -295,9 +313,8 @@ export function renderMermaid(graph: PlaybookGraph, options: MermaidOptions = {}
     // A group's nodes are emitted together, at the position of its first node (D4: no legend).
     if (grouped.has(node.group)) continue;
     grouped.add(node.group);
-    lines.push(
-      `  subgraph ${groupKey(node.group)}["${escapeMermaidLabel(groupLabel(node.group))}"]`,
-    );
+    const groupId = groupIds.get(node.group) ?? groupKey(node.group);
+    lines.push(`  subgraph ${groupId}["${escapeMermaidLabel(groupLabel(node.group))}"]`);
     for (const member of graph.nodes) {
       if (member.group !== node.group) continue;
       lines.push(nodeLine(member, keys.get(member.id) ?? baseKey(member.id), "    "));

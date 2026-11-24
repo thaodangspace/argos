@@ -121,6 +121,67 @@ function shapesGraph(): PlaybookGraph {
   );
 }
 
+/**
+ * A main step literally named `block_pr` beside a block id `pr`: two legal IR ids that sanitize to
+ * one Mermaid id (`block_pr`), which the subgraph claims before the node (D6, D7).
+ */
+function blockCollisionIR(): PlaybookIR {
+  const base = playbook({
+    id: "block-collision",
+    steps: [step({ id: "block_pr", title: "Named like the block subgraph" })],
+  });
+  return {
+    ...base,
+    steps: [
+      ...base.steps,
+      step({
+        id: "pr_investigate",
+        title: "investigate",
+        use: { blockId: "pr", playbookId: "child", depth: 1 },
+      }),
+    ],
+    blocks: {
+      pr: {
+        id: "pr",
+        playbookId: "child",
+        title: "Child",
+        stepIds: ["pr_investigate"],
+        entry: ["pr_investigate"],
+        terminals: ["pr_investigate"],
+        inputs: {},
+        outputs: {},
+        outcomes: [],
+        on: {},
+      },
+    },
+  };
+}
+
+/**
+ * Two after ids that sanitize to one subgraph id: `after:a-b` and `after:a_b` both become
+ * `after_a_b`, so the second subgraph has to take a suffix.
+ */
+function afterCollisionIR(): PlaybookIR {
+  return playbook({
+    id: "after-collision",
+    steps: [step({ id: "ship", title: "Ship" })],
+    after: [
+      {
+        id: "a-b",
+        title: "Dashed",
+        trigger: "manual",
+        steps: [step({ id: "one", title: "One" })],
+      },
+      {
+        id: "a_b",
+        title: "Underscored",
+        trigger: "manual",
+        steps: [step({ id: "two", title: "Two" })],
+      },
+    ],
+  });
+}
+
 describe("escapeMermaidLabel (FR16)", () => {
   const CASES: readonly (readonly [string, string])[] = [
     ['"', "#quot;"],
@@ -136,11 +197,18 @@ describe("escapeMermaidLabel (FR16)", () => {
     [">", "#gt;"],
     ["&", "&amp;"],
     ["\n", "<br/>"],
+    ["\r", "<br/>"],
     ["`", "'"],
   ];
 
   it.each(CASES)("escapes %j as %j", (input, expected) => {
     expect(escapeMermaidLabel(input)).toBe(expected);
+  });
+
+  it("flattens a carriage return and a newline alike", () => {
+    expect(escapeMermaidLabel("a\rb")).toBe("a<br/>b");
+    expect(escapeMermaidLabel("a\nb")).toBe("a<br/>b");
+    expect(escapeMermaidLabel("a\r\nb")).toBe("a<br/><br/>b");
   });
 
   it("leaves ordinary prose and unicode untouched", () => {
@@ -353,6 +421,45 @@ describe("renderMermaid (FR13–FR16)", () => {
 
     expect(renderMermaid(graph, options)).toBe(renderMermaid(graph, options));
     expect(renderMermaid(graph, options).endsWith("\n")).toBe(true);
+  });
+});
+
+describe("renderMermaid id namespace (FR14, D6, D7)", () => {
+  it("gives a subgraph its id before a same-named step can take it", () => {
+    const lines = renderMermaid(buildPlaybookGraph(blockCollisionIR())).split("\n");
+
+    expect(lines).toStrictEqual([
+      "flowchart LR",
+      '  block_pr_2["Named like the block subgraph"]',
+      '  subgraph block_pr["pr"]',
+      '    pr_investigate["investigate"]',
+      "  end",
+      "",
+    ]);
+  });
+
+  it("suffixes a second subgraph that sanitizes to the same id", () => {
+    const lines = renderMermaid(buildPlaybookGraph(afterCollisionIR())).split("\n");
+    const subgraphs = lines
+      .filter((line) => line.startsWith("  subgraph "))
+      .map((line) => line.slice("  subgraph ".length).split("[")[0]);
+
+    expect(subgraphs).toStrictEqual(["after_a_b", "after_a_b_2"]);
+    expect(lines).toContain('  subgraph after_a_b["after a-b"]');
+    expect(lines).toContain('  subgraph after_a_b_2["after a_b"]');
+    expect(lines).toContain('    after_a_b_one["One"]');
+    expect(lines).toContain('    after_a_b_two["Two"]');
+  });
+
+  it("is byte-identical on a second render of a colliding graph", () => {
+    const graphs = [
+      buildPlaybookGraph(blockCollisionIR()),
+      buildPlaybookGraph(afterCollisionIR()),
+    ];
+
+    for (const graph of graphs) {
+      expect(renderMermaid(graph)).toBe(renderMermaid(graph));
+    }
   });
 });
 
