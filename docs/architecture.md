@@ -498,6 +498,21 @@ answers `404`.
   a new status or history event is one edit for both clients (`core/test/view/purity.test.ts` keeps
   that module free of Node, storage, and adapter imports).
 
+The playbook DAG follows the same shape: **one projector, two renderers.** `playbook/graph.ts`
+(`buildPlaybookGraph`) turns a frozen `PlaybookIR` into the structural `PlaybookGraph` — nodes,
+edges, entry, terminals — and `view/graph.ts` renders it, either as Mermaid text
+(`renderMermaid`/`escapeMermaidLabel`/`mermaidNodeKey`, what `argos chart` prints) or as integer
+SVG geometry (`layerGraph`, what `RunGraph.svelte` draws). The import is one-way: the graph contract
+lives in `rpc/contracts.ts` because `view/` may import only that module and its own siblings, and
+`view/graph.ts` never imports `playbook/` — so the web bundle carries the renderer but never the
+loader. The projector is a *consumer* of the IR: no key, hash, or engine decision changes.
+
+The graph is **derived, never stored.** `RunDetail.graph` is projected by `toRunDetail` from
+`record.ir` (memoized per frozen IR) and `GET /playbooks?graph=1` adds it per summary on request
+only — the default listing and every run document stay byte-identical. A run always charts the
+definition it froze, so `argos chart --run <id>` and the `?view=graph` toggle show what actually
+ran, not the working tree.
+
 ## Database maintenance (`/db/*`)
 
 `argos serve` is the only writer, so maintenance is not a second process that opens the file: it is

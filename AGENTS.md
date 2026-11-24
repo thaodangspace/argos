@@ -48,6 +48,12 @@ history event is one edit for both (and the Paseo plugin's exhaustive `historyTe
 core one). It imports only `rpc/contracts` — never the durable host, engine, adapters, or a Node
 built-in (`test/view/purity.test.ts`).
 
+`view/graph.ts` is the graph renderer: `escapeMermaidLabel`/`mermaidNodeKey`/`renderMermaid`
+(the diffable text form `argos chart` prints, `--run` classes included), `decorateGraph` (the pure
+status join), and `layerGraph` (the integer, DOM-free geometry `RunGraph.svelte` draws as SVG). It
+takes an already-projected `PlaybookGraph` and imports no `playbook/` module, so the web bundle
+never picks up the loader; the projector is `playbook/graph.ts`.
+
 **Time is the reader's, never UTC by default.** `format.ts` takes an optional IANA `timeZone`:
 `undefined` means the runtime's own zone (the browser's, or the daemon's `TZ`), and an unknown id
 falls back to it rather than throwing. The strings are built from
@@ -148,6 +154,7 @@ npm run build:ui  # SvelteKit build into packages/web/build (base /ui, static)
 npm run check:ui  # svelte-kit sync + svelte-check for packages/web
 npm run local:restart # rebuild CLI + UI, copy ui/, then restart the detached local `argos serve`
 node -e "import('@thaodangspace/argos-core')"   # workspace-link check; requires a build first
+node packages/cli/dist/index.js chart --format mermaid   # the playbook DAG; no server, no SQLite
 npm run version:check -- v0.1.0                 # release guard: tag must match every manifest
 npm run version:bump -- patch                   # release switch: bump all manifests + lockfile
 ```
@@ -426,7 +433,10 @@ by hc's own `HC_SOCKET`/`HC_SESSION` (read only by `src/hc/client.ts`).
 `load.ts` (discovery + read-only pipeline), `resolve.ts` (agent precedence, input wiring,
 condition/transition normalization), `expand.ts` (sub-playbooks), `validate.ts` (graph checks),
 `hash.ts` (canonical JSON + sha256), `diff.ts` (the pure IR diff a fork's applicability guard uses),
-`ir.ts` (the frozen JSON IR the rest of Argos consumes).
+`ir.ts` (the frozen JSON IR the rest of Argos consumes), and `graph.ts` (`buildPlaybookGraph`, the
+one structural projection: nodes, edges, entry, terminals). `graph.ts` is a **read-only consumer** of
+the IR — it never adds a key, never touches the hash, and its contract lives in `rpc/contracts.ts`
+(imported as types only, so there is no cycle).
 
 - Discovery: `.argos/playbooks/*.yaml` then `.paseo/plugins/playbooks/*.yaml` (same fallback for
   `roles/`, `defaults/main.yaml`, `scripts/`); playbook id = filename. An optional `home`
@@ -1113,6 +1123,7 @@ commit that creates the run task, including after-task children and retry clones
 | Command | `--json` shape | Exit |
 |---|---|---|
 | `argos validate [path]` | `{valid, playbooks:[{id,file,hash}], errors:[{file,stepId,code,message}], warnings:[{file,stepId,code,message}]}` (one `errors[]` entry per schema issue; warnings never change `valid`) | 0 valid or warnings only, 2 invalid, 1 usage |
+| `argos chart [path] [--playbook <id>] [--format mermaid\|json] [--direction LR\|TB] [--out <file>] [--run <id>]` | `{playbooks:[{id,hash,graph}]}`; with `--run`: `{runId, graph}` whose nodes carry `status`/`tone` (`--json` implies `--format json`; default prints fenced Mermaid) | 0, 2 `playbook_invalid`/`playbook_missing`, 1 usage, 3 unreachable (`--run` only) |
 | `argos run <playbook> --input k=v [--cwd] [--isolation] [--executor <id>]` | `{runId, taskId}` | 0, 2 when refused, 1 for an unknown `--executor` (no request) |
 | `argos ls [--schedule <id>]` | `{runs: RunSummary[]}` (newest first; `--schedule` keeps the runs whose `trigger.scheduleId` matches) | 0 |
 | `argos status <runId>` | `RunDetail` | 0 |

@@ -17,13 +17,15 @@
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createRunRecord, next } from "../../src/engine/index.js";
-import { loadPlaybook, playbookHash } from "../../src/playbook/index.js";
+import { buildPlaybookGraph, loadPlaybook, playbookHash } from "../../src/playbook/index.js";
 import { stepDetailSummaries, toRunSummary } from "../../src/rpc/summary.js";
 import {
   attemptViews,
   buildStepLog,
+  layerGraph,
   outputViews,
   panelView,
+  renderMermaid,
   runView,
 } from "../../src/view/index.js";
 import type { PanelViewInput } from "../../src/view/index.js";
@@ -60,6 +62,12 @@ function timePerOp(run: () => void): number {
 
 const chain10 = chainPlaybook({ steps: 10 });
 const chain100 = chainPlaybook({ steps: 100 });
+
+// The graph rows: a 20-step graph is the ceiling fixture, 200 steps the scaled one.
+const ir20 = chainPlaybook({ steps: 20 });
+const ir200 = chainPlaybook({ steps: 200 });
+const graph20 = buildPlaybookGraph(ir20);
+const graph200 = buildPlaybookGraph(ir200);
 
 const fresh10 = benchRecord(chain10);
 const fresh100 = benchRecord(chain100);
@@ -200,6 +208,20 @@ describe("perf budget: ceilings (ms per call)", () => {
     expect(ms, "buildStepLog 500 events").toBeLessThan(5);
   });
 
+  it("buildPlaybookGraph for a 20-step playbook", () => {
+    const ms = timePerOp(() => {
+      buildPlaybookGraph(ir20);
+    });
+    expect(ms, "buildPlaybookGraph 20 steps").toBeLessThan(0.25);
+  });
+
+  it("renderMermaid for a 20-step graph", () => {
+    const ms = timePerOp(() => {
+      renderMermaid(graph20);
+    });
+    expect(ms, "renderMermaid 20 steps").toBeLessThan(0.25);
+  });
+
   it("ticking a terminal run is free", () => {
     // The reducer returns before cloning, so this must stay an order of magnitude below a live
     // tick. The measurement floor is the timer, not the call: 0.15 ms still separates the paths.
@@ -271,5 +293,27 @@ describe("perf budget: scaling (10x the steps)", () => {
     const large = load("budget-40");
     // 4x the steps, at most 12x the time (parsing has a fixed cost, so some slack is expected).
     expect(large / small, `40-step / 10-step = ${String(large / small)}x`).toBeLessThan(12);
+  });
+
+  it("the graph projector grows linearly with the step count", () => {
+    const project = (ir: typeof ir20): number =>
+      timePerOp(() => {
+        buildPlaybookGraph(ir);
+      });
+    const small = project(ir20);
+    const large = project(ir200);
+    // 10x the steps may cost at most 25x the time; quadratic growth would be ~100x.
+    expect(large / small, `200-step / 20-step = ${String(large / small)}x`).toBeLessThan(25);
+  });
+
+  it("the graph layout grows linearly with the node count", () => {
+    const layout = (graph: typeof graph20): number =>
+      timePerOp(() => {
+        layerGraph(graph);
+      });
+    const small = layout(graph20);
+    const large = layout(graph200);
+    // 10x the nodes may cost at most 25x the time; quadratic growth would be ~100x.
+    expect(large / small, `200-step / 20-step = ${String(large / small)}x`).toBeLessThan(25);
   });
 });

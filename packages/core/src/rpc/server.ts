@@ -840,7 +840,8 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         // only fail later, at start time.
         const cwd = url.searchParams.get("cwd") ?? options.cwd ?? process.cwd();
         validateRunCwd(cwd);
-        const listing = listPlaybooks(cwd, home);
+        // FR8: the graph is opt-in, so every existing client's body stays byte-identical.
+        const listing = listPlaybooks(cwd, home, { graph: url.searchParams.get("graph") === "1" });
         sendJson(res, 200, PlaybookListResponseSchema.parse(listing), extra);
         return;
       }

@@ -196,4 +196,52 @@ describe("GET /playbooks", () => {
     const { status } = await list(h, `cwd=${encodeURIComponent(h.repo)}`);
     expect(status).toBe(200);
   });
+
+  it("omits the graph by default, byte for byte", async () => {
+    const h = await start();
+    const { status, body } = await list(h, `cwd=${encodeURIComponent(h.repo)}`);
+    expect(status).toBe(200);
+    // FR8: the key must be absent, not `undefined` — a client parsing the default body sees exactly
+    // the pre-graph response.
+    expect(JSON.stringify(body)).not.toContain("graph");
+    for (const playbook of PlaybookListResponseSchema.parse(body).playbooks) {
+      expect(playbook).not.toHaveProperty("graph");
+    }
+  });
+
+  it("carries one projected graph per playbook with ?graph=1", async () => {
+    const h = await start();
+    const { status, body } = await list(h, `cwd=${encodeURIComponent(h.repo)}&graph=1`);
+    expect(status).toBe(200);
+    const parsed: PlaybookListResponse = PlaybookListResponseSchema.parse(body);
+    expect(parsed.playbooks.map((playbook) => playbook.id).sort()).toEqual(["docs", "release"]);
+    for (const playbook of parsed.playbooks) {
+      const graph = playbook.graph;
+      expect(graph, playbook.id).toBeDefined();
+      if (graph === undefined) continue;
+      expect(graph.nodes.map((node) => node.id).sort()).toEqual(
+        playbook.id === "release" ? ["build", "ship"] : ["write"],
+      );
+      expect(graph.entry.length).toBeGreaterThan(0);
+      expect(graph.terminals.length).toBeGreaterThan(0);
+      expect(graph.nodes.find((node) => node.id === graph.entry[0])?.kind).toBe("agent");
+      // The projection is structural only: no prompt body may cross this boundary either.
+      expect(JSON.stringify(graph)).not.toContain("Ship it");
+    }
+    const release = parsed.playbooks.find((playbook) => playbook.id === "release");
+    expect(release?.graph?.edges.map((edge) => `${edge.from}->${edge.to}`)).toContain(
+      "build->ship",
+    );
+  });
+
+  it("still reports a broken playbook per file with ?graph=1", async () => {
+    const h = await start();
+    const { status, body } = await list(h, `cwd=${encodeURIComponent(h.repo)}&graph=1`);
+    expect(status).toBe(200);
+    const parsed = PlaybookListResponseSchema.parse(body);
+    expect(parsed.errors).toHaveLength(1);
+    expect(parsed.errors[0]?.code).toBe("playbook_invalid");
+    expect(parsed.playbooks.map((playbook) => playbook.id)).not.toContain("broken");
+    expect(parsed.playbooks.every((playbook) => playbook.graph !== undefined)).toBe(true);
+  });
 });
