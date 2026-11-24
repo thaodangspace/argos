@@ -21,8 +21,11 @@ import type { PlaybookGraph } from "../../src/rpc/contracts.js";
 import {
   decorateGraph,
   escapeMermaidLabel,
+  layerGraph,
   mermaidNodeKey,
   renderMermaid,
+  type GraphLayout,
+  type LayoutNode,
 } from "../../src/view/index.js";
 
 const FIXTURES = fileURLToPath(new URL("../fixtures", import.meta.url));
@@ -402,5 +405,244 @@ describe("mermaid goldens", () => {
 
   it("renders an after task beside the main graph", () => {
     expectGolden("after.mmd", renderMermaid(buildPlaybookGraph(afterIR())));
+  });
+});
+
+describe("layerGraph (FR19)", () => {
+  /** A straight chain of `count` agent steps, the pathological wide graph. */
+  function chainGraph(count: number): PlaybookGraph {
+    const nodes = Array.from({ length: count }, (_, index) => ({
+      id: `s${index}`,
+      title: `Step ${index}`,
+      kind: "agent" as const,
+    }));
+    const edges = Array.from({ length: count - 1 }, (_, index) => ({
+      from: `s${index}`,
+      to: `s${index + 1}`,
+      kind: "needs" as const,
+    }));
+    return {
+      nodes,
+      edges,
+      entry: count === 0 ? [] : ["s0"],
+      terminals: count === 0 ? [] : [`s${count - 1}`],
+    };
+  }
+
+  const box = (node: LayoutNode): string => `${node.id}@${node.x},${node.y}`;
+
+  /** Two boxes overlap only if they overlap on both axes. */
+  function overlap(a: LayoutNode, b: LayoutNode): boolean {
+    return (
+      a.x < b.x + b.width &&
+      b.x < a.x + a.width &&
+      a.y < b.y + b.height &&
+      b.y < a.y + a.height
+    );
+  }
+
+  /** The four coordinate pairs of a `M x y C c1x c1y c2x c2y x y` path. */
+  function pathPoints(
+    path: string,
+  ):
+    | {
+        readonly start: readonly [number, number];
+        readonly c1: readonly [number, number];
+        readonly c2: readonly [number, number];
+        readonly end: readonly [number, number];
+      }
+    | null {
+    const match = /^M (-?\d+) (-?\d+) C (-?\d+) (-?\d+) (-?\d+) (-?\d+) (-?\d+) (-?\d+)$/.exec(
+      path,
+    );
+    if (match === null) return null;
+    const numbers = match.slice(1).map(Number);
+    const pair = (index: number): readonly [number, number] => [
+      numbers[index] ?? 0,
+      numbers[index + 1] ?? 0,
+    ];
+    return { start: pair(0), c1: pair(2), c2: pair(4), end: pair(6) };
+  }
+
+  it("places one node at the padding origin and sizes the viewBox around it", () => {
+    const layout = layerGraph({
+      nodes: [{ id: "only", title: "Only", kind: "agent" }],
+      edges: [],
+      entry: ["only"],
+      terminals: ["only"],
+    });
+
+    expect(layout.nodes).toStrictEqual([
+      { id: "only", x: 16, y: 16, width: 180, height: 48, layer: 0 },
+    ]);
+    expect(layout.edges).toStrictEqual([]);
+    expect(layout.width).toBe(16 + 180 + 16);
+    expect(layout.height).toBe(16 + 48 + 16);
+    expect(layout.viewBox).toBe(`0 0 ${layout.width} ${layout.height}`);
+  });
+
+  it("lays a diamond out by longest path, in graph.nodes order within a layer", () => {
+    const layout = layerGraph({
+      nodes: [
+        { id: "start", title: "Start", kind: "agent" },
+        { id: "left", title: "Left", kind: "agent" },
+        { id: "right", title: "Right", kind: "agent" },
+        { id: "join", title: "Join", kind: "agent" },
+      ],
+      edges: [
+        { from: "start", to: "left", kind: "needs" },
+        { from: "start", to: "right", kind: "needs" },
+        { from: "left", to: "join", kind: "needs" },
+        { from: "right", to: "join", kind: "needs" },
+      ],
+      entry: ["start"],
+      terminals: ["join"],
+    });
+
+    expect(layout.nodes.map(box)).toStrictEqual([
+      "start@16,16",
+      "left@260,16",
+      "right@260,88",
+      "join@504,16",
+    ]);
+    expect(layout.nodes.map((node) => node.layer)).toStrictEqual([0, 1, 1, 2]);
+  });
+
+  it("never overlaps two boxes and keeps the padding margins", () => {
+    const graphs = [
+      buildPlaybookGraph(linearIR()),
+      buildPlaybookGraph(afterIR()),
+      buildPlaybookGraph(loadPlaybook(SUBPLAYBOOK, "parent")),
+      chainGraph(61),
+    ];
+
+    for (const graph of graphs) {
+      const layout = layerGraph(graph);
+      expect(layout.nodes).toHaveLength(graph.nodes.length);
+      for (let i = 0; i < layout.nodes.length; i += 1) {
+        const node = layout.nodes[i];
+        if (node === undefined) continue;
+        expect(node.x).toBeGreaterThanOrEqual(16);
+        expect(node.y).toBeGreaterThanOrEqual(16);
+        expect(node.x + node.width).toBeLessThanOrEqual(layout.width);
+        expect(node.y + node.height).toBeLessThanOrEqual(layout.height);
+        for (let j = i + 1; j < layout.nodes.length; j += 1) {
+          const other = layout.nodes[j];
+          if (other === undefined) continue;
+          expect(overlap(node, other)).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("ranks every needs edge strictly left to right", () => {
+    const graph = buildPlaybookGraph(linearIR());
+    const layout = layerGraph(graph);
+    const byId = new Map(layout.nodes.map((node) => [node.id, node]));
+
+    const needs = graph.edges.filter((edge) => edge.kind === "needs");
+    expect(needs.length).toBeGreaterThan(0);
+    for (const edge of needs) {
+      const from = byId.get(edge.from);
+      const to = byId.get(edge.to);
+      expect(from).toBeDefined();
+      expect(to).toBeDefined();
+      if (from === undefined || to === undefined) continue;
+      expect(to.layer).toBeGreaterThan(from.layer);
+      expect(to.x).toBeGreaterThan(from.x);
+    }
+  });
+
+  it("routes a loop edge below every box, with its label at the midpoint", () => {
+    const layout = layerGraph(buildPlaybookGraph(linearIR()));
+    const loop = layout.edges.find((edge) => edge.loop);
+    expect(loop).toBeDefined();
+    if (loop === undefined) return;
+    const points = pathPoints(loop.path);
+    expect(points).not.toBeNull();
+    if (points === null) return;
+    const { start, c1, c2, end } = points;
+    const byId = new Map(layout.nodes.map((node) => [node.id, node]));
+    const from = byId.get(loop.from);
+    const to = byId.get(loop.to);
+    expect(from).toBeDefined();
+    expect(to).toBeDefined();
+    if (from === undefined || to === undefined) return;
+    // Below every box the loop passes under (the layers it spans), and below all of them.
+    const spanned = layout.nodes.filter(
+      (node) => node.layer >= Math.min(from.layer, to.layer) && node.layer <= Math.max(from.layer, to.layer),
+    );
+    const spannedBottom = Math.max(...spanned.map((node) => node.y + node.height));
+    const bottom = Math.max(...layout.nodes.map((node) => node.y + node.height));
+    expect(start[1]).toBeLessThan(spannedBottom);
+    expect(end[1]).toBeLessThan(spannedBottom);
+    expect(c1[1]).toBeGreaterThan(bottom);
+    expect(c2[1]).toBeGreaterThan(bottom);
+    expect(loop.labelY).toBeGreaterThan(spannedBottom);
+  });
+
+  it("gives an adjacent edge straight control points and a skip a ±12 px bend", () => {
+    const layout = layerGraph({
+      nodes: [
+        { id: "a", title: "A", kind: "agent" },
+        { id: "b", title: "B", kind: "agent" },
+        { id: "c", title: "C", kind: "agent" },
+      ],
+      edges: [
+        { from: "a", to: "b", kind: "needs" },
+        { from: "b", to: "c", kind: "needs" },
+        { from: "a", to: "c", kind: "needs" },
+      ],
+      entry: ["a"],
+      terminals: ["c"],
+    });
+    const byKind = new Map(layout.edges.map((edge) => [edge.to, edge]));
+    const adjacent = pathPoints(byKind.get("b")?.path ?? "");
+    const skip = pathPoints(byKind.get("c")?.path ?? "");
+    expect(adjacent).not.toBeNull();
+    expect(skip).not.toBeNull();
+    if (adjacent === null || skip === null) return;
+
+    // Adjacent: the control points keep the anchors' y, so the curve is a straight horizontal line.
+    expect(adjacent.c1[1]).toBe(adjacent.start[1]);
+    expect(adjacent.c2[1]).toBe(adjacent.end[1]);
+    // Skip: both control points move by the same ±12 px.
+    expect(Math.abs(skip.c1[1] - skip.start[1])).toBe(12);
+    expect(Math.abs(skip.c2[1] - skip.end[1])).toBe(12);
+    expect(skip.c1[1] - skip.start[1]).toBe(skip.c2[1] - skip.end[1]);
+  });
+
+  it("is pure: the same graph yields a deep-equal layout", () => {
+    const graphs = [
+      buildPlaybookGraph(linearIR()),
+      buildPlaybookGraph(afterIR()),
+      chainGraph(61),
+    ];
+    for (const graph of graphs) {
+      expect(layerGraph(graph)).toStrictEqual(layerGraph(graph));
+    }
+  });
+
+  it("normalizes the top-left to (16, 16) and keeps the viewBox consistent", () => {
+    for (const graph of [buildPlaybookGraph(linearIR()), chainGraph(61)]) {
+      const layout: GraphLayout = layerGraph(graph);
+      const left = Math.min(...layout.nodes.map((node) => node.x));
+      const top = Math.min(...layout.nodes.map((node) => node.y));
+      // A backward edge's control point may reach further left than its target box, and the whole
+      // drawing is kept inside the padding; no box ever starts above/left of it.
+      expect(left).toBeGreaterThanOrEqual(16);
+      expect(top).toBeGreaterThanOrEqual(16);
+      if (graph.edges.every((edge) => edge.loop !== true)) {
+        expect(left).toBe(16);
+        expect(top).toBe(16);
+      }
+      expect(layout.viewBox).toBe(`0 0 ${layout.width} ${layout.height}`);
+      expect(Number.isInteger(layout.width)).toBe(true);
+      expect(Number.isInteger(layout.height)).toBe(true);
+      for (const node of layout.nodes) {
+        expect(Number.isInteger(node.x)).toBe(true);
+        expect(Number.isInteger(node.y)).toBe(true);
+      }
+    }
   });
 });
