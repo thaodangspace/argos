@@ -1,0 +1,20 @@
+{
+  "name": "smoke",
+  "version": 1,
+  "description": "Prove the hc chain with no model and no token: terminal, labels, prompt delivery, screen read, output parse, settle",
+  "requires": {
+    "node": ">=22.13",
+    "hcProtocol": 1
+  },
+  "program": {
+    "file": "smoke.mjs"
+  },
+  "templates": [
+    {
+      "name": "smoke",
+      "args": "",
+      "minStepTimeoutMs": 300000,
+      "description": "Prints ok and promptLength in one fenced JSON block; proves the hc chain without spending a token"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "name": "claude",
+  "version": 1,
+  "description": "Headless Claude Code (claude -p) as one argos hc step: login-shell PATH, OSC 7501 status, quota wait, one fenced JSON block on screen",
+  "requires": {
+    "node": ">=22.13",
+    "hcProtocol": 1
+  },
+  "program": {
+    "file": "claude-step.mjs"
+  },
+  "templates": [
+    {
+      "name": "claude-opus-high",
+      "args": "--model claude-opus-5-5 --effort high --permission-mode auto --work-timeout 150m --quota-retry 30m --quota-max-wait 4h",
+      "minStepTimeoutMs": 19800000,
+      "description": "Headless Claude Code (Opus 5.5, effort high, auto mode) for one argos step; work 150m, waits out quota up to 4h"
+    },
+    {
+      "name": "claude-opus-xhigh",
+      "args": "--model claude-opus-5-5 --effort xhigh --permission-mode auto --work-timeout 60m --quota-retry 30m --quota-max-wait 8h",
+      "minStepTimeoutMs": 33300000,
+      "description": "Headless Claude Code (Opus 5.5, effort xhigh, auto mode) for one argos step; waits out quota limits"
+    },
+    {
+      "name": "claude-sonnet-medium",
+      "args": "--model claude-sonnet-5-5 --effort medium --permission-mode auto --work-timeout 150m --quota-retry 30m --quota-max-wait 4h",
+      "minStepTimeoutMs": 19800000,
+      "description": "Headless Claude Code (Sonnet 5.5, effort medium, auto mode) for one argos step; work 150m, waits out quota up to 4h"
+    },
+    {
+      "name": "claude-fable-high",
+      "args": "--model claude-fable-5-2 --effort high --permission-mode auto --work-timeout 180m --quota-retry 30m --quota-max-wait 4h",
+      "minStepTimeoutMs": 26100000,
+      "description": "Headless Claude Code (Fable 5.2, effort high, auto mode) for one argos step; work 180m, waits out quota up to 4h"
+    }
+  ]
+}
