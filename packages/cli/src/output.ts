@@ -201,6 +201,10 @@ Usage:
   argos db stats [--json]
   argos db purge --older-than <n>(s|m|h|d) [--dry-run] [--vacuum] [--json]
   argos db vacuum [--json]
+  argos hc templates list [--dir <path>] [--json]
+  argos hc templates install [pack ...] [--from <dir>] [--link] [--force] [--dry-run]
+                             [--dir <path>] [--json]
+  argos hc templates uninstall <pack ...> [--prune] [--dry-run] [--dir <path>] [--json]
   argos serve [--port N] [--home dir] [--default-executor paseo|hc] [--json]
   argos doctor [--home dir] [--port N] [--json]
 

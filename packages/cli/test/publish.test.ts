@@ -7,7 +7,7 @@
  * `client/`, `*.tsx`), so it is not part of the npm surface.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +85,36 @@ describe("npm package manifests", () => {
     expect(cli.scripts?.["prepublishOnly"]).toContain("copy-ui.mjs");
     expect(root.scripts?.["release:publish"]).toContain("build:ui");
     expect(root.scripts?.["build:ui"]).toContain("argos-web");
+  });
+
+  it("ships the hc template packs inside the CLI tarball", () => {
+    // `argos hc templates install` reads these from beside `dist/`, so a tarball without them can
+    // install nothing (spec NFR Packaging).
+    expect(cli.files).toContain("templates");
+
+    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    const packed = execFileSync(npm, ["pack", "--dry-run", "--json"], {
+      cwd: join(repoRoot, "packages/cli"),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const entries = JSON.parse(packed) as Array<{ files?: Array<{ path: string }> }>;
+    const files = (entries[0]?.files ?? []).map((file) => file.path);
+    expect(files).toContain("templates/packs/claude/claude-step.mjs");
+    expect(files).toContain("templates/packs/smoke/smoke.mjs");
+    expect(files).toContain("templates/packs/claude/pack.json");
+    expect(files).toContain("templates/packs/smoke/pack.json");
+
+    // The pack programs are plain `.mjs` outside the `tsc -b` graph, so their guard is a syntax
+    // check of the bytes npm would actually publish.
+    const programs = files.filter((file) => file.endsWith(".mjs"));
+    expect(programs.length).toBeGreaterThanOrEqual(2);
+    for (const program of programs) {
+      const result = spawnSync(process.execPath, ["--check", join(repoRoot, "packages/cli", program)], {
+        encoding: "utf8",
+      });
+      expect(result.status, `${program}: ${result.stderr}`).toBe(0);
+    }
   });
 
   it("points the CLI bin at the built entry", () => {
