@@ -94,6 +94,11 @@ naming the registry, `[argos] executors: paseo (default), hc`, and `argos doctor
 executor's reachability and version. (The default is `--default-executor`, else `ARGOS_EXECUTOR`,
 else `paseo`.)
 
+On `hc`, each step also carries the `herdr.space`/`herdr.tab` labels, so the Herdr app shows it as
+a pane while it runs (space `argos`, one tab per run). No other client reads a label and an install
+without the app keeps them as data; `ARGOS_HERDR=0` turns them off, `ARGOS_HERDR_SPACE` /
+`ARGOS_HERDR_TAB` override the two ids.
+
 The CLI and plugin talk HTTP to this process; they never open the database. If the server is not
 running, `argos run` tells you to start it and exits with code `3`.
 
