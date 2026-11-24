@@ -808,3 +808,68 @@ describe("apply", () => {
     expect(serializeManifest(uninstall.manifest)).not.toContain('"claude"');
   });
 });
+
+describe("the documented template table", () => {
+  // `docs/hc-templates.md` is the page an operator reads before writing a `timeout:`; this test is
+  // what stops it drifting from the shipped `pack.json` (plan Phase 4, Risk watch). The parser is
+  // deliberately dumb — one Markdown table, split on `|` — so it fails on a changed number rather
+  // than needing a Markdown engine.
+  const docPath = fileURLToPath(new URL("../../../../docs/hc-templates.md", import.meta.url));
+
+  interface DocumentedRow {
+    readonly work: string;
+    readonly quota: string;
+    readonly minStepTimeoutMs: string;
+  }
+
+  /** The rows of the one table under "### Templates and step budgets", by template name. */
+  function documentedRows(): Map<string, DocumentedRow> {
+    const lines = readFileSync(docPath, "utf8").split("\n");
+    const start = lines.findIndex((line) => line.trim() === "### Templates and step budgets");
+    if (start === -1) throw new Error("docs/hc-templates.md has no template table section");
+    const rows = new Map<string, DocumentedRow>();
+    for (const line of lines.slice(start + 1)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#")) break;
+      if (!trimmed.startsWith("|")) continue;
+      const cells = trimmed
+        .replace(/^\|/, "")
+        .replace(/\|$/, "")
+        .split("|")
+        .map((cell) => cell.trim().replaceAll("`", ""));
+      if (cells.length !== 5) continue;
+      const name = cells[0] ?? "";
+      if (name === "template" || /^-+$/.test(name)) continue;
+      rows.set(name, {
+        work: cells[2] ?? "",
+        quota: cells[3] ?? "",
+        minStepTimeoutMs: cells[4] ?? "",
+      });
+    }
+    return rows;
+  }
+
+  /** The value of `--flag <value>` inside a template's `args` (the string the command carries). */
+  function flagValue(args: string, flag: string): string | undefined {
+    return new RegExp(`(?:^|\\s)${flag}\\s+(\\S+)`).exec(args)?.[1];
+  }
+
+  it("names every bundled template with its work timeout, quota budget, and step floor", () => {
+    const rows = documentedRows();
+    const templates = ["claude", "smoke"].flatMap((name) => parseBundled(name).templates);
+    expect(templates.map((template) => template.name).sort()).toEqual([...rows.keys()].sort());
+
+    for (const template of templates) {
+      const row = must(rows.get(template.name), `${template.name} is missing from the docs table`);
+      expect(row.work, `${template.name}: work timeout`).toBe(
+        flagValue(template.args, "--work-timeout") ?? "—",
+      );
+      expect(row.quota, `${template.name}: quota budget`).toBe(
+        flagValue(template.args, "--quota-max-wait") ?? "—",
+      );
+      expect(row.minStepTimeoutMs, `${template.name}: minStepTimeoutMs`).toBe(
+        String(template.minStepTimeoutMs),
+      );
+    }
+  });
+});
