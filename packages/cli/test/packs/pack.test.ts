@@ -637,6 +637,36 @@ describe("planUninstall", () => {
     expect(moved.removes).toEqual([]);
     expect(moved.keeps[0]?.reason).toContain("moved");
     expect(moved.manifest.packs["smoke"]).toBeUndefined();
+
+    // A marker is not enough: it must be *our* pack's marker. Another pack's file at our path is
+    // kept (a name reused by a newer install is not ours to delete).
+    const otherPack = planUninstall({
+      packs: ["claude"],
+      templates: templatesFromPlan(installPlan).map((template) =>
+        template.name === "claude-sonnet-medium"
+          ? {
+              ...template,
+              content: renderTemplate({
+                name: template.name,
+                description: "someone else",
+                command: "echo",
+                pack: { name: "other", version: 1 },
+              }),
+            }
+          : template,
+      ),
+      manifest: installPlan.manifest,
+      templatesDir: templatesDirPath,
+      home: "/home/op/.argos",
+      existingPackDirs: ["claude@1", "smoke@1"],
+      prune: false,
+    });
+    expect(otherPack.keeps.map((keep) => `${basename(keep.path)}: ${keep.reason}`)).toContain(
+      'claude-sonnet-medium.md: owned by pack "other"',
+    );
+    expect(otherPack.removes.map((remove) => basename(remove.path))).not.toContain(
+      "claude-sonnet-medium.md",
+    );
   });
 
   it("prunes only unreferenced pack directories that Argos named", () => {

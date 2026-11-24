@@ -182,6 +182,13 @@ function readTerminal() {
       buffer = Buffer.concat([buffer, chunk]);
       const start = buffer.indexOf(PASTE_START);
       if (start !== -1) {
+        // A paste has begun, so only its end marker finishes the read: a quiet gap armed before the
+        // marker arrived must never fire on the raw buffer, or the prompt is truncated at the gap
+        // and keeps the `ESC[200~` framing bytes.
+        if (quiet !== null) {
+          clearTimeout(quiet);
+          quiet = null;
+        }
         const end = buffer.indexOf(PASTE_END, start + PASTE_START.length);
         if (end !== -1) {
           finish(buffer.subarray(start + PASTE_START.length, end));

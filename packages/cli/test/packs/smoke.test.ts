@@ -5,7 +5,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,4 +98,45 @@ describe("smoke.mjs", () => {
     expect(unreadable.code).toBe(2);
     expect(unreadable.stderr).toContain("missing.txt");
   });
+
+  // The real reader is the raw-mode one, and it only exists under a pty: `script` is the portable
+  // way to get one without a native module. Skipped where there is no `script` (Windows).
+  const scriptPath = ["/usr/bin/script", "/bin/script"].find((path) => existsSync(path));
+
+  it.skipIf(scriptPath === undefined)(
+    "keeps a slow bracketed paste whole instead of ending it on a quiet gap",
+    async () => {
+      // hc types the prompt into the terminal; a long one can arrive in several chunks, and the
+      // paste-start frame may arrive after a chunk of raw text. The quiet-gap fallback must stand
+      // down the moment a paste starts: otherwise it fires mid-paste, the prompt is truncated and
+      // keeps the `ESC[200~` framing. The two waits straddle `QUIET_MS` (2 s) on purpose — with the
+      // timer still armed, the read finishes at 2.0 s holding `abc` plus the framing (16, not 11).
+      // The shell is the feeder because `script` needs a pipe, not the socketpair a spawned child
+      // would hand it (`tcgetattr/ioctl: Operation not supported on socket`).
+      const command = [
+        "{ printf '%s' 'abc'; sleep 0.6; printf '%b' '\\033[200~partial'; sleep 1.9;",
+        "printf '%s' 'rest'; printf '%b' '\\033[201~'; sleep 0.7; }",
+        `| '${scriptPath}' -q /dev/null '${process.execPath}' '${program}'`,
+      ].join(" ");
+      const child = spawn("/bin/sh", ["-c", command], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        stderr += String(chunk);
+      });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", (status) => resolve(status));
+      });
+
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      // "partialrest" — the paste body only: no truncation, no framing bytes.
+      expect(stdout).toContain('{"ok":true,"promptLength":11}');
+      expect(stdout).not.toContain("\u001b[200~");
+    },
+  );
 });

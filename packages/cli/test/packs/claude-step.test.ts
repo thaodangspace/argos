@@ -347,4 +347,49 @@ describe("claude-step.mjs", () => {
     expect(outcome.code).toBe(0);
     expect(outcome.stdout).toContain("claude 999.0.0-fake");
   });
+
+  // The raw-mode reader only runs under a pty (`script`), and this file has its own copy of it —
+  // `smoke.test.ts` pins the same scenario on the other copy. Skipped where `script` is absent.
+  const scriptPath = ["/usr/bin/script", "/bin/script"].find((path) => existsSync(path));
+
+  it.skipIf(scriptPath === undefined)(
+    "reads a slow bracketed paste from a pty without truncating it",
+    async () => {
+      // Same shape as the smoke suite's test: a chunk of raw text, then the paste start, then the
+      // body across the 2 s quiet window. `claude` echoes what it received, so the fence proves the
+      // prompt that reached the program is the paste body and nothing else.
+      const flags = ["--model", "claude-opus-5-5", "--effort", "high", "--claude", fake]
+        .map((part) => `'${part}'`)
+        .join(" ");
+      const command = [
+        "{ printf '%s' 'abc'; sleep 0.6; printf '%b' '\\033[200~partial'; sleep 1.9;",
+        "printf '%s' 'rest'; printf '%b' '\\033[201~'; sleep 0.7; }",
+        `| '${scriptPath}' -q /dev/null '${process.execPath}' '${program}' ${flags}`,
+      ].join(" ");
+      const child = spawn("/bin/sh", ["-c", command], {
+        env: { ...baseEnv },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        stderr += String(chunk);
+      });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", (status) => resolve(status));
+      });
+
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      const tail = stdout.slice(stdout.lastIndexOf(CLEAR) + CLEAR.length);
+      expect(tail.split("```json")).toHaveLength(2);
+      expect(tail).toContain('"promptLength":11');
+      expect(tail).toContain(osc("done"));
+      expect(stdout).not.toContain("\u001b[200~");
+    },
+  );
 });

@@ -38,6 +38,12 @@ function terminalPrompt() {
       buffer = Buffer.concat([buffer, chunk]);
       const start = buffer.indexOf(PASTE_START);
       if (start !== -1) {
+        // Only the end marker finishes a paste: a quiet gap armed before it arrived must not fire on
+        // the raw buffer (it would truncate the prompt and leave the `ESC[200~` framing bytes in it).
+        if (quiet !== null) {
+          clearTimeout(quiet);
+          quiet = null;
+        }
         const end = buffer.indexOf(PASTE_END, start + PASTE_START.length);
         if (end !== -1) finish(buffer.subarray(start + PASTE_START.length, end));
       } else {
