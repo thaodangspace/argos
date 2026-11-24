@@ -1,0 +1,9 @@
+flowchart LR
+  %% argos playbook parent (hash ba1653bc5559e02e6d526f4d46132c1a22431a8f9f547edc5c1b710bd38f692b)
+  subgraph block_pr["pr"]
+    pr_investigate["investigate"]
+    pr_implement["implement"]
+  end
+  finish["finish"]
+  pr_implement --> finish
+  pr_investigate --> pr_implement

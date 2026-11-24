@@ -1,0 +1,10 @@
+flowchart LR
+  plan["Plan the work"]
+  impl["Implement"]
+  review{{"Review the diff"}}
+  end_node(["end"])
+  impl -->|abandoned| end_node
+  impl -.->|changes · max_loops=2| plan
+  impl --> review
+  plan --> impl
+  review -.->|rejected · max_loops=1| impl

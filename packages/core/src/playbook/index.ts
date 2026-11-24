@@ -36,6 +36,8 @@ export {
 export { expandPlaybook, type ExpandOptions } from "./expand.js";
 export { validatePlaybook } from "./validate.js";
 export { diffPlaybookIr, type IrDiff, type PlaybookSurface } from "./diff.js";
+export { buildPlaybookGraph } from "./graph.js";
+export type { PlaybookGraph } from "../rpc/contracts.js";
 export {
   RawAfterSchema,
   RawAgentSchema,

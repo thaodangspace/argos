@@ -1,0 +1,15 @@
+```mermaid
+flowchart LR
+  %% argos playbook pr (hash 1470ca2d9fa97de705e63c8e7f2b1bbc82f10425174a5e3c4094af2dbab371dc)
+  investigate["investigate"]
+  implement["implement"]
+  review["review"]
+  local_qa["local_qa"]
+  babysit["babysit"]
+  babysit -.->|changes_requested · max_loops=3| implement
+  implement --> local_qa
+  implement --> review
+  investigate --> implement
+  local_qa --> babysit
+  review --> babysit
+```

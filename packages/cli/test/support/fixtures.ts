@@ -6,6 +6,7 @@ import type {
   DbVacuumResponse,
   ExecutorInfo,
   GateSummary,
+  PlaybookGraph,
   RunDetail,
   RunSummary,
   ScheduleDetail,
@@ -108,6 +109,28 @@ export const RUN_DETAIL: RunDetail = {
     { at: DECIDED_AT, seq: 4, type: "finish", stepId: null, attempt: null, detail: "approved" },
   ],
 };
+
+/**
+ * `RunDetail.graph` (FR8, Phase 1): the two-step shape of {@link RUN_DETAIL}, `draft` → `review` →
+ * `@end`. Kept as a separate fixture so the committed `status.json` golden stays byte-identical (an
+ * older server omits the key, and `{@link RUN_DETAIL}` keeps doing exactly that).
+ */
+export const RUN_GRAPH: PlaybookGraph = {
+  nodes: [
+    { id: "draft", title: "Draft the change", kind: "agent" },
+    { id: "review", title: "Review", kind: "gate" },
+    { id: "@end", title: "end", kind: "end" },
+  ],
+  edges: [
+    { from: "draft", to: "review", kind: "needs" },
+    { from: "review", to: "@end", kind: "end", label: "end" },
+  ],
+  entry: ["draft"],
+  terminals: ["@end"],
+};
+
+/** `GET /runs/:id` with the projected graph, for `argos chart --run` (Phase 3). */
+export const CHART_RUN_DETAIL: RunDetail = { ...RUN_DETAIL, graph: RUN_GRAPH };
 
 /**
  * Accounting fixture (FR26): two agent steps that reported cost/tokens, one gate step that did not.

@@ -1,0 +1,12 @@
+flowchart LR
+  ship["Ship"]
+  report["Report"]
+  subgraph after_cleanup["after cleanup"]
+    after_cleanup_notify["Notify the team"]
+    after_cleanup_verify["Verify"]
+  end
+  end_node(["end"])
+  after_cleanup_notify --> after_cleanup_verify
+  after_cleanup_verify -->|fail| end_node
+  report -->|fail| end_node
+  ship --> report

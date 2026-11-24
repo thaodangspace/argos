@@ -10,6 +10,7 @@
  */
 
 import { isArgosError } from "../errors.js";
+import { buildPlaybookGraph } from "../playbook/graph.js";
 import { discoverPlaybooks, loadPlaybook } from "../playbook/load.js";
 import type { InputDefIR, PlaybookIR } from "../playbook/ir.js";
 import {
@@ -41,7 +42,7 @@ function toInput(name: string, definition: InputDefIR): PlaybookInput {
   };
 }
 
-function toSummary(ir: PlaybookIR, file: string): PlaybookSummary {
+function toSummary(ir: PlaybookIR, file: string, withGraph: boolean): PlaybookSummary {
   return {
     id: ir.id,
     file,
@@ -50,6 +51,8 @@ function toSummary(ir: PlaybookIR, file: string): PlaybookSummary {
     ...(ir.executor === undefined ? {} : { executor: ir.executor }),
     ...(ir.isolation === undefined ? {} : { isolation: ir.isolation.mode }),
     stepCount: ir.steps.length,
+    // FR8: projected on request only, so the default listing stays byte-identical for every client.
+    ...(withGraph ? { graph: buildPlaybookGraph(ir) } : {}),
   };
 }
 
@@ -62,14 +65,22 @@ function errorMessage(error: unknown): string {
  * List every playbook discoverable from `cwd` (and the host's `home`), with per-file failures.
  *
  * `cwd` must already have passed `validateRunCwd`; this function performs no validation of its own.
+ *
+ * `options.graph` (FR8) adds the projected DAG to each summary. It is opt-in because the listing is
+ * polled for the start form: the default body is byte-identical to the pre-graph response.
  */
-export function listPlaybooks(cwd: string, home?: string): PlaybookListResponse {
+export function listPlaybooks(
+  cwd: string,
+  home?: string,
+  options: { graph?: boolean } = {},
+): PlaybookListResponse {
+  const withGraph = options.graph === true;
   const playbooks: PlaybookSummary[] = [];
   const errors: PlaybookLoadError[] = [];
   for (const entry of discoverPlaybooks(cwd, home)) {
     try {
       const ir = loadPlaybook(cwd, entry.id, home === undefined ? {} : { home });
-      playbooks.push(toSummary(ir, entry.file));
+      playbooks.push(toSummary(ir, entry.file, withGraph));
     } catch (error) {
       errors.push({
         file: entry.file,

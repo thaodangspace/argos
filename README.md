@@ -163,6 +163,7 @@ steps:
 
 ```sh
 argos validate                        # validates .argos/playbooks in the current repo
+argos chart --format mermaid          # the playbook DAG as Mermaid (or --format json)
 argos run fix --input issue="crash on empty config"
 argos status <runId>
 argos gates                           # pending gates across runs
@@ -174,6 +175,11 @@ argos rm <runId>                      # delete a finished run (its worktree is k
 
 Every command supports `--json` with a stable shape. Exit codes: `0` success, `1` usage/runtime,
 `2` playbook validation failure, `3` unauthorized/unreachable server.
+
+The graph is derived, never stored: `argos chart` renders a discovered playbook — or, with
+`--run <id>`, the definition a run froze — offline and without a server (see
+[`docs/playbook-example.mmd`](docs/playbook-example.mmd)). The web UI draws the same projection as
+an SVG DAG on `?view=graph` of a run page, next to the default rail view.
 
 ### Pausing inside a loop
 

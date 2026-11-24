@@ -13,18 +13,25 @@
   import EmptyState from "#lib/components/EmptyState.svelte";
   import GateCard from "#lib/components/GateCard.svelte";
   import RunFacts from "#lib/components/RunFacts.svelte";
+  import RunGraph from "#lib/components/RunGraph.svelte";
   import RunHeader from "#lib/components/RunHeader.svelte";
   import RunLog from "#lib/components/RunLog.svelte";
   import StepLog from "#lib/components/StepLog.svelte";
   import StepRail from "#lib/components/StepRail.svelte";
   import StartRunDialog from "#lib/components/StartRunDialog.svelte";
   import Toasts from "#lib/components/Toasts.svelte";
+  import ViewToggle from "#lib/components/ViewToggle.svelte";
   import { href, runHref, workflowHref } from "#lib/paths";
   import { RunActions } from "#lib/run-actions.svelte";
   import { DetailStore } from "#lib/state/detail.svelte";
   import { RunsStore } from "#lib/state/runs.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { ToastStore } from "#lib/state/toasts.svelte";
+  import {
+    readViewParams,
+    writeViewParams,
+    type RunViewMode,
+  } from "#lib/view-query";
   import type { PageProps } from "./$types";
 
   let { data }: PageProps = $props();
@@ -36,20 +43,24 @@
 
   let now = $state(Date.now());
   let selectedStepId = $state<string | null>(null);
+  let viewMode = $state<RunViewMode>("rail");
   let startOpen = $state(false);
 
-  function readStepParam(): string | null {
-    if (typeof window === "undefined") return null;
-    return new URLSearchParams(window.location.search).get("step");
-  }
+  const graph = $derived(detail.detail?.id === data.runId ? detail.detail.graph : undefined);
+  // `?view=graph` against a detail without a graph (an older server) falls back to the rail.
+  const showGraph = $derived(viewMode === "graph" && graph !== undefined);
 
   onMount(() => {
     list.start(api);
     void detail.open(api, data.runId);
-    selectedStepId = readStepParam();
+    const initial = readViewParams(window.location.search);
+    selectedStepId = initial.step;
+    viewMode = initial.view;
 
     const onPop = (): void => {
-      selectedStepId = readStepParam();
+      const params = readViewParams(window.location.search);
+      selectedStepId = params.step;
+      viewMode = params.view;
     };
     window.addEventListener("popstate", onPop);
 
@@ -129,8 +140,19 @@
   function selectStep(stepId: string): void {
     selectedStepId = stepId;
     if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    url.searchParams.set("step", stepId);
+    commitView(showGraph ? "graph" : "rail", stepId);
+  }
+
+  function setView(view: RunViewMode): void {
+    if (view === "graph" && graph === undefined) return;
+    viewMode = view;
+    if (typeof window === "undefined") return;
+    commitView(view, selectedStepId);
+  }
+
+  /** One `replaceState` for both parameters, so `?view=` and `?step=` never fight (FR17). */
+  function commitView(view: RunViewMode, step: string | null): void {
+    const url = writeViewParams(new URL(window.location.href), { view, step });
     window.history.replaceState(window.history.state, "", url);
   }
 
@@ -198,6 +220,10 @@
 
   <RunHeader {run} actions={headerActions} />
 
+  <div class="viewbar">
+    <ViewToggle view={showGraph ? "graph" : "rail"} graphAvailable={graph !== undefined} onView={setView} />
+  </div>
+
   {#if pendingGates.length > 0}
     <section class="gates" aria-label="Pending gates">
       {#each pendingGates as gate (gate.key)}
@@ -210,9 +236,14 @@
     </section>
   {/if}
 
-  <div class="layout">
-    <div class="side">
-      <StepRail steps={run.steps} selectedId={currentStep?.id ?? null} onSelect={selectStep} />
+  {#if showGraph && graph !== undefined}
+    <div class="graph-pane">
+      <RunGraph
+        graph={graph}
+        steps={run.steps}
+        selectedId={currentStep?.id ?? null}
+        onSelect={selectStep}
+      />
       <RunFacts {run} />
     </div>
     <div class="pane">
@@ -223,7 +254,22 @@
       {/if}
       <RunLog entries={runLog} />
     </div>
-  </div>
+  {:else}
+    <div class="layout">
+      <div class="side">
+        <StepRail steps={run.steps} selectedId={currentStep?.id ?? null} onSelect={selectStep} />
+        <RunFacts {run} />
+      </div>
+      <div class="pane">
+        {#if currentStep !== null}
+          <StepLog step={currentStep} />
+        {:else}
+          <EmptyState title="No steps" hint="This run has no steps to show." />
+        {/if}
+        <RunLog entries={runLog} />
+      </div>
+    </div>
+  {/if}
 
   <StartRunDialog
     open={startOpen}
@@ -276,6 +322,17 @@
 
   .pane {
     min-width: 0;
+  }
+
+  .viewbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 10px;
+  }
+
+  .graph-pane {
+    min-width: 0;
+    margin-bottom: 14px;
   }
 
   .banner {

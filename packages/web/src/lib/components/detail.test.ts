@@ -14,6 +14,7 @@ import RunHeader from "./RunHeader.svelte";
 import RunLog from "./RunLog.svelte";
 import StepLog from "./StepLog.svelte";
 import StepRail from "./StepRail.svelte";
+import ViewToggle from "./ViewToggle.svelte";
 
 const NOW = 1_700_000_100_000;
 
@@ -122,6 +123,21 @@ describe("StepRail", () => {
     expect(screen.getAllByText("agent").length).toBeGreaterThan(0);
     await fireEvent.click(buttons[1] as HTMLElement);
     expect(onSelect).toHaveBeenCalledWith("ship");
+  });
+});
+
+describe("ViewToggle", () => {
+  it("renders Rail | Graph and disables the graph half without a graph", () => {
+    // This detail predates the graph field, exactly what an older server sends (FR22).
+    expect(detail.graph).toBeUndefined();
+    render(ViewToggle, {
+      props: { view: "rail", graphAvailable: detail.graph !== undefined, onView: vi.fn() },
+    });
+
+    expect(screen.getByRole("button", { name: "Rail" })).toBeTruthy();
+    const graphButton = screen.getByRole("button", { name: "Graph" }) as HTMLButtonElement;
+    expect(graphButton.disabled).toBe(true);
+    expect(graphButton.getAttribute("title")).toBe("graph unavailable");
   });
 });
 

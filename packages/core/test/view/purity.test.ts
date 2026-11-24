@@ -32,7 +32,7 @@ describe("view purity", () => {
   const files = sourceFiles(viewDir);
 
   it("has the modules to check", () => {
-    expect(files.length).toBeGreaterThanOrEqual(7);
+    expect(files.length).toBeGreaterThanOrEqual(8);
   });
 
   it("imports neither Node built-ins nor a runtime module", () => {
