@@ -38,6 +38,7 @@
   },
   "files": [
     "dist",
+    "templates",
     "ui",
     "!dist/.tsbuildinfo"
   ],
@@ -50,6 +51,7 @@
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "@thaodangspace/argos-core": "0.1.2"
+    "@thaodangspace/argos-core": "0.1.2",
+    "zod": "4.6.7"
   }
 }

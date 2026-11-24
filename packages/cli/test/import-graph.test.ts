@@ -74,6 +74,29 @@ describe("CLI import graph", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("never spawns a process from src/ (spawning belongs to git, scripts, and tests)", () => {
+    const offenders: string[] = [];
+    for (const file of sourceFiles(cliSource)) {
+      if (/["']node:child_process["']/.test(readFileSync(file, "utf8"))) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps src/packs free of core imports except contract types", () => {
+    // `src/packs` is the installer, not the adapter: it reads the manifest and writes files. Phase 3
+    // adds one `import type … from "@thaodangspace/argos-core/rpc/contracts"`; nothing else from
+    // core may appear here, and a value import of the contract is not allowed either.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(join(cliSource, "packs"))) {
+      const text = readFileSync(file, "utf8").replaceAll(
+        /import\s+type\s+\{[^}]*\}\s+from\s+["']@thaodangspace\/argos-core\/rpc\/contracts["'];?/g,
+        "",
+      );
+      if (text.includes("@thaodangspace/argos-core")) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it("keeps the @thaodangspace\/argos-core/rpc barrel free of durable imports", () => {
     for (const name of ["index.ts", "contracts.ts", "client.ts"]) {
       const text = readFileSync(join(coreRpc, name), "utf8");

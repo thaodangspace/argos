@@ -12,9 +12,11 @@ import { ArgosHost, type ArgosHostOptions } from "../../src/durable/host.js";
 import type { Clock } from "../../src/durable/context.js";
 import { createRpcServer, type RpcServer } from "../../src/rpc/server.js";
 import {
+  ExecutorInfoSchema,
   GcWorktreesResponseSchema,
   RPC_ERROR_STATUS,
   RunSummarySchema,
+  ServerInfoSchema,
   statusForCode,
   type ExecutorId,
   type RunDetail,
@@ -556,6 +558,37 @@ describe("executor selection over HTTP (FR3, FR8, FR9)", () => {
       interactiveBlocked: true,
       scheduleSafe: true,
     });
+  });
+
+  it("publishes an hc template roster, omits it for paseo, and accepts a payload captured before it (FR16)", async () => {
+    const paseo = new FakeExecutor({ completeAfterPolls: 1 });
+    const hc = new FakeExecutor({ completeAfterPolls: 1 });
+    const harness = await startHarness(paseo, {
+      executors: { hc },
+      executorInfo: {
+        hc: { reachable: true, templates: ["hc/smoke", "hc/claude-opus-high"] },
+      },
+    });
+
+    const info = (await call(harness.base, "GET", "/info")).body as ServerInfo;
+    const [serverDefault, other] = info.executors ?? [];
+    // Only a roster-shaped catalog fills the field: paseo's is a provider/model matrix.
+    expect(serverDefault?.id).toBe("paseo");
+    expect(serverDefault).not.toHaveProperty("templates");
+    // One entry per canonical `hc/<template>`, sorted where it is published.
+    expect(other?.id).toBe("hc");
+    expect(other?.templates).toEqual(["hc/claude-opus-high", "hc/smoke"]);
+    expect(ExecutorInfoSchema.parse(other).templates).toEqual(["hc/claude-opus-high", "hc/smoke"]);
+
+    // A response captured from a server that predates the field still satisfies the contract,
+    // which is what "additive" means for the CLI, the plugin, and the web UI.
+    const legacy = JSON.parse(JSON.stringify(info)) as {
+      executors?: Array<Record<string, unknown>>;
+    };
+    for (const executor of legacy.executors ?? []) delete executor["templates"];
+    const parsed = ServerInfoSchema.parse(legacy);
+    expect(parsed.executors?.map((executor) => executor.id)).toEqual(["paseo", "hc"]);
+    expect(parsed.executors?.every((executor) => executor.templates === undefined)).toBe(true);
   });
 });
 

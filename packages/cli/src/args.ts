@@ -16,7 +16,8 @@ export interface ParsedArgs {
 
 /**
  * Flags that never take a value. `--force <runId>` and `--dry-run` must stay boolean, otherwise the
- * parser would swallow the positional that follows them.
+ * parser would swallow the positional that follows them. `--link` matters the same way:
+ * `argos hc templates install --link claude` must keep `claude` as a pack name.
  */
 const BOOLEAN_FLAGS = new Set([
   "json",
@@ -26,6 +27,9 @@ const BOOLEAN_FLAGS = new Set([
   "dry-run",
   "paused",
   "vacuum",
+  "link",
+  "prune",
+  "require-server",
 ]);
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {

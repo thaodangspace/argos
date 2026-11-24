@@ -20,7 +20,7 @@ herdr-core adapter come from
 | Workspace | Package | Role |
 |---|---|---|
 | `packages/core` | `@thaodangspace/argos-core` | loader, engine, durable host, git helpers, RPC server, Paseo + herdr-core adapters |
-| `packages/cli` | `@thaodangspace/argos` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite |
+| `packages/cli` | `@thaodangspace/argos` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite (`templates/packs/` carries the bundled hc template packs: plain `.mjs`, outside `tsc -b`) |
 | `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel + chat tools; HTTP client, never opens SQLite |
 | `packages/web` | `@thaodangspace/argos-web` | SvelteKit SPA served by `argos serve` under `/ui`; HTTP client, never opens SQLite |
 
@@ -28,7 +28,10 @@ No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResol
 `NodeNext` (relative imports need `.js` extensions), Node `>=22.13` (`node:sqlite` is unflagged
 from 22.13).
 `packages/core/src/git/` is the only directory (with `durable/tasks/script.ts`) allowed to import
-`node:child_process`, and it is exported on the `@thaodangspace/argos-core/git` subpath, never the root.
+`node:child_process` in `src/`, and it is exported on the `@thaodangspace/argos-core/git` subpath,
+never the root. The bundled pack programs (`packages/cli/templates/packs/*/*.mjs`) are standalone
+assets, not `src/`: they spawn their own agent inside hc's terminal, and no CLI source file spawns
+anything.
 `packages/core/src/schedule/` holds the two scheduler primitives: `next.ts` is the **only**
 `croner` user (built paused, with no callback, so it is a calculator and never arms a timer) and
 `model.ts` is the zod-only schedule model (ids, bounds, fire entries, `catchUp`/`keep`
@@ -155,6 +158,7 @@ npm run check:ui  # svelte-kit sync + svelte-check for packages/web
 npm run local:restart # rebuild CLI + UI, copy ui/, then restart the detached local `argos serve`
 node -e "import('@thaodangspace/argos-core')"   # workspace-link check; requires a build first
 node packages/cli/dist/index.js chart --format mermaid   # the playbook DAG; no server, no SQLite
+node packages/cli/dist/index.js hc templates list   # installed hc template packs; no server, no SQLite
 npm run version:check -- v0.1.0                 # release guard: tag must match every manifest
 npm run version:bump -- patch                   # release switch: bump all manifests + lockfile
 ```
@@ -371,7 +375,7 @@ Every deliberate failure is an `ArgosError` with one of these codes. The HTTP co
 | `playbook_invalid` | load/validate failure; message names file + step | 422 |
 | `playbook_cycle` | dependency cycle or sub-playbook recursion | 422 |
 | `playbook_missing` | unknown playbook id or unreadable file | 400 |
-| `model_unavailable` | resolved `provider/model` absent from `providers.snapshot()` (or an `hc/<template>` absent from `templates.list`); refused before any task | 422 |
+| `model_unavailable` | resolved `provider/model` absent from `providers.snapshot()` (or an `hc/<template>` absent from `templates.list`); refused before any task. When **every** missing target starts with `hc/`, the message also says `; install it with \`argos hc templates install\``; a Paseo target's message is unchanged | 422 |
 | `executor_unavailable` | the resolved executor id is not registered (or an hc core reports `incompatible`/`unsupported_generation`/`needs_update`/`hc_missing`); refused before any task | 422 |
 | `executor_unreachable` | the hc transport cannot connect/read/write (launch and poll both park to the step deadline; a launch retry keeps the request id) | 503 |
 | `storage_locked` | another live process owns the home/SQLite (or host already closed) | 503 |
@@ -934,6 +938,14 @@ once, killing it first when hc still reports it live, and never fails a step ove
 **Handover (FR24).** A lost terminal (`not_found`/`machine_unknown`) gets one relaunch with a new
 name, `argos/handover=1`, and a handover note; a second loss is `agent_missing`.
 
+**Templates are machine-level assets; Argos ships packs, not programs.** hc reads one templates
+directory per machine (`--dir` → `$XDG_CONFIG_HOME/herdr-core/templates` → `~/.config/herdr-core/
+templates`), so `argos hc templates install` writes the `.md` files there and the program into
+`$ARGOS_HOME/hc/packs/<pack>@<version>/`, and records the claim in `$ARGOS_HOME/hc/packs.json`
+(Argos-owned: hc never reads it). Nothing in `src/hc/` changed for this — the adapter still only
+knows `templates.list`, and a pack is an operator-installable asset outside the engine. See
+[`docs/hc-templates.md`](docs/hc-templates.md).
+
 **Deterministic fake (Phase 7).** `fake.ts` is used only by `ARGOS_FAKE_EXECUTOR=hc`. In-memory by
 default; file-backed when a `statePath` is passed (`argos serve` passes `ARGOS_FAKE_HC_DIR`, else
 `$ARGOS_HOME`). `fake-hc.json` is the atomically rewritten snapshot (terminal state included, so a
@@ -1051,7 +1063,12 @@ Contract highlights: `StartRunRequest`, `DecideGateRequest`, `RunSummary`, `RunD
 `RunDetail.gates` comes from the gate documents (fresher than the mirror after a decision). The
 executor surfaces are additive: `StartRunRequest.executor?` (normalized server-side; unknown
 `invalid_request`, unregistered `executor_unavailable`), `RunSummary.executor?` (present only when
-not `paseo`), `ServerInfo.executors?: ExecutorInfo[]`, and `ScheduleSummary.executor?`. The
+not `paseo`), `ServerInfo.executors?: ExecutorInfo[]`, and `ScheduleSummary.executor?`.
+`ExecutorInfo.templates?` is the live roster of an executor whose catalog **is** a template roster
+(`hc`, one canonical `hc/<template>` per entry, sorted, capped at `EXECUTOR_TEMPLATE_LIMIT` = 100
+where the list is built; `paseo` omits it). It is optional and additive, so absent means "cannot
+tell", never "empty": an older server still parses, and `argos doctor`/`argos hc templates verify`
+say so instead of inventing news. The
 list projection stays lean; `RunDetail.steps` use `StepDetailSummary` instead of `StepSummary` and
 add each step's `attempts` (`n`, timing, `target`, `usage`, `outcome`, `errorCode`), its `outcome`,
 and its declared `outputs` (credential-shaped names dropped, values cut at
@@ -1087,7 +1104,7 @@ by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunId
 | `POST /schedules/:id/run` | 201 `{runId, taskId}`: run now — fresh ULID, `reason: "run_now"`, serialized behind any fire, never changes `nextFireAt`, works on a paused schedule, `run_active` under `overlap: skip` while the live run is running |
 | `DELETE /schedules/:id` | `{id, removed: true}`; the runs it started continue and keep their `trigger` |
 | `GET /events` | SSE: one `snapshot` then `run` per changed mirror; `: ping` heartbeat; commit-driven |
-| `GET /info`, `GET /health` | doctor data / liveness; `/info` includes `executors[]` (`{id, default, reachable, version?, capabilities}`) |
+| `GET /info`, `GET /health` | doctor data / liveness; `/info` includes `executors[]` (`{id, default, reachable, version?, capabilities, templates?}`) |
 | `GET /playbooks?cwd=` | discovery for the UI's start form: `{cwd, playbooks:[{id,file,hash,inputs,executor?,isolation?,stepCount}], errors}`; a broken playbook is a per-file `errors[]` entry; `cwd` is validated like `POST /runs` |
 | `GET /ui`, `/ui/*` | the embedded SPA (static build, `paths.base = "/ui"`): shell + assets, extension-less deep links fall back to `index.html`, a missing asset is 404, `_app/immutable/*` is immutable-cached. HTML responses set the per-process `HttpOnly; SameSite=Strict` session cookie (spec FR3); API auth accepts that cookie or the bearer token, and a cookie-authenticated write also requires `Origin` = `Host`. `GET /` redirects to `/ui/` only when the UI is present |
 
@@ -1145,6 +1162,10 @@ commit that creates the run task, including after-task children and retry clones
 | `argos db stats` | `DbStats` (size/WAL/pages, row counts by kind, runs, receipts) | 0 |
 | `argos db purge --older-than <dur> [--dry-run] [--vacuum]` | `DbPurgeResponse` (`removed`, `skipped`, `tasksRemoved`, `receiptsRetired`, `vacuumed`, `before`/`after` sizes) | 0, 1 usage without `--older-than` |
 | `argos db vacuum` | `{vacuumed: true, before, after}` | 0 |
+| `argos hc templates list [--dir <path>] [--json]` | `{dir, packs:[{name, version, program, programSha256?, link?, templates:[{name,file,command,minStepTimeoutMs,present}]}]}` | 0, 1 usage, 2 refusal |
+| `argos hc templates install [pack …] [--from <dir>] [--link] [--force] [--dry-run] [--dir <path>] [--json]` | the `list` shape plus `{manifest, dryRun, unchanged, writes: string[], links: [{path,target}], warnings: string[]}` | 0, 1 usage, 2 refusal |
+| `argos hc templates uninstall <pack …> [--prune] [--dry-run] [--dir <path>] [--json]` | `{dir, packs, manifest, dryRun, unchanged, removed: string[], kept: [{path,reason}]}` | 0, 1 usage, 2 refusal |
+| `argos hc templates verify [--require-server] [--dir <path>] [--json]` | `{dir, server:{reachable, templates: string[] \| null}, packs:[{name, version, templates:[{name,file,present,executable,hashMatches,inServer:boolean\|null,status,messages}]}], ok, warnings, errors}` | 0 (warnings-only included), 1 usage or a broken install, 2 refusal, 3 only with `--require-server` |
 | `argos serve [--port] [--home] [--default-executor <id>]` | `{port, home, pid}` | 0 |
 | `argos doctor [--home] [--port]` | `DoctorReport` | 0 (report), 1 old Node |
 
@@ -1154,7 +1175,10 @@ codes: **0** ok, **1** usage/runtime, **2** validation failure, **3** unauthoriz
 SQLite. `argos doctor` works without a server (storage path/modes, schema version, port, Node
 check) and adds `/info` data when reachable, including a `schedules` check (enabled/paused/refused
 counts and the earliest `nextFireAt`, red when an enabled schedule's `lastFire.status` is
-`refused`) — the `DoctorReport` shape itself is unchanged. `argos serve` retries `ArgosHost.open`
+`refused`) and an `hc templates` check (installed templates vs the running server's roster, a pack
+behind the binary's version, `not installed; run \`argos hc templates install\``, or one of the
+"cannot tell" variants; it only exists when a server answered) — the `DoctorReport` shape itself is
+unchanged. `argos serve` retries `ArgosHost.open`
 once on a transient failure, never on `storage_locked` or `executor_unavailable`, and closes
 server → host → Paseo/hc clients on SIGINT/SIGTERM. It builds the registry — `paseo` always, `hc`
 only when `hello`/`server.status` answer inside 5 s (else one warning and `hc` is omitted, never a
@@ -1173,6 +1197,19 @@ run means the same thing on any machine. `--input` values are strings; `--isolat
 and `--keep` are refused locally (exit 1, no request sent), while a malformed `--catch-up` is sent
 as typed and refused by the server with `invalid_request`. Every schedule command is an HTTP call:
 the CLI never opens SQLite and never arms a timer.
+
+`argos hc templates` is the one command family that writes into a directory Argos does not own
+(hc's templates dir), and it is deliberately offline: `node:fs` plus one HTTP question to `argos
+serve` (`verify`), no hc socket, no SQLite, no spawned process. A bare `install` writes both bundled
+packs (`claude`, `smoke`); `--from <dir>` installs a pack an operator wrote; `--dry-run` prints the
+same plan the real run applies and writes nothing; `--force` overwrites an `.md` this pack does not
+own; `--link` symlinks the program instead of copying it and records the target in place of
+`programSha256`; `--prune` lives on `uninstall` and removes only the program directories of the
+packs named there (a live terminal may still be running the old one, so `install` never prunes).
+`.md` files go in the templates dir and the program plus `packs.json` under `$ARGOS_HOME/hc/packs/`;
+a refusal is exit 2 (`template_conflict`, `pack_unknown`, `pack_missing`, `pack_invalid`,
+`manifest_invalid`, `node_too_old`, `invalid_floor`, `unsupported_protocol`, `link_unsupported`,
+`program_missing`, `pack_duplicate`) and writes nothing.
 
 ## Paseo plugin
 
@@ -1338,9 +1375,22 @@ import-graph test pins its core subpaths. The CLI suite covers validate exit cod
 `ls-schedule`, every `schedule-*` command, and `db-stats`/`db-purge`/`db-purge-dry`/`db-vacuum`),
 the no-storage import graph, the fire-line
 formatter, a real-serve sentinel, and the npm channel (`test/publish.test.ts`: manifest metadata
-and lockstep versions, byte-identical `LICENSE` copies, the release workflow order, and
+and lockstep versions, byte-identical `LICENSE` copies, the release workflow order, `templates` in
+`files` with both packs and a `node --check` over the packed `.mjs`, and
 `scripts/check-version.mjs` accepting a matching tag, refusing a mismatched one, and passing on a
-branch).
+branch). The hc template packs have their own suites in `packages/cli/test/packs/`: `pack.test.ts`
+(the strict `pack.json`/manifest schemas, the marker round trip, command quoting, and every
+`planInstall`/`planUninstall` rule — dry run is the plan the real run applies, idempotence, version
+dir bump, collision refusal, `--force`, `--link`, `--prune`, refusals write nothing — plus the test
+that reads `docs/hc-templates.md` and fails when its template table drifts from the two
+`pack.json` files), `claude-step.test.ts`/`smoke.test.ts` (the shipped programs against a fake
+`claude`: OSC order, exit 0/2/3/75/124, one fenced block, the quota wait, the watchdog, the JSONL
+log line, SIGTERM — plus the raw-mode prompt reader under a real pty, driven through `script` in
+both of its flag forms, `pty.ts`), and `assets.test.ts` (`node --check`, `node:`-only imports, frozen template
+data). `test/hc-command.test.ts` covers the four `argos hc templates` subcommands (exit 0/1/2/3,
+`--json` shapes, temp-dir isolation, an unchanged filesystem under `--dry-run`, and `verify`
+ok/stale/unreachable with and without `--require-server`), and `test/json-shapes.test.ts` pins the
+`doctor` `hc templates` check.
 
 **E2E (`packages/core/test/e2e/kill-restart.test.ts`, `npm run test:e2e`).** Spawns the built CLI
 with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:
@@ -1373,9 +1423,15 @@ with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:
    one `terminal.run` per step across both lifetimes (distinct request ids/names/addresses, both
    created by the first pid, names `argos-<16 hex>`, request ids `argos:<runId>:<stepId>:1`), and
    that the Paseo fake created **no** agent.
+6. *hc pack dry run*: `argos hc templates install --dry-run --json` in a temp `$ARGOS_HOME`, `HOME`,
+   and `XDG_CONFIG_HOME`, with a recursive before/after snapshot of the temp root. Asserts nothing
+   was created anywhere (not even the templates dir), `dryRun: true`, the resolved `dir` is the
+   temp `XDG_CONFIG_HOME/herdr-core/templates`, and the plan names both programs and all five
+   `.md` files. No server and no real core: the manual `smoke` run in `docs/hc-templates.md` is the
+   real-machine proof.
 
-All five scenarios clean up every child (`SIGTERM` then `SIGKILL`) and temp directory in
-`afterEach`; A, B, D, and E time out at 120 s and C at 180 s (it may wait a whole minute boundary),
+All six scenarios clean up every child (`SIGTERM` then `SIGKILL`) and temp directory in
+`afterEach`; A, B, D, E, and F time out at 120 s and C at 180 s (it may wait a whole minute boundary),
 with 60 s per wait.
 
 ## Pinned dependency versions
@@ -1395,7 +1451,7 @@ suite green.
 | `vitest` | `5.1.0` | root dev | test runner |
 | `@types/node` | `26.6.6` | root dev | Node types |
 | `yaml` | `2.9.1` | core | playbook parser |
-| `zod` | `4.6.7` | core, plugin | schema, RPC contract, tool inputs |
+| `zod` | `4.6.7` | core, plugin, cli | schema, RPC contract, tool inputs, pack/manifest schemas |
 | `react` | `19.3.0` | plugin dev | `.tsx` client entry |
 | `@types/react` | `19.3.0` | plugin dev | JSX types |
 
@@ -1488,6 +1544,13 @@ suite green.
 - **hc runs as the operator.** The socket is same-user trust and a terminal program has the user's
   filesystem access; `hc` is opt-in per run, playbook, or schedule (see
   `docs/architecture.md#security`).
+- **A pack upgrade affects only terminals created afterwards; a run is never pinned to a program
+  hash.** Unlike a script step (which stores `{path, sha256}` and fails `script_changed`), an hc run
+  names a template, and the template names a program path — a terminal that is already running keeps
+  the bytes it exec'd. `programSha256` in `$ARGOS_HOME/hc/packs.json` is diagnostic; `verify`
+  reports drift and never refuses a run. A new pack version installs beside the old
+  `packs/<name>@<version>/`, so installed templates move only when `install` rewrites them. See
+  [`docs/hc-templates.md`](docs/hc-templates.md).
 - **The plugin reads `ARGOS_HOME`/`ARGOS_PORT` once per client** and has no settings screen; the
   server must be started with matching values.
 

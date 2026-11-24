@@ -262,6 +262,36 @@ window/tab, so during a run they appear in `hc ls` (and can be watched with
 A runnable example lives in [`.argos/demo/README.md`](.argos/demo/README.md) (two opencode agent
 steps and one script step, all on `hc`).
 
+### Template packs
+
+Argos ships two template packs and installs them once per machine: `claude` (four headless Claude
+Code profiles — work timeout, quota wait, and the final-message shaping wrapped into one program)
+and `smoke` (a short program that proves the whole chain without spending a token).
+
+```sh
+argos hc templates install          # claude + smoke; writes hc's templates dir and $ARGOS_HOME/hc/packs
+argos hc templates list             # what this machine installed, and the command each template runs
+argos hc templates verify           # disk vs manifest, manifest vs the running server's catalog
+argos hc templates install --dry-run   # the plan, writing nothing
+```
+
+A pack is data (`pack.json`: program file, per-template args, and a `minStepTimeoutMs` budget) plus
+one standalone `.mjs` program; `argos hc templates install` copies the program to
+`$ARGOS_HOME/hc/packs/<pack>@<version>/` and generates one `.md` per template in hc's templates
+directory, so nothing on the machine points into a checkout any more. The installed `.md` carries a
+`· argos-pack <name> <version>` marker; `uninstall` deletes only files that carry it. `argos serve`
+reads its template roster once at startup, so restart it after installing (or run `argos doctor`).
+`verify` and the doctor's `hc templates` line are how you tell "not installed" from "installed but
+the server has not seen it".
+
+One rule for an author: **a step's `timeout` must exceed the template's work timeout plus its quota
+wait.** The default is 30 minutes, and the program may wait out a usage limit with the terminal
+still `working`; for `claude-opus-high` (150m of work, up to 4h of quota wait) that means
+`timeout: 7h`. A program must also report OSC 7501 status (`working`/`done`) and leave exactly one
+fenced JSON block on screen — a TUI that never reports status runs to the step deadline. See
+[`docs/hc-templates.md`](docs/hc-templates.md) for the knobs, the per-template numbers, and the
+migration from a vendored `claude-step.py`.
+
 ## Schedules
 
 `argos serve` can fire a playbook on a cron expression, so recurring work is one normal run per

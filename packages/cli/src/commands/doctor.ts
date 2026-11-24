@@ -4,11 +4,12 @@
  * Without a server it reports what it can read safely: the storage path and modes, the configured
  * port, the Node runtime check, and "not reachable" for the daemon. With a server it adds the live
  * `GET /info` view (schema version, actual port, pid, Paseo reachability, provider catalog, pending
- * gates, run counters). It **never** opens SQLite: the database is a `stat` at most.
+ * gates, run counters) and the `hc templates` check (FR17). It **never** opens SQLite: the database
+ * is a `stat` at most, and an hc pack manifest is one small JSON file.
  */
 
-import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { argosHome, dbPath } from "@thaodangspace/argos-core";
 import {
@@ -24,6 +25,14 @@ import {
 } from "@thaodangspace/argos-core/rpc";
 
 import { flag, rejectUnknownFlags, type ParsedArgs } from "../args.js";
+import {
+  emptyManifest,
+  parseManifest,
+  parsePack,
+  type PackManifest,
+} from "../packs/pack.js";
+import { bundledPacks } from "../packs/bundled.js";
+import { manifestPath } from "../packs/templates-dir.js";
 import {
   EXIT_OK,
   EXIT_RUNTIME,
@@ -107,9 +116,11 @@ function humanReport(report: DoctorReport): string {
     `  gates      ${report.pendingGates.length} pending`,
     `  runs       ${report.runs.total} total (${report.runs.active} active)`,
   );
-  // FR10.3: the schedules line only exists when the server answered.
+  // FR10.3: the schedules line only exists when the server answered. FR17: so does `templates`.
   const schedules = report.checks.find((check) => check.name === "schedules");
   if (schedules !== undefined) lines.push(`  schedules  ${schedules.detail}`);
+  const templates = report.checks.find((check) => check.name === "hc templates");
+  if (templates !== undefined) lines.push(`  templates  ${templates.detail}`);
   return lines.join("\n");
 }
 
@@ -142,6 +153,120 @@ function schedulesCheck(
     detail:
       `${enabled.length} enabled, ${paused} paused, ${refused} refused;` +
       ` next ${earliest === undefined ? "-" : new Date(earliest).toISOString()}`,
+  };
+}
+
+/**
+ * FR17: the pack manifest (`$ARGOS_HOME/hc/packs.json`), or why it cannot be read. Absent is fine —
+ * nothing installed is a state, not a failure — so only a present-but-unreadable/hand-edited file
+ * is an error.
+ */
+function readPackManifest(home: string): { manifest?: PackManifest; error?: string } {
+  const file = manifestPath(home);
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return existsSync(file) ? { error: `${file} is not readable` } : {};
+  }
+  const parsed = parseManifest(text, file);
+  if (parsed.ok) return { manifest: parsed.value };
+  const first = parsed.issues[0];
+  return { error: first === undefined ? `${file} is invalid` : `${first.path}: ${first.message}` };
+}
+
+/** FR17: the binary's own pack versions, the other side of "a manifest pack is behind". */
+function bundledVersions(): Readonly<Record<string, number>> {
+  const versions: Record<string, number> = {};
+  let bundled: ReturnType<typeof bundledPacks>;
+  try {
+    bundled = bundledPacks();
+  } catch {
+    // A tarball built without its `templates/`: nothing to compare against (the install refuses).
+    return versions;
+  }
+  for (const name of bundled.names) {
+    const file = join(bundled.dir, name, "pack.json");
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const parsed = parsePack(text, file);
+    if (parsed.ok) versions[parsed.value.name] = parsed.value.version;
+  }
+  return versions;
+}
+
+function templateCount(count: number): string {
+  return `${count} template${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * FR17: one `checks[]` entry — is what the manifest claims installed in the **live** hc roster, and
+ * is any installed pack behind the binary's own version?
+ *
+ * Exported (and pure) so the detail strings can be pinned without synthesising a bundle; the
+ * command always calls it with {@link bundledVersions}. Absent-safe: the caller only adds the entry
+ * when a server answered, and an empty manifest is `ok` with a "not installed" detail.
+ */
+export function hcTemplatesCheck(input: {
+  readonly manifest: PackManifest | undefined;
+  readonly manifestError?: string;
+  readonly executors: readonly ExecutorInfo[];
+  readonly bundled: Readonly<Record<string, number>>;
+}): DoctorCheck {
+  const name = "hc templates";
+  if (input.manifestError !== undefined) {
+    return {
+      name,
+      ok: false,
+      detail: `${input.manifestError}; run \`argos hc templates install\``,
+    };
+  }
+  const manifest = input.manifest ?? emptyManifest();
+  const packs = Object.keys(manifest.packs).sort();
+  if (packs.length === 0) {
+    return { name, ok: true, detail: "not installed; run `argos hc templates install`" };
+  }
+  const installed = packs.flatMap((pack) => Object.keys(manifest.packs[pack]?.templates ?? {}));
+  const hc = input.executors.find((executor) => executor.id === "hc");
+  const roster = hc?.templates;
+  const problems: string[] = [];
+
+  if (roster === undefined) {
+    problems.push(
+      hc === undefined
+        ? "the running server does not register the hc executor (restart `argos serve` with a reachable herdr-core)"
+        : "the running server does not publish its hc templates, so this cannot be checked (restart `argos serve`)",
+    );
+  } else {
+    const missing = installed.filter(
+      (template) => !roster.includes(`hc/${template}`) && !roster.includes(template),
+    );
+    if (missing.length > 0) {
+      problems.push(
+        `not in the running server's catalog: ${missing.sort().join(", ")} (restart \`argos serve\`)`,
+      );
+    }
+  }
+  for (const pack of packs) {
+    const entry = manifest.packs[pack];
+    const bundled = input.bundled[pack];
+    if (entry === undefined || bundled === undefined || bundled <= entry.version) continue;
+    problems.push(
+      `${pack} ${entry.version} installed, ${bundled} bundled; run \`argos hc templates install\``,
+    );
+  }
+
+  if (problems.length > 0) {
+    return { name, ok: false, detail: `${templateCount(installed.length)}; ${problems.join("; ")}` };
+  }
+  return {
+    name,
+    ok: true,
+    detail: `${templateCount(installed.length)} in the running server's catalog`,
   };
 }
 
@@ -216,6 +341,18 @@ export async function doctorCommand(args: ParsedArgs, io: CliIo): Promise<number
     },
   ];
   if (info !== undefined) checks.push(schedulesCheck(schedules, schedulesError));
+  // FR17: the hc pack check needs the live registry, so it only exists when a server answered.
+  if (info !== undefined) {
+    const packs = readPackManifest(home);
+    checks.push(
+      hcTemplatesCheck({
+        manifest: packs.manifest,
+        ...(packs.error === undefined ? {} : { manifestError: packs.error }),
+        executors: info.executors ?? [],
+        bundled: bundledVersions(),
+      }),
+    );
+  }
 
   const report: DoctorReport = {
     node: { version, required: REQUIRED_NODE_VERSION, ok: true },

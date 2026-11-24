@@ -412,6 +412,22 @@ start a terminal. Argos never passes an `env` block to `terminal.run`, so the pr
 core's environment and never an `ARGOS_*` name; prompts and labels carry no token. Choosing `hc` is
 opt-in per run, per playbook, or per schedule.
 
+**Where a template comes from.** A template is a machine-level asset, and the split is three
+layers:
+
+| Layer | Owns | Code |
+|---|---|---|
+| `hc` core | the terminal/PTY, OSC 7501, adoption by label/name, kill-before-`rm` | not ours |
+| template pack (asset) | `claude -p`'s flags, `stream-json` event mapping, quota wording, login-shell `PATH`, final-message shaping | `packages/cli/templates/packs/*/*.mjs`, installed to `$ARGOS_HOME/hc/packs/<pack>@<version>/` |
+| Argos | `templates.list` as catalog, `terminal.run`, poll, fenced-JSON parse, `model_unavailable`, the engine | `src/hc/`, `src/engine/`, `src/durable/` |
+
+`claude -p` is not in the engine because of process ownership: hc owns the terminal and must keep
+running it across an `argos serve` crash and restart (that is what makes adoption instead of a
+re-run possible), while Argos owns the step and must never interpret the program's output beyond
+the one fenced JSON block — so the vendor's flags, quota wording, and stream parsing live in a
+program an operator installs and can fork, not in a control path (`argos hc templates …`,
+[`docs/hc-templates.md`](hc-templates.md)).
+
 The `ARGOS_FAKE_EXECUTOR=hc` port is test-only (`src/hc/fake.ts`, file-backed under
 `ARGOS_FAKE_HC_DIR`): it opens no socket, settles every terminal with exit code 0, and can hold one
 step until a release file appears so the E2E can `SIGKILL` a server mid-step.
@@ -707,6 +723,8 @@ tool, so an agent cannot register, edit, or run one.
 ## Where to read more
 
 - `AGENTS.md` — commands, storage layout, task/document kinds, error codes, env vars, tests.
+- `docs/hc-templates.md` — hc template packs: the `pack.json` format, the `claude` pack's knobs and
+  step budgets, what `verify` answers, and the migration from a vendored `claude-step.py`.
 - `docs/compat.md` — the paseo-playbooks divergences with fixtures.
 - `docs/spikes/pi-durable-host.md` — the spike that pinned the pi-durable host behavior.
 - The approved spec and plan in `brain/spec/2026/Nov/11/03_*`.

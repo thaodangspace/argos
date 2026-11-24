@@ -45,6 +45,7 @@ import {
 import {
   DEFAULT_EXECUTOR_ID,
   EXECUTOR_IDS,
+  EXECUTOR_TEMPLATE_LIMIT,
   ExecutorCapabilitiesSchema,
   ExecutorIdSchema,
   ExecutorInfoSchema,
@@ -58,6 +59,7 @@ import {
 export {
   DEFAULT_EXECUTOR_ID,
   EXECUTOR_IDS,
+  EXECUTOR_TEMPLATE_LIMIT,
   ExecutorCapabilitiesSchema,
   ExecutorIdSchema,
   ExecutorInfoSchema,

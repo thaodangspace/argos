@@ -28,9 +28,17 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -271,6 +279,28 @@ function writePlaybook(repo: string, name: string, yaml: string): void {
   const directory = join(repo, ".argos", "playbooks");
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, `${name}.yaml`), yaml, "utf8");
+}
+
+/**
+ * Every path under `root`, with a file's text (directories get a `dir` entry), so a test can assert
+ * "nothing was written" by comparing two snapshots instead of naming each file it expects.
+ */
+function snapshotTree(root: string): Record<string, string> {
+  const entries: Record<string, string> = {};
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      const key = relative(root, path);
+      if (entry.isDirectory()) {
+        entries[`${key}/`] = "dir";
+        walk(path);
+      } else {
+        entries[key] = readFileSync(path, "utf8");
+      }
+    }
+  };
+  walk(root);
+  return entries;
 }
 
 /**
@@ -978,6 +1008,63 @@ describe("durability across a real SIGKILL (D17)", () => {
           .join(",")} hc-ledger=${hcLedger.length} (${hcLedger
           .map((line) => `${line.stepId}@pid${line.pid}`)
           .join(",")})`,
+      );
+    },
+    120_000,
+  );
+
+  it(
+    "plans an hc template install without writing a byte",
+    async () => {
+      expect(existsSync(distIndex), "run `npm run build` before the E2E suite").toBe(true);
+
+      // The pack phase's own claim: `--dry-run` is a plan, not a write. Both directories come from
+      // the environment, so the temp root is the whole world here — and no server is involved
+      // (`install` is offline; `verify` would be the one command that asks `argos serve`).
+      const root = tempDir("argos-e2e-packs-");
+      const home = join(root, "state");
+      const userHome = join(root, "user");
+      const configHome = join(userHome, ".config");
+      mkdirSync(home);
+      mkdirSync(configHome, { recursive: true });
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        ARGOS_HOME: home,
+        HOME: userHome,
+        XDG_CONFIG_HOME: configHome,
+      };
+
+      const before = snapshotTree(root);
+      const plan = await cliJson<{
+        dir: string;
+        dryRun: boolean;
+        unchanged: boolean;
+        writes: string[];
+        links: Array<{ path: string; target: string }>;
+      }>(["hc", "templates", "install", "--dry-run"], env);
+
+      // Nothing at all appeared: not the templates dir, not `$ARGOS_HOME/hc`, not the manifest.
+      expect(snapshotTree(root)).toEqual(before);
+      expect(plan.dryRun).toBe(true);
+      expect(plan.unchanged).toBe(false);
+      expect(plan.links).toEqual([]);
+      expect(plan.dir).toBe(join(configHome, "herdr-core", "templates"));
+
+      // The plan is the real one: two programs and one `.md` per template of both bundled packs.
+      expect(plan.writes).toHaveLength(7);
+      const written = plan.writes.map((path) => relative(root, path).replaceAll("\\", "/"));
+      expect(written.filter((path) => path.endsWith(".md")).sort()).toEqual([
+        "user/.config/herdr-core/templates/claude-fable-high.md",
+        "user/.config/herdr-core/templates/claude-opus-high.md",
+        "user/.config/herdr-core/templates/claude-opus-xhigh.md",
+        "user/.config/herdr-core/templates/claude-sonnet-medium.md",
+        "user/.config/herdr-core/templates/smoke.md",
+      ]);
+      expect(written).toContain("state/hc/packs/claude@1/claude-step.mjs");
+      expect(written).toContain("state/hc/packs/smoke@1/smoke.mjs");
+
+      console.info(
+        `[e2e] F dry run: writes=${plan.writes.length} dir=${plan.dir} files-on-disk=${Object.keys(before).length}`,
       );
     },
     120_000,
