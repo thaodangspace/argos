@@ -5,12 +5,14 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { ptyShellCommand, scriptPath } from "./pty.js";
 
 const program = fileURLToPath(new URL("../../templates/packs/smoke/smoke.mjs", import.meta.url));
 const osc = (state: string): string => `\u001b]7501;state=${state}\u001b\\`;
@@ -100,9 +102,7 @@ describe("smoke.mjs", () => {
   });
 
   // The real reader is the raw-mode one, and it only exists under a pty: `script` is the portable
-  // way to get one without a native module. Skipped where there is no `script` (Windows).
-  const scriptPath = ["/usr/bin/script", "/bin/script"].find((path) => existsSync(path));
-
+  // way to get one without a native module (`pty.ts` handles the BSD/util-linux flag split).
   it.skipIf(scriptPath === undefined)(
     "keeps a slow bracketed paste whole instead of ending it on a quiet gap",
     async () => {
@@ -111,13 +111,11 @@ describe("smoke.mjs", () => {
       // down the moment a paste starts: otherwise it fires mid-paste, the prompt is truncated and
       // keeps the `ESC[200~` framing. The two waits straddle `QUIET_MS` (2 s) on purpose — with the
       // timer still armed, the read finishes at 2.0 s holding `abc` plus the framing (16, not 11).
-      // The shell is the feeder because `script` needs a pipe, not the socketpair a spawned child
-      // would hand it (`tcgetattr/ioctl: Operation not supported on socket`).
-      const command = [
-        "{ printf '%s' 'abc'; sleep 0.6; printf '%b' '\\033[200~partial'; sleep 1.9;",
-        "printf '%s' 'rest'; printf '%b' '\\033[201~'; sleep 0.7; }",
-        `| '${scriptPath}' -q /dev/null '${process.execPath}' '${program}'`,
+      const feed = [
+        "printf '%s' 'abc'; sleep 0.6; printf '%b' '\\033[200~partial'; sleep 1.9;",
+        "printf '%s' 'rest'; printf '%b' '\\033[201~'; sleep 0.7",
       ].join(" ");
+      const command = ptyShellCommand(feed, `'${process.execPath}' '${program}'`);
       const child = spawn("/bin/sh", ["-c", command], { stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";

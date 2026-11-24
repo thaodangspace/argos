@@ -1385,7 +1385,8 @@ dir bump, collision refusal, `--force`, `--link`, `--prune`, refusals write noth
 that reads `docs/hc-templates.md` and fails when its template table drifts from the two
 `pack.json` files), `claude-step.test.ts`/`smoke.test.ts` (the shipped programs against a fake
 `claude`: OSC order, exit 0/2/3/75/124, one fenced block, the quota wait, the watchdog, the JSONL
-log line, SIGTERM), and `assets.test.ts` (`node --check`, `node:`-only imports, frozen template
+log line, SIGTERM — plus the raw-mode prompt reader under a real pty, driven through `script` in
+both of its flag forms, `pty.ts`), and `assets.test.ts` (`node --check`, `node:`-only imports, frozen template
 data). `test/hc-command.test.ts` covers the four `argos hc templates` subcommands (exit 0/1/2/3,
 `--json` shapes, temp-dir isolation, an unchanged filesystem under `--dry-run`, and `verify`
 ok/stale/unreachable with and without `--require-server`), and `test/json-shapes.test.ts` pins the

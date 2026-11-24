@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { ptyShellCommand, scriptPath } from "./pty.js";
+
 const program = fileURLToPath(new URL("../../templates/packs/claude/claude-step.mjs", import.meta.url));
 const fakeClaude = fileURLToPath(new URL("./fixtures/fake-claude.mjs", import.meta.url));
 
@@ -41,6 +43,7 @@ let home: string;
 let stateDir: string;
 let promptFile: string;
 let fake: string;
+let loginShell: string;
 let baseEnv: Readonly<Record<string, string>>;
 
 beforeEach(() => {
@@ -49,6 +52,7 @@ beforeEach(() => {
   // A fake login shell: the real one would run the developer's rc files on every spawn, and the
   // PATH probe is the only environment work the program does.
   const shell = join(home, "login-shell");
+  loginShell = shell;
   writeFileSync(shell, "#!/bin/sh\nprintf '__ARGOS_PATH__=%s\\n' \"$FAKE_LOGIN_PATH\"\n", "utf8");
   chmodSync(shell, 0o755);
   // A copy, so the exec bit on the repo fixture cannot decide whether this suite runs.
@@ -348,10 +352,8 @@ describe("claude-step.mjs", () => {
     expect(outcome.stdout).toContain("claude 999.0.0-fake");
   });
 
-  // The raw-mode reader only runs under a pty (`script`), and this file has its own copy of it —
-  // `smoke.test.ts` pins the same scenario on the other copy. Skipped where `script` is absent.
-  const scriptPath = ["/usr/bin/script", "/bin/script"].find((path) => existsSync(path));
-
+  // The raw-mode reader only runs under a pty (`pty.ts`), and this file has its own copy of it —
+  // `smoke.test.ts` pins the same scenario on the other copy.
   it.skipIf(scriptPath === undefined)(
     "reads a slow bracketed paste from a pty without truncating it",
     async () => {
@@ -361,13 +363,21 @@ describe("claude-step.mjs", () => {
       const flags = ["--model", "claude-opus-5-5", "--effort", "high", "--claude", fake]
         .map((part) => `'${part}'`)
         .join(" ");
-      const command = [
-        "{ printf '%s' 'abc'; sleep 0.6; printf '%b' '\\033[200~partial'; sleep 1.9;",
-        "printf '%s' 'rest'; printf '%b' '\\033[201~'; sleep 0.7; }",
-        `| '${scriptPath}' -q /dev/null '${process.execPath}' '${program}' ${flags}`,
+      const feed = [
+        "printf '%s' 'abc'; sleep 0.6; printf '%b' '\\033[200~partial'; sleep 1.9;",
+        "printf '%s' 'rest'; printf '%b' '\\033[201~'; sleep 0.7",
       ].join(" ");
+      // The fake login shell reaches the *program* through `env`, not through the spawn env:
+      // util-linux `script -c` runs the command through `$SHELL`, so a fake `SHELL` in the spawn
+      // environment would make `script` run the fake shell instead of the program. (BSD `script`
+      // ignores `$SHELL`, which is why this only broke on Linux.)
+      const command = ptyShellCommand(
+        feed,
+        `env SHELL='${loginShell}' '${process.execPath}' '${program}' ${flags}`,
+      );
       const child = spawn("/bin/sh", ["-c", command], {
-        env: { ...baseEnv },
+        // `/bin/sh` for `script` itself; the program gets the fake login shell from `env` above.
+        env: { ...baseEnv, SHELL: "/bin/sh" },
         stdio: ["ignore", "pipe", "pipe"],
       });
       let stdout = "";
