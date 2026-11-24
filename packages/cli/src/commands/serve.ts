@@ -40,6 +40,7 @@ import {
   createFakeHcPort,
   createHcClient,
   createHcStepExecutor,
+  type HcHerdrLabels,
 } from "@thaodangspace/argos-core/hc";
 import type { PaseoProbe } from "@thaodangspace/argos-core/rpc/server";
 
@@ -159,6 +160,24 @@ function errorText(error: unknown): string {
 }
 
 /**
+ * FR19: the Herdr app's `herdr.space`/`herdr.tab` labels, from the environment.
+ *
+ * The app adopts any terminal carrying them into a space, so a step is a pane there while it runs
+ * (its pane closes with its terminal). Nothing else reads a label, and without the app they are
+ * inert: this is on by default, off with `ARGOS_HERDR=0`. `ARGOS_HERDR_SPACE` names the space
+ * (default `argos`), `ARGOS_HERDR_TAB` pins one tab (default: the run id, one tab per run).
+ */
+export function herdrLabels(): HcHerdrLabels | undefined {
+  if (process.env["ARGOS_HERDR"] === "0") return undefined;
+  const space = process.env["ARGOS_HERDR_SPACE"]?.trim() ?? "";
+  const tab = process.env["ARGOS_HERDR_TAB"]?.trim() ?? "";
+  return {
+    space: space.length > 0 ? space : "argos",
+    ...(tab.length > 0 ? { tab } : {}),
+  };
+}
+
+/**
  * FR9/FR16: the `hc` half of the executor registry.
  *
  * - `ARGOS_FAKE_EXECUTOR=hc` (test only) registers the deterministic fake port, file-backed under
@@ -176,6 +195,7 @@ async function buildHcRegistration(
   home: string,
   io: CliIo,
 ): Promise<HcRegistration | undefined> {
+  const herdr = herdrLabels();
   if (process.env["ARGOS_FAKE_EXECUTOR"] === "hc") {
     io.stderr(
       "[argos] ARGOS_FAKE_EXECUTOR=hc: using the deterministic herdr-core test executor\n",
@@ -184,7 +204,12 @@ async function buildHcRegistration(
     const port = createFakeHcPort({ statePath: resolve(fakeDir ?? home) });
     const catalog = HcCatalog.fromTemplates(await port.templatesList());
     return {
-      executor: createHcStepExecutor({ port, catalog, home }),
+      executor: createHcStepExecutor({
+        port,
+        catalog,
+        home,
+        ...(herdr === undefined ? {} : { herdr }),
+      }),
       catalog,
       info: { reachable: true, version: FAKE_HC_VERSION },
       close: async () => undefined,
@@ -203,7 +228,12 @@ async function buildHcRegistration(
     const status = await within(client.serverStatus(), HC_PROBE_TIMEOUT_MS);
     const catalog = await within(HcCatalog.load(client), HC_PROBE_TIMEOUT_MS);
     return {
-      executor: createHcStepExecutor({ port: client, catalog, home }),
+      executor: createHcStepExecutor({
+        port: client,
+        catalog,
+        home,
+        ...(herdr === undefined ? {} : { herdr }),
+      }),
       catalog,
       info: {
         reachable: true,

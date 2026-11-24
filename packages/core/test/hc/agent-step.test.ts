@@ -124,6 +124,40 @@ describe("hc launch (FR19)", () => {
     expect(run?.wait).toBeUndefined();
   });
 
+  it("adds the Herdr app's adoption labels when asked (FR19)", async () => {
+    const port = new FakeHcPort({ templates: ["claude"] });
+    const catalog = await HcCatalog.load(port);
+    const executor = createHcStepExecutor({ port, catalog, home: HOME, herdr: { space: "argos" } });
+
+    await executor.launch(launchInput());
+
+    const labels = port.runs[0]?.labels;
+    expect(labels?.["herdr.space"]).toBe("argos");
+    // No tab given: the run id, so one run's steps share a tab.
+    expect(labels?.["herdr.tab"]).toBe("run-1");
+    // The labels Argos itself reads are unchanged by the app's two.
+    expect(labels?.["argos/launch"]).toBe("argos:run-1:build:1");
+  });
+
+  it("honours an explicit Herdr tab, on the launch and the handover relaunch (FR19/FR24)", async () => {
+    const port = new FakeHcPort({ templates: ["claude"] });
+    const catalog = await HcCatalog.load(port);
+    const executor = createHcStepExecutor({
+      port,
+      catalog,
+      home: HOME,
+      herdr: { space: "steps", tab: "argos" },
+    });
+
+    const launched = await executor.launch(launchInput());
+    expect(port.runs[0]?.labels).toMatchObject({ "herdr.space": "steps", "herdr.tab": "argos" });
+
+    port.forget(launched.agentId);
+    await executor.status(statusInput(launched.agentId));
+
+    expect(port.runs[1]?.labels).toMatchObject({ "herdr.space": "steps", "herdr.tab": "argos" });
+  });
+
   it("adopts the labelled terminal on a second launch and never creates twice", async () => {
     const port = new FakeHcPort({ templates: ["claude"] });
     const { executor } = await subject(port);

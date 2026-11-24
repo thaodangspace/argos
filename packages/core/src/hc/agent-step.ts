@@ -110,6 +110,21 @@ export interface HcTargetCatalog {
   has(target: string): boolean;
 }
 
+/**
+ * The Herdr app's adoption labels (`herdr.space`, `herdr.tab`).
+ *
+ * hc never interprets a label, and no other client looks at these: they are the app's convention for
+ * "this terminal belongs in a space", so a terminal Argos starts shows up as a pane there instead of
+ * living only in `hc ls`. A space or tab id the app does not know becomes a new, unnamed space (named
+ * after the terminal's folder) or a new tab, so Argos needs no knowledge of the app's model.
+ */
+export interface HcHerdrLabels {
+  /** The space to join; the id is local to the core (machine) the terminal runs on. */
+  readonly space: string;
+  /** The tab to join; defaults to the run id, so one run's steps share a tab. */
+  readonly tab?: string;
+}
+
 export interface HcStepExecutorOptions {
   readonly port: HcPort;
   /** Optional catalog: a template absent from `templates.list` is never launched. */
@@ -118,6 +133,8 @@ export interface HcStepExecutorOptions {
   readonly home?: string;
   /** Extra instruction appended to the prompt of a handover relaunch (FR24). */
   readonly handoverNote?: string;
+  /** The Herdr app's adoption labels. Omitted: the terminal stays out of the app (any other client). */
+  readonly herdr?: HcHerdrLabels;
 }
 
 // ------------------------------------------------------------------ pure helpers
@@ -216,6 +233,7 @@ function terminalKey(terminal: HcTerminal): string {
 export function createHcStepExecutor(options: HcStepExecutorOptions): StepExecutor {
   const { port, catalog } = options;
   const home = options.home;
+  const herdr = options.herdr;
   const handoverNote = options.handoverNote ?? DEFAULT_HANDOVER_NOTE;
 
   // ---------------------------------------------------------------- prompts
@@ -293,7 +311,13 @@ export function createHcStepExecutor(options: HcStepExecutorOptions): StepExecut
     );
   }
 
-  /** FR19: the labels every terminal carries (plus `argos/handover` on a relaunch). */
+  /**
+   * FR19: the labels every terminal carries (plus `argos/handover` on a relaunch).
+   *
+   * `herdr.space`/`herdr.tab` ride along on a create so the Herdr app adopts the terminal the moment
+   * the core announces it — the app is not running in every install, and without it the two labels
+   * are just data hc keeps.
+   */
   function labelsFor(input: StepAgentContext, handover: boolean): Record<string, string> {
     const labels: Record<string, string> = {
       "argos/launch": input.requestId,
@@ -302,6 +326,11 @@ export function createHcStepExecutor(options: HcStepExecutorOptions): StepExecut
       "argos/attempt": String(input.attempt),
     };
     if (home !== undefined && home.length > 0) labels["argos/home"] = home;
+    if (herdr !== undefined && herdr.space.length > 0) {
+      labels["herdr.space"] = herdr.space;
+      labels["herdr.tab"] =
+        herdr.tab !== undefined && herdr.tab.length > 0 ? herdr.tab : input.runId;
+    }
     if (handover) labels["argos/handover"] = "1";
     return labels;
   }

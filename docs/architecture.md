@@ -369,7 +369,11 @@ or in `defaults/main.yaml` pins the substrate, while `argos run --executor hc`, 
 {executor}`, and `argos schedule add --executor hc` override it for one run or one schedule.
 
 One step is one `terminal.run` (argv = template + rendered prompt) with a deterministic
-`argos-<16 hex of the request id>` name and `argos/launch|run|step|attempt|home` labels. `launch`
+`argos-<16 hex of the request id>` name and `argos/launch|run|step|attempt|home` labels. It also
+carries `herdr.space`/`herdr.tab`, the Herdr app's adoption labels, so the step is a pane there while
+it runs (`ARGOS_HERDR=0` turns them off; `ARGOS_HERDR_SPACE` defaults to `argos`, and
+`ARGOS_HERDR_TAB` to the run id, so one run's steps share a tab). No other client reads a label, and
+an install without the app simply keeps them as data. `launch`
 adopts before it creates: a label-filtered `terminal.list {all: true, labels: {argos/launch}}` finds
 a terminal a crashed lifetime made, and a `name_taken` reply adopts that name instead of retrying —
 so a restart never runs the step twice. `rm` is never passed at launch (the crash window needs the
