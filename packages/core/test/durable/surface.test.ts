@@ -116,6 +116,7 @@ const PACKAGE_SURFACE = [
   "argosError",
   "argosHome",
   "attemptUsage",
+  "buildPlaybookGraph",
   "canonicalJson",
   "cloneRecord",
   "createRunRecord",

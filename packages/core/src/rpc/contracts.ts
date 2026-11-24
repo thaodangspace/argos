@@ -424,6 +424,64 @@ export const DbVacuumResponseSchema = z.strictObject({
 });
 export type DbVacuumResponse = z.infer<typeof DbVacuumResponseSchema>;
 
+// ------------------------------------------------------------------ playbook graph (FR7)
+
+/**
+ * The playbook graph contract (FR7): the one structural projection of a frozen `PlaybookIR` that
+ * every renderer draws from (`argos chart`, the web DAG view). It carries ids, titles, kinds, and
+ * edges — never a prompt, a transcript, an agent id, or a request id.
+ *
+ * It lives here rather than in `playbook/` because `view/` may import only `../rpc/contracts.js`.
+ * `playbook/graph.ts` imports these shapes as **types only**, so no runtime cycle appears.
+ */
+export const GraphNodeKindSchema = z.enum(["agent", "gate", "script", "branch", "delay", "end"]);
+export type GraphNodeKind = z.infer<typeof GraphNodeKindSchema>;
+
+/**
+ * One node: a main step, an after-task step (`after:<afterId>/<stepId>`), or the single synthetic
+ * `@end` node. `conditional` is emitted only as `true` (a `when` is a boolean badge, never its
+ * expression); `group` names the sub-playbook block or the after task the step belongs to.
+ */
+export const GraphNodeSchema = z.strictObject({
+  id: z.string().min(1),
+  title: z.string(),
+  kind: GraphNodeKindSchema,
+  conditional: z.boolean().optional(),
+  group: z.string().min(1).optional(),
+});
+export type GraphNode = z.infer<typeof GraphNodeSchema>;
+
+/** `needs` is the DAG order, `goto`/`ask` are jumps, `branch`/`end`/`fail` leave the graph. */
+export const GraphEdgeKindSchema = z.enum(["needs", "goto", "ask", "branch", "end", "fail"]);
+export type GraphEdgeKind = z.infer<typeof GraphEdgeKindSchema>;
+
+/**
+ * One edge. `label` is the outcome key, the branch case name, or `end`/`fail`; `loop` marks a
+ * `goto`/`ask` whose target ranks at or before its source, and `maxLoops` is the declared allowance.
+ */
+export const GraphEdgeSchema = z.strictObject({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  kind: GraphEdgeKindSchema,
+  label: z.string().optional(),
+  loop: z.boolean().optional(),
+  maxLoops: z.number().int().min(1).optional(),
+});
+export type GraphEdge = z.infer<typeof GraphEdgeSchema>;
+
+/**
+ * A playbook's graph. `nodes` are in IR order with the synthetic `@end` last; `edges` are sorted by
+ * `(from, to, kind, label)`; `entry`/`terminals` are the node ids with no inbound/outbound non-loop
+ * edge, in node order. Derived, never stored: `toRunDetail` projects it from the run's frozen IR.
+ */
+export const PlaybookGraphSchema = z.strictObject({
+  nodes: z.array(GraphNodeSchema),
+  edges: z.array(GraphEdgeSchema),
+  entry: z.array(z.string().min(1)),
+  terminals: z.array(z.string().min(1)),
+});
+export type PlaybookGraph = z.infer<typeof PlaybookGraphSchema>;
+
 // ------------------------------------------------------------------ read model
 
 export const GateChoiceSummarySchema = z.strictObject({
@@ -573,6 +631,11 @@ export type HistoryEvent = z.infer<typeof HistoryEventSchema>;
 export const RunDetailSchema = RunSummarySchema.extend({
   steps: z.array(StepDetailSummarySchema),
   history: z.array(HistoryEventSchema),
+  /**
+   * FR8: the graph of the frozen IR this run executes, projected (never stored). Optional so an
+   * older server that omits it and a client that ignores it both keep working.
+   */
+  graph: PlaybookGraphSchema.optional(),
 });
 export type RunDetail = z.infer<typeof RunDetailSchema>;
 
@@ -616,6 +679,8 @@ export const PlaybookSummarySchema = z.strictObject({
   executor: ExecutorIdSchema.optional(),
   isolation: z.enum(["none", "worktree"]).optional(),
   stepCount: z.number().int().min(0),
+  /** FR8: present only on `GET /playbooks?graph=1`; the default response is byte-identical. */
+  graph: PlaybookGraphSchema.optional(),
 });
 export type PlaybookSummary = z.infer<typeof PlaybookSummarySchema>;
 

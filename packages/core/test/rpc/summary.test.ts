@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { createRunRecord, next, type RunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
+import { buildPlaybookGraph } from "../../src/playbook/graph.js";
 import {
   RunDetailSchema,
   STEP_OUTPUT_VALUE_LIMIT,
@@ -174,5 +175,74 @@ describe("toRunDetail (step logs)", () => {
     expect(summary.steps[0]).not.toHaveProperty("usage");
     expect(summary).not.toHaveProperty("usage");
     expect(JSON.stringify(summary)).not.toContain('"usage"');
+  });
+});
+
+describe("toRunDetail (playbook graph, FR8)", () => {
+  it("carries the graph projected from the frozen IR and never stores it", () => {
+    const run = detail(settledRecord());
+
+    expect(run.graph).toStrictEqual(buildPlaybookGraph(ir));
+    expect(run.graph?.nodes.map((node) => node.id)).toStrictEqual(["pick", "ship"]);
+    expect(RunDetailSchema.parse(run).graph?.edges).toStrictEqual([
+      { from: "pick", to: "ship", kind: "needs" },
+    ]);
+
+    // Derived, not stored: the mirrored record and the list summary know nothing about the graph.
+    expect(JSON.stringify({ taskId: "42", record: settledRecord() })).not.toContain('"graph"');
+    expect(JSON.stringify(toRunSummary({ taskId: "42", record: settledRecord() }))).not.toContain(
+      '"graph"',
+    );
+  });
+
+  it("accepts a detail written before the field existed (additive-only contract)", () => {
+    const legacy = JSON.parse(JSON.stringify(detail(settledRecord()))) as Record<string, unknown>;
+    delete legacy["graph"];
+
+    const parsed = RunDetailSchema.parse(legacy);
+    expect(parsed).not.toHaveProperty("graph");
+    expect(parsed.steps).toHaveLength(2);
+  });
+
+  it("memoizes the graph per frozen IR object, so a repeat projection rebuilds nothing", () => {
+    const record = settledRecord();
+    const first = detail(record);
+    const second = detail(record);
+
+    expect(first.graph).toBe(second.graph);
+    expect(first.graph).toStrictEqual(buildPlaybookGraph(ir));
+
+    // A record parsed from the mirror holds a fresh IR object, so the cache misses and the
+    // projection is merely equal — the cache is keyed by identity, never by `ir.hash`.
+    const reread = detail(settledRecord());
+    expect(reread.graph).toStrictEqual(first.graph);
+    expect(reread.graph).not.toBe(first.graph);
+  });
+
+  it("keeps the graph payload under 4 KB at 20 steps (NFR)", () => {
+    const wide = playbook({
+      id: "wide",
+      steps: Array.from({ length: 20 }, (_, index) => {
+        const base = {
+          id: `stage-${index}`,
+          title: `Stage ${index}`,
+          needs: index === 0 ? [] : [`stage-${index - 1}`],
+        };
+        return index === 19
+          ? step({
+              ...base,
+              outcomes: ["success", "retry"],
+              on: { retry: { kind: "goto", target: "stage-0", maxLoops: 3 } },
+            })
+          : step(base);
+      }),
+    });
+    const record = createRunRecord({ id: "run-wide", ir: wide, inputs: {}, cwd: "/repo", now: 1_000 });
+
+    const run = detail(record);
+    expect(run.graph?.nodes).toHaveLength(20);
+    expect(run.graph?.edges.filter((edge) => edge.loop === true)).toHaveLength(1);
+    expect(JSON.stringify(run.graph).length).toBeLessThan(4_096);
+    expect(RunDetailSchema.safeParse(run).success).toBe(true);
   });
 });

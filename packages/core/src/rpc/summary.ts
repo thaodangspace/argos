@@ -11,12 +11,15 @@ import { aggregateUsage, attemptUsage, isSecretEnvName, isTerminalRunStatus } fr
 import type { HistoryDocValue, RunDoc } from "../durable/mirror.js";
 import type { FireEntry, ScheduleDoc } from "../durable/schedule-docs.js";
 import { DEFAULT_EXECUTOR_ID } from "../executor/model.js";
+import { buildPlaybookGraph } from "../playbook/graph.js";
+import { deepFreeze, type PlaybookIR } from "../playbook/ir.js";
 import {
   SCHEDULE_RECENT_RUN_LIMIT,
   STEP_OUTPUT_VALUE_LIMIT,
   type AfterSummary,
   type GateSummary,
   type HistoryEvent,
+  type PlaybookGraph,
   type RunDetail,
   type RunSummary,
   type ScheduleDetail,
@@ -224,7 +227,27 @@ export function toRunDetail(
     detail: event.detail,
   }));
   const summary = toRunSummary(doc, gateDocuments);
-  return { ...summary, steps: stepDetailSummaries(doc.record), history: events };
+  return {
+    ...summary,
+    steps: stepDetailSummaries(doc.record),
+    history: events,
+    graph: graphOf(doc.record.ir),
+  };
+}
+
+/**
+ * FR8: the graph of one frozen IR, memoized by object identity. A frozen IR is immutable, so the
+ * cache needs no invalidation; `GET /runs/:id` is polled every 2 s by two clients and the graph is
+ * cheap but not free. Deep-frozen, because every detail of one IR shares this one object.
+ */
+const graphCache = new WeakMap<PlaybookIR, PlaybookGraph>();
+
+function graphOf(ir: PlaybookIR): PlaybookGraph {
+  const cached = graphCache.get(ir);
+  if (cached !== undefined) return cached;
+  const graph = deepFreeze(buildPlaybookGraph(ir));
+  graphCache.set(ir, graph);
+  return graph;
 }
 
 /** True for runs that still need a process (used by `argos doctor` counters). */
