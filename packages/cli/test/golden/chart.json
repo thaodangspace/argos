@@ -1,0 +1,131 @@
+{
+  "discovery": {
+    "playbooks": [
+      {
+        "id": "alpha",
+        "hash": "fc1e63ae331ccecff522843602d15305ce55902183a238d83b493e5d7cd89d84",
+        "graph": {
+          "nodes": [
+            {
+              "id": "build",
+              "title": "build",
+              "kind": "agent"
+            },
+            {
+              "id": "ship",
+              "title": "ship",
+              "kind": "agent"
+            },
+            {
+              "id": "@end",
+              "title": "end",
+              "kind": "end"
+            }
+          ],
+          "edges": [
+            {
+              "from": "build",
+              "to": "ship",
+              "kind": "needs"
+            },
+            {
+              "from": "ship",
+              "to": "@end",
+              "kind": "end",
+              "label": "shipped"
+            }
+          ],
+          "entry": [
+            "build"
+          ],
+          "terminals": [
+            "@end"
+          ]
+        }
+      },
+      {
+        "id": "beta",
+        "hash": "03d51863b97111e50ea53595ed81f488713d54d9ab26670924d99271743a5a73",
+        "graph": {
+          "nodes": [
+            {
+              "id": "plan",
+              "title": "plan",
+              "kind": "agent"
+            },
+            {
+              "id": "approve",
+              "title": "Approval gate",
+              "kind": "gate"
+            }
+          ],
+          "edges": [
+            {
+              "from": "approve",
+              "to": "plan",
+              "kind": "goto",
+              "label": "rejected",
+              "loop": true
+            },
+            {
+              "from": "plan",
+              "to": "approve",
+              "kind": "needs"
+            }
+          ],
+          "entry": [
+            "plan"
+          ],
+          "terminals": [
+            "approve"
+          ]
+        }
+      }
+    ]
+  },
+  "run": {
+    "runId": "run-1",
+    "graph": {
+      "nodes": [
+        {
+          "id": "draft",
+          "title": "Draft the change",
+          "kind": "agent",
+          "status": "completed",
+          "tone": "success"
+        },
+        {
+          "id": "review",
+          "title": "Review",
+          "kind": "gate",
+          "status": "completed",
+          "tone": "success"
+        },
+        {
+          "id": "@end",
+          "title": "end",
+          "kind": "end"
+        }
+      ],
+      "edges": [
+        {
+          "from": "draft",
+          "to": "review",
+          "kind": "needs"
+        },
+        {
+          "from": "review",
+          "to": "@end",
+          "kind": "end",
+          "label": "end"
+        }
+      ],
+      "entry": [
+        "draft"
+      ],
+      "terminals": [
+        "@end"
+      ]
+    }
+  }
+}

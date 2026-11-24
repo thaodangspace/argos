@@ -8,6 +8,7 @@ import {
   retryCommand,
   rmCommand,
 } from "./commands/actions.js";
+import { chartCommand } from "./commands/chart.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { dbCommand } from "./commands/db.js";
 import { gatesCommand, lsCommand, statusCommand } from "./commands/runs.js";
@@ -46,6 +47,8 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
   switch (args.command) {
     case "validate":
       return validateCommand(args, io);
+    case "chart":
+      return chartCommand(args, io);
     case "run":
       return runCommand(args, io);
     case "ls":

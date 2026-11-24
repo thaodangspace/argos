@@ -177,6 +177,7 @@ export const USAGE = `argos — durable YAML playbooks for Paseo agents
 
 Usage:
   argos validate [path] [--home dir] [--json]
+  argos chart [path] [--playbook <id>] [--format mermaid|json] [--direction LR|TB] [--out <file>] [--run <id>] [--json]
   argos run <playbook> [--input k=v ...] [--cwd dir] [--isolation none|worktree]
                   [--executor paseo|hc] [--json]
   argos ls [--schedule <id>] [--json]
