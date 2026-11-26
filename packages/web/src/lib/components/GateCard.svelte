@@ -16,6 +16,9 @@
   let submitting = $state(false);
 
   const disabled = $derived(busy || submitting || gate.deciding);
+  // One page can hold the same `gateId` of two runs (`fix:1`), so both ids carry the run too
+  // (inbox FR7). The run page passes the same view and needs no change.
+  const questionId = $derived(`gate-${gate.runId}-${gate.gateId}`);
   const needsComment = $derived(gate.choices.some((choice) => choice.comment === "required"));
 
   async function choose(choice: GateChoiceView): Promise<void> {
@@ -35,14 +38,14 @@
   }
 </script>
 
-<article class="gate" class:pending={gate.status === "pending"} aria-labelledby={`gate-${gate.gateId}`}>
+<article class="gate" class:pending={gate.status === "pending"} aria-labelledby={questionId}>
   <header>
     <span class="kind">{gate.kind === "loop_limit" ? "Loop limit" : gate.kind === "ask" ? "Question" : "Gate"}</span>
     <code>{gate.gateId}</code>
     <span class="step">step {gate.stepId}</span>
   </header>
 
-  <p id={`gate-${gate.gateId}`} class="question">{gate.question}</p>
+  <p id={questionId} class="question">{gate.question}</p>
 
   {#if gate.status === "pending"}
     <div class="choices" role="group" aria-label="Gate choices">
