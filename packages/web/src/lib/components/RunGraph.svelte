@@ -8,6 +8,8 @@
     type StepView,
   } from "@thaodangspace/argos-core/view";
 
+  import { TONE_FILL, toneClass } from "#lib/ui/tone";
+
   /**
    * The run page's DAG view (FR18–FR22): one `<svg>`, one focusable `<g role="button">` per node,
    * coloured by the step's status, clickable into the same `?step=` log the rail drives.
@@ -35,7 +37,7 @@
   } = $props();
 
   /** The rail's tone vocabulary plus the graph's (ok/warn/err/info); an unknown tone is neutral. */
-  const TONE_CLASSES: Readonly<Record<string, StatusTone>> = {
+  const TONE_ALIASES: Readonly<Record<string, StatusTone>> = {
     success: "success",
     ok: "success",
     warning: "warning",
@@ -49,6 +51,50 @@
 
   /** One marker per edge kind (FR18), so an arrow is never mistaken for another kind. */
   const ARROW_KINDS: readonly GraphEdgeKind[] = ["needs", "goto", "ask", "branch", "end", "fail"];
+
+  // Literal class strings only (spec FR4, FR16): Tailwind's scanner reads this file's text, so every
+  // colour is written out here and referenced as `class={CONST}` — a `tone-{tone}` fragment would be
+  // dropped in the production build, where no jsdom test looks. Geometry stays in the attributes
+  // `layerGraph()` hands us; these constants only paint.
+  const GRAPH =
+    "flex min-w-0 flex-col gap-1.5 rounded-lg border border-surface-200-800 bg-surface-100-900 p-1.5";
+  const SCROLLER = "overflow-x-auto overflow-y-hidden";
+  const CANVAS = "block max-w-none cursor-grab touch-none active:cursor-grabbing";
+  const NOTE = "m-0 px-1.5 py-0.5 text-[11px] text-surface-600-400";
+  const DASHED = "[stroke-dasharray:5_4]";
+  const EDGE_LABEL = "fill-surface-600-400 text-[10px]";
+  const NODE = "group cursor-pointer outline-none";
+  const NODE_BOX =
+    "fill-surface-50-950 stroke-surface-300-700 transition-colors duration-[120ms] ease-out group-hover:stroke-surface-600-400 group-focus-visible:stroke-surface-600-400 [stroke-width:1] motion-reduce:transition-none";
+  // The selection stroke replaces the resting one rather than overriding it: two `stroke-*` classes on
+  // one element would be resolved by stylesheet order, not by class order (spec FR16).
+  const NODE_BOX_SELECTED =
+    "fill-surface-50-950 stroke-primary-500 transition-colors duration-[120ms] ease-out [stroke-width:2] motion-reduce:transition-none";
+  const NODE_SKIPPED = "opacity-40";
+  const LABEL = "fill-surface-950-50 text-[12px] font-medium";
+  const GATE_RING = "fill-none stroke-warning-500 [stroke-width:1.5] [stroke-dasharray:3_3]";
+  const GATE_BADGE = "fill-warning-500/15 stroke-warning-500 [stroke-width:1]";
+  const GATE_COUNT = "fill-warning-500 text-[9px]";
+
+  /** Edge strokes: `needs` is the muted relation, `ask` is heavier, `fail` is the danger one. */
+  const EDGE: Readonly<Record<GraphEdgeKind, string>> = {
+    needs: "fill-none stroke-surface-600-400 [stroke-width:1.5]",
+    goto: "fill-none stroke-surface-300-700 [stroke-width:1.5]",
+    ask: "fill-none stroke-surface-300-700 [stroke-width:2.5]",
+    branch: "fill-none stroke-surface-300-700 [stroke-width:1.5]",
+    end: "fill-none stroke-surface-300-700 [stroke-width:1.5]",
+    fail: "fill-none stroke-error-500 [stroke-width:1.5]",
+  };
+
+  // A `<marker>`'s inner path never inherits `fill` (spec FR16), so every arrowhead names its own.
+  const ARROW: Readonly<Record<GraphEdgeKind, string>> = {
+    needs: "fill-surface-600-400",
+    goto: "fill-surface-300-700",
+    ask: "fill-surface-300-700",
+    branch: "fill-surface-300-700",
+    end: "fill-surface-300-700",
+    fail: "fill-error-500",
+  };
 
   const MIN_SCALE = 0.5;
   const MAX_SCALE = 2;
@@ -82,7 +128,7 @@
   }
 
   function toneOf(tone: string | undefined): StatusTone {
-    return tone === undefined ? "neutral" : (TONE_CLASSES[tone] ?? "neutral");
+    return tone === undefined ? "neutral" : (TONE_ALIASES[tone] ?? "neutral");
   }
 
   function ellipsize(text: string): string {
@@ -192,14 +238,14 @@
   });
 </script>
 
-<div class="graph" class:large bind:this={surface}>
+<div class={GRAPH} bind:this={surface}>
   {#if large}
-    <p class="note">too large to fit — scroll to explore</p>
+    <p class={NOTE}>too large to fit — scroll to explore</p>
   {/if}
-  <div class="scroller">
+  <div class={SCROLLER}>
     <svg
       bind:this={svg}
-      class="canvas"
+      class={CANVAS}
       viewBox={layout.viewBox}
       width={renderedWidth}
       height={renderedHeight}
@@ -222,29 +268,29 @@
             markerHeight="7"
             orient="auto-start-reverse"
           >
-            <path class="arrow arrow-{kind}" d="M 0 0 L 8 4 L 0 8 z" />
+            <path class={ARROW[kind]} d="M 0 0 L 8 4 L 0 8 z" />
           </marker>
         {/each}
       </defs>
 
       <g transform={`translate(${panX} ${panY}) scale(${scale})`}>
-        <g class="edges">
+        <g>
           {#each layout.edges as edge (`${edge.from}→${edge.to}:${edge.kind}:${edge.label ?? ""}`)}
+            {@const dashed = edge.kind === "goto" || edge.kind === "branch" || edge.loop === true}
             <path
-              class="edge edge-{edge.kind}"
-              class:dashed={edge.kind === "goto" || edge.kind === "branch" || edge.loop}
+              class={[EDGE[edge.kind], dashed && DASHED]}
               d={edge.path}
               marker-end={`url(#argos-arrow-${edge.kind})`}
             />
             {#if edge.label !== undefined}
-              <text class="edge-label" x={edge.labelX} y={edge.labelY} text-anchor="middle">
+              <text class={EDGE_LABEL} x={edge.labelX} y={edge.labelY} text-anchor="middle">
                 {edge.label}
               </text>
             {/if}
           {/each}
         </g>
 
-        <g class="nodes">
+        <g>
           {#each layout.nodes as node (node.id)}
             {@const source = graphById.get(node.id)}
             {@const title = source?.title ?? node.id}
@@ -252,20 +298,22 @@
             {@const step = stepsById.get(node.id)}
             {@const tone = toneOf(step?.tone)}
             {@const pending = pendingGates(step)}
+            {@const selected = node.id === selectedId}
+            {@const skipped = step?.status === "skipped"}
             <g
-              class="node"
-              class:selected={node.id === selectedId}
-              class:skipped={step?.status === "skipped"}
+              class={[NODE, skipped && NODE_SKIPPED]}
               role="button"
               tabindex="0"
               aria-label={nodeLabel(node.id, title, kind)}
               data-node-id={node.id}
+              data-selected={selected ? "true" : undefined}
+              data-skipped={skipped ? "true" : undefined}
               onclick={() => choose(node.id)}
               onkeydown={(event) => onNodeKeydown(event, node.id)}
             >
               <title>{nodeLabel(node.id, title, kind)}</title>
               <rect
-                class="box"
+                class={selected ? NODE_BOX_SELECTED : NODE_BOX}
                 x={node.x}
                 y={node.y}
                 width={node.width}
@@ -274,7 +322,8 @@
               />
               {#if pending > 0}
                 <rect
-                  class="gate-ring"
+                  class={GATE_RING}
+                  data-gate="ring"
                   x={node.x}
                   y={node.y}
                   width={node.width}
@@ -282,7 +331,8 @@
                   rx="8"
                 />
                 <rect
-                  class="gate-badge"
+                  class={GATE_BADGE}
+                  data-gate="badge"
                   x={node.x + node.width - 64}
                   y={node.y + 6}
                   width="58"
@@ -290,7 +340,8 @@
                   rx="8"
                 />
                 <text
-                  class="gate-count"
+                  class={GATE_COUNT}
+                  data-gate-count
                   x={node.x + node.width - 35}
                   y={node.y + 17}
                   text-anchor="middle"
@@ -298,8 +349,14 @@
                   {pending} pending
                 </text>
               {/if}
-              <circle class="dot tone-{tone}" cx={node.x + 13} cy={node.y + 24} r="4.5" />
-              <text class="label" x={node.x + 24} y={node.y + 29}>{ellipsize(title)}</text>
+              <circle
+                class={toneClass(TONE_FILL, tone)}
+                data-tone={tone}
+                cx={node.x + 13}
+                cy={node.y + 24}
+                r="4.5"
+              />
+              <text class={LABEL} x={node.x + 24} y={node.y + 29}>{ellipsize(title)}</text>
             </g>
           {/each}
         </g>
@@ -307,140 +364,3 @@
     </svg>
   </div>
 </div>
-
-<style>
-  .graph {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-    padding: 6px;
-  }
-
-  .scroller {
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .canvas {
-    display: block;
-    max-width: none;
-    touch-action: none;
-    cursor: grab;
-  }
-
-  .canvas:active {
-    cursor: grabbing;
-  }
-
-  .note {
-    margin: 0;
-    padding: 2px 6px;
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  .edge {
-    fill: none;
-    stroke: var(--border);
-    stroke-width: 1.5;
-  }
-
-  .edge-needs {
-    stroke: var(--muted);
-  }
-
-  .edge-ask {
-    stroke-width: 2.5;
-  }
-
-  .edge-fail {
-    stroke: var(--danger);
-  }
-
-  .dashed {
-    stroke-dasharray: 5 4;
-  }
-
-  .edge-label {
-    fill: var(--muted);
-    font-size: 10px;
-    font-family: inherit;
-  }
-
-  .arrow {
-    fill: var(--border);
-  }
-
-  .arrow-needs {
-    fill: var(--muted);
-  }
-
-  .arrow-fail {
-    fill: var(--danger);
-  }
-
-  .node {
-    cursor: pointer;
-    outline: none;
-  }
-
-  .node .box {
-    fill: var(--bg);
-    stroke: var(--border);
-    transition: stroke 120ms ease-out;
-  }
-
-  .node:hover .box,
-  .node:focus-visible .box {
-    stroke: var(--muted);
-  }
-
-  .node.selected .box {
-    stroke: var(--accent);
-    stroke-width: 2;
-  }
-
-  .node.skipped {
-    opacity: 0.4;
-  }
-
-  .label {
-    fill: var(--text);
-    font-size: 12px;
-    font-family: inherit;
-    font-weight: 500;
-  }
-
-  .dot {
-    fill: currentColor;
-  }
-
-  .gate-ring {
-    fill: none;
-    stroke: var(--warning);
-    stroke-width: 1.5;
-    stroke-dasharray: 3 3;
-  }
-
-  .gate-badge {
-    fill: var(--warning-soft);
-    stroke: var(--warning);
-    stroke-width: 1;
-  }
-
-  .gate-count {
-    fill: var(--warning);
-    font-size: 9px;
-    font-family: inherit;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .node .box {
-      transition: none;
-    }
-  }
-</style>

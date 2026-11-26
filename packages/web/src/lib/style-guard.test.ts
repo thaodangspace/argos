@@ -47,11 +47,10 @@ const ALLOW_LEGACY_BLOCK = true;
 const APP_CSS_ALLOWLIST: readonly string[] = [];
 
 /**
- * The `.svelte` files that still carry a `<style>` block (Phase 4 census: 3). Monotonic: a phase
+ * The `.svelte` files that still carry a `<style>` block (Phase 5 census: 2). Monotonic: a phase
  * removes exactly its own files and adds none, and this test fails when an entry goes stale.
  */
 const STYLE_ALLOWLIST: readonly string[] = [
-  "src/lib/components/RunGraph.svelte",
   "src/lib/components/StartRunDialog.svelte",
   "src/lib/components/Toasts.svelte",
 ];
