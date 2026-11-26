@@ -53,7 +53,7 @@ const APP_CSS_IMPORTS: readonly string[] = [
   '@import "tailwindcss";',
   '@import "@skeletonlabs/skeleton";',
   '@import "@skeletonlabs/skeleton-svelte";',
-  '@import "@skeletonlabs/skeleton/themes/hamlindigo";',
+  '@import "@skeletonlabs/skeleton/themes/vintage";',
 ];
 
 /** Spec FR6: this variant is what makes Skeleton's `light-dark()` pairs follow the `.dark` class. */

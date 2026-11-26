@@ -1,8 +1,8 @@
-/* The only stylesheet in packages/web (spec FR3): Tailwind + Skeleton + the Hamlindigo theme. */
+/* The only stylesheet in packages/web (spec FR3): Tailwind + Skeleton + the Vintage theme. */
 @import "tailwindcss";
 @import "@skeletonlabs/skeleton";
 @import "@skeletonlabs/skeleton-svelte";
-@import "@skeletonlabs/skeleton/themes/hamlindigo";
+@import "@skeletonlabs/skeleton/themes/vintage";
 
 /* The colour mode is a class on <html>, never `data-theme` (spec FR5); Skeleton paints with light-dark() pairs, so this variant is what makes the whole theme follow the toggle instead of the operating system (spec FR6). */
 @custom-variant dark (&:where(.dark, .dark *));

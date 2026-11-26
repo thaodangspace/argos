@@ -90,15 +90,15 @@ base `/ui`. It pins its own `typescript@6.0.3` because SvelteKit/svelte-check pe
 repository compiles with TS 7.0.2; its only core subpaths are `/rpc/contracts` and `/view`
 (`test import graph in src/lib/import-graph.test.ts`). **The styling is one CSS entry and no
 hand-written CSS.** `tailwindcss` arrives through `@tailwindcss/vite` (the plugin runs before
-`sveltekit()`), and Skeleton 5.0.6 supplies the component classes plus the Hamlindigo theme;
+`sveltekit()`), and Skeleton 5.0.6 supplies the component classes plus the Vintage theme;
 `src/app.css` is the whole stylesheet and holds the four `@import`s (`tailwindcss`,
 `@skeletonlabs/skeleton`, `@skeletonlabs/skeleton-svelte`,
-`@skeletonlabs/skeleton/themes/hamlindigo`) and then one
+`@skeletonlabs/skeleton/themes/vintage`) and then one
 `@custom-variant dark (&:where(.dark, .dark *))` — no `@theme`, no `@utility`, no `@layer`, no
 selector, no declaration. Skeleton paints through `light-dark()` pairs, so that variant is what
 makes the in-app toggle work instead of the operating system. `src/app.html` carries the **two
 attributes**: `class="dark"` is the colour mode and the only thing `applyTheme` writes (the store
-is `lib/state/theme.svelte.ts`), while `data-theme="hamlindigo"` selects the theme and is never
+is `lib/state/theme.svelte.ts`), while `data-theme="vintage"` selects the theme and is never
 written at runtime. A tone becomes a class only through the literal records in `lib/ui/tone.ts`
 (`TONE_TEXT`/`TONE_BG`/`TONE_BG_SOFT`/`TONE_BORDER`/`TONE_FILL` plus `toneClass`, all Skeleton
 colour pairings, so one class serves both modes): a `tone-{tone}` interpolation reaches the DOM in
@@ -1506,7 +1506,7 @@ suite green.
 | `@types/react` | `19.3.0` | plugin dev | JSX types |
 | `tailwindcss` | `4.3.5` | web dev | utilities for every component; nothing is hand-written |
 | `@tailwindcss/vite` | `4.3.5` | web dev | the Vite plugin that compiles the one CSS entry |
-| `@skeletonlabs/skeleton` | `5.0.6` | web dev | component/utility CSS and the Hamlindigo theme |
+| `@skeletonlabs/skeleton` | `5.0.6` | web dev | component/utility CSS and the Vintage theme |
 | `@skeletonlabs/skeleton-svelte` | `5.0.6` | web dev | the two Zag escalations (`Dialog`, `Toast`) and their state machines |
 
 ## Known limitations and deviations
