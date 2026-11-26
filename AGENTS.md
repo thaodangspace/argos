@@ -38,8 +38,10 @@ anything.
 normalization) that `rpc/contracts.ts` imports, so the CLI and the plugin bundle neither `croner`
 nor a timer.
 
-`packages/core/src/executor/` is the Node-free executor model (`model.ts`: `EXECUTOR_IDS`
-`paseo`/`hc`, one normalizer accepting `herdr`/`herdr-core`, `DEFAULT_EXECUTOR_CAPABILITIES`, and
+`packages/core/src/executor/` is the Node-free executor model (`model.ts`: `EXECUTOR_IDS` in
+registry order — `hc` first, then `paseo` — `PREFERRED_EXECUTOR_ID` (`hc`, the substrate a server
+starts runs on), `DEFAULT_EXECUTOR_ID` (`paseo`, the legacy id a run record may omit),
+one normalizer accepting `herdr`/`herdr-core`, `DEFAULT_EXECUTOR_CAPABILITIES`, and
 the `ExecutorInfo` schema) plus the shared structured-result parser (`output.ts`: schema
 compilation and `parseStepResult`), which both adapters use.
 
@@ -147,8 +149,9 @@ the IR as **types** only, never Paseo, the engine, git, or RPC (`test/hc/isolati
   `@thaodangspace/argos-core/view`; the Paseo panel re-exports it and the web UI imports it, so a new
   status or history event is one edit for every client.
 - **The substrate is frozen in the run.** A run resolves its executor once (request > schedule >
-  playbook > server default) and stores the canonical id in `RunRecord.executor` (`paseo` omitted,
-  so older records stay byte-identical). The child step commits the same id and looks it up in the
+  playbook > server default, which is `hc` when its adapter registered and `paseo` otherwise) and
+  stores the canonical id in `RunRecord.executor` (`paseo` omitted, so older records stay
+  byte-identical). The child step commits the same id and looks it up in the
   registry, so a restart with a different `--default-executor` cannot move an in-flight run; an id
   the registry does not carry is `executor_unavailable` before any task, index entry, or worktree.
 - **Same-commit mirrors.** Run/history documents are committed with the task checkpoint.
@@ -307,7 +310,8 @@ names this process. A `storage` injection (`MemoryStorage`) skips the home/pid s
 adds the other ids, `catalogs` gives each id its `TargetCatalog` (`paseo` still falls back to
 `modelCatalog`), and `executorInfo` is the reachability/version/capability descriptor `GET /info`
 publishes. A `defaultExecutor` the registry cannot run is `executor_unavailable` **before** the pid
-file and database are touched.
+file and database are touched; an absent one means the host's own fallback, `paseo` (the `executor`
+option), and `argos serve` always passes its resolved choice explicitly.
 
 ## Database maintenance
 
@@ -433,7 +437,7 @@ Protocol-only responses (`not_found`, `method_not_allowed`, `internal_error`) ar
 | `ARGOS_HOME` | `~/.argos` | state directory (`0700`); DB `argos.sqlite`, `token`, `serve.pid` |
 | `ARGOS_PORT` | `7676` | `argos serve` port on `127.0.0.1`; `0` picks a free port |
 | `ARGOS_UI_DIR` | `<cli package>/ui` | the built SvelteKit UI `argos serve` hosts under `/ui`; empty disables the UI, unset uses the copied build |
-| `ARGOS_EXECUTOR` | `paseo` | `argos serve` default substrate; `--default-executor` wins |
+| `ARGOS_EXECUTOR` | `hc` when registered, else `paseo` | `argos serve` default substrate; `--default-executor` wins |
 | `ARGOS_PASEO_URL` | `ws://127.0.0.1:6767/ws` | Paseo daemon URL (read only by `src/paseo/client.ts`) |
 | `ARGOS_PASEO_PASSWORD` | (unset) | daemon password; never logged, redacted from errors |
 | `ARGOS_FAKE_PASEO` | (unset) | **test-only** `1` = deterministic executor for `argos serve` |
@@ -585,7 +589,9 @@ the package root so the CLI and plugin cannot open SQLite by accident.
 **Executor registry (executor spec FR1–FR7).** `ArgosHost` holds `#executors` (`paseo` from the
 `executor` option plus every registered id), `#defaultExecutor`, and one `TargetCatalog` per id.
 `#resolveExecutorId` applies request > schedule > playbook > default and stores the canonical id in
-the run record; `#catalogFor(id)` drives the existing `model_unavailable` check, so an
+the run record (`#defaultExecutor` is the operator's choice — or `PREFERRED_EXECUTOR_ID` when its
+adapter registered — passed by `argos serve`; a bare host falls back to `paseo`); `#catalogFor(id)`
+drives the existing `model_unavailable` check, so an
 `hc/<template>` missing from `templates.list` is refused exactly like an unknown `provider/model`.
 The id threads to `argos.step` (`StepTaskInput.executor`, committed by `locate`), which resolves
 `registry[checkpoint.executor ?? "paseo"]`; an unregistered id there settles the step as a failed
@@ -1204,10 +1210,13 @@ once on a transient failure, never on `storage_locked` or `executor_unavailable`
 server → host → Paseo/hc clients on SIGINT/SIGTERM. It builds the registry — `paseo` always, `hc`
 only when `hello`/`server.status` answer inside 5 s (else one warning and `hc` is omitted, never a
 startup failure) or when `ARGOS_FAKE_EXECUTOR=hc` selects the fake — and prints one stderr line
-naming it (`[argos] executors: paseo (default), hc`). It prints one stderr line per fire outcome,
+naming it in registry order, `hc` first (`[argos] executors: hc (default), paseo`). Without
+`--default-executor`/`ARGOS_EXECUTOR`, the default is `hc` as soon as its adapter registered and
+`paseo` otherwise (the one executor the registry always carries), so a machine with no herdr-core
+starts the same server it always did. It prints one stderr line per fire outcome,
 `[argos] schedule <id> <iso> <status> run <runId>` (or the error code / missed count), and never an
-input value. `--default-executor <id>` (else `ARGOS_EXECUTOR`, else `paseo`) is refused locally when
-the value is not an executor at all (exit 1, nothing opened) and by `ArgosHost.open`
+input value. `--default-executor <id>` (else `ARGOS_EXECUTOR`, else the preference above) is refused
+locally when the value is not an executor at all (exit 1, nothing opened) and by `ArgosHost.open`
 (`executor_unavailable`) when the id is known but unregistered. `ARGOS_FAKE_PASEO=1` selects the
 deterministic Paseo executor/fake catalog and `ARGOS_FAKE_EXECUTOR=hc` the deterministic herdr-core
 port; both are test-only.
@@ -1440,7 +1449,8 @@ with a temp `ARGOS_HOME` and `ARGOS_FAKE_PASEO=1`:
    whose steps target `hc/claude`; the fake holds step 2 `working`; poll `argos status --json` and
    the hc creation ledger (`fake-hc-launches.jsonl`) until step 2's terminal exists; `SIGKILL`;
    create the release file; restart on the same home and port; wait for `completed`. Asserts the
-   startup line names `paseo (default), hc`, the run's `executor` is `hc`, the same run id, exactly
+   startup line names `hc (default), paseo` (the fake hc adapter registered, so the registry order
+   and the preference agree), the run's `executor` is `hc`, the same run id, exactly
    one `terminal.run` per step across both lifetimes (distinct request ids/names/addresses, both
    created by the first pid, names `argos-<16 hex>`, request ids `argos:<runId>:<stepId>:1`), and
    that the Paseo fake created **no** agent.
@@ -1562,9 +1572,18 @@ suite green.
   down mid-run is `executor_unreachable` in both phases: a poll-time failure parks to the step
   deadline, and a launch-time failure parks and retries the same adopt-or-create call (adopting a
   terminal the failed call already created) until the same deadline.
+- **A playbook that targets Paseo must pin `executor: paseo`.** The server default is now `hc`
+  whenever a core answered at startup, so a playbook with no `executor:` key anywhere starts on
+  `hc` — and a step targeting a Paseo `provider/model` is then `model_unavailable` (the check names
+  the missing `hc/<...>` targets) before any task. That is a refusal, never a silent run on the
+  wrong substrate. Pin `executor: paseo`, `defaults.executor: paseo`, or start the server with
+  `--default-executor paseo` for a Paseo-only repository; a machine without a reachable core still
+  defaults to `paseo` on its own.
 - **hc runs as the operator.** The socket is same-user trust and a terminal program has the user's
-  filesystem access; `hc` is opt-in per run, playbook, or schedule (see
-  `docs/architecture.md#security`).
+  filesystem access. Since `hc` is the server default when a core answers, that access is the
+  default posture: install herdr-core only where you want its terminals to do the work, and run
+  `argos serve --default-executor paseo` where you do not. The server can be pinned per run, per
+  playbook, or per schedule (see `docs/architecture.md#security`).
 - **A pack upgrade affects only terminals created afterwards; a run is never pinned to a program
   hash.** Unlike a script step (which stores `{path, sha256}` and fails `script_changed`), an hc run
   names a template, and the template names a program path — a terminal that is already running keeps

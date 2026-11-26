@@ -66,7 +66,8 @@ spawn a process.
 `argos serve` assembles one registry: `paseo` always, `hc` (herdr-core) when a real core answers
 its `hello`/`server.status` probe inside 5 s or when the test-only `ARGOS_FAKE_EXECUTOR=hc` selects
 the deterministic fake. `--default-executor <id>` (or `ARGOS_EXECUTOR`) picks the substrate a run
-without an override starts on.
+without an override starts on; without either, `hc` is preferred as soon as its adapter registered
+and `paseo` is the fallback, so a machine with no herdr-core starts the same server it always did.
 
 A run resolves its substrate once — request (`argos run --executor`, `POST /runs {executor}`) >
 schedule document > playbook (`executor:`, `defaults.executor`, `defaults/main.yaml`) > server
@@ -75,8 +76,8 @@ older record is byte-identical). The child `argos.step` task commits the same id
 the registry, so a restart with a different `--default-executor` cannot move an in-flight run to
 another substrate. An id the registry does not carry is `executor_unavailable` before any task, run
 index entry, or worktree exists; `GET /info` and `argos doctor` list every registered executor with
-its reachability, version, and capabilities, and `argos serve` prints one startup line naming the
-registry.
+its reachability, version, and capabilities, in registry order (`hc` first, then `paseo`), and
+`argos serve` prints one startup line naming the registry.
 
 ### Playbook definition
 
@@ -366,7 +367,10 @@ A playbook targets hc the same way it targets Paseo — `agent: { provider: hc, 
 core does not offer is the existing `model_unavailable` before any task exists; `herdr` and
 `herdr-core` are accepted spellings. `executor: hc` at the playbook top level, in `defaults.executor`,
 or in `defaults/main.yaml` pins the substrate, while `argos run --executor hc`, `POST /runs
-{executor}`, and `argos schedule add --executor hc` override it for one run or one schedule.
+{executor}`, and `argos schedule add --executor hc` override it for one run or one schedule. Note
+that `hc` is the server default when a core answered at startup, so a playbook whose steps target a
+Paseo `provider/model` and that never names `executor:` is refused `model_unavailable` (naming the
+missing `hc/<...>` targets) before any task — pin `executor: paseo` for a Paseo-only repository.
 
 One step is one `terminal.run` (argv = template + rendered prompt) with a deterministic
 `argos-<16 hex of the request id>` name and `argos/launch|run|step|attempt|home` labels. It also
@@ -409,8 +413,10 @@ structured-output channel and no provider counters, so `usage`/cost stays absent
 **Trust boundary.** hc runs the template's command as the same user, with that user's filesystem
 access, in the run's `cwd`/worktree. The socket is same-user trust: whoever can connect to it can
 start a terminal. Argos never passes an `env` block to `terminal.run`, so the program inherits the
-core's environment and never an `ARGOS_*` name; prompts and labels carry no token. Choosing `hc` is
-opt-in per run, per playbook, or per schedule.
+core's environment and never an `ARGOS_*` name; prompts and labels carry no token. `hc` is the
+server default whenever a core answers its startup probe, so that access is the default posture:
+run `argos serve --default-executor paseo` (or pin `executor: paseo`) where it is not wanted. It can
+also be chosen per run, per playbook, or per schedule.
 
 **Where a template comes from.** A template is a machine-level asset, and the split is three
 layers:
@@ -461,8 +467,9 @@ commit-driven SSE with a snapshot frame and reconnecting clients; the plugin re-
 reconnect.
 
 The substrate is selected per run (`argos run --executor`, `POST /runs {executor}`), per schedule
-(`argos schedule add|edit --executor`) or per server (`argos serve --default-executor`), and a
-playbook can pin it with `executor:`. `GET /info` publishes the registry (`{id, default, reachable,
+(`argos schedule add|edit --executor`) or per server (`argos serve --default-executor`, which
+otherwise prefers `hc` and falls back to `paseo`), and a playbook can pin it with `executor:`.
+`GET /info` publishes the registry (`{id, default, reachable,
 version?, capabilities}`), which is what `argos doctor`'s `executors` line and the `argos ls` /
 `argos status` output render; `RunSummary.executor` is present only when the run is not on
 `paseo`.

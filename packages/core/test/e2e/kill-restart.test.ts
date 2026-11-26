@@ -920,8 +920,9 @@ describe("durability across a real SIGKILL (D17)", () => {
       const first = await startServe(home, fakeEnv);
       const firstPid = first.child.pid;
       expect(firstPid).toBeTypeOf("number");
-      // FR9: one startup line naming the whole registry, `hc` included, with paseo still default.
-      expect(first.stderr()).toContain("[argos] executors: paseo (default), hc");
+      // FR9/FR16: one startup line naming the whole registry, `hc` first and default (its fake
+      // adapter registered), with paseo still listed.
+      expect(first.stderr()).toContain("[argos] executors: hc (default), paseo");
 
       const started = await cliJson<{ runId: string; taskId: string }>(
         ["run", "hc", "--cwd", repo],
@@ -965,7 +966,7 @@ describe("durability across a real SIGKILL (D17)", () => {
       const secondPid = second.child.pid;
       expect(secondPid).toBeTypeOf("number");
       expect(secondPid).not.toBe(firstPid);
-      expect(second.stderr()).toContain("[argos] executors: paseo (default), hc");
+      expect(second.stderr()).toContain("[argos] executors: hc (default), paseo");
 
       const done = await waitForStatus(
         home,

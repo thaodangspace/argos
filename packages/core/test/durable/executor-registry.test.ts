@@ -27,7 +27,14 @@ import { ArgosHost } from "../../src/durable/host.js";
 import { createRunRecord, hydrateRunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import { isArgosError } from "../../src/errors.js";
-import { ExecutorInfoSchema, executorIdFor, normalizeExecutorId } from "../../src/executor/model.js";
+import {
+  DEFAULT_EXECUTOR_ID,
+  EXECUTOR_IDS,
+  ExecutorInfoSchema,
+  PREFERRED_EXECUTOR_ID,
+  executorIdFor,
+  normalizeExecutorId,
+} from "../../src/executor/model.js";
 import type { TargetCatalog } from "../../src/paseo/model-catalog.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeClock } from "../fakes/clock.js";
@@ -106,6 +113,16 @@ describe("executor ids (FR1)", () => {
   it("refuses an unknown id as invalid_request for the caller-facing gate", () => {
     const error = thrownBy(() => normalizeExecutorId("nope"));
     expect(isArgosError(error) && error.code).toBe("invalid_request");
+  });
+
+  it("lists hc first and keeps the two meanings of \"default\" apart", () => {
+    // Registry order: the preferred substrate is what an operator reads first (`/info`, doctor,
+    // the startup line).
+    expect([...EXECUTOR_IDS]).toEqual(["hc", "paseo"]);
+    expect(PREFERRED_EXECUTOR_ID).toBe("hc");
+    // FR5 is untouched by that preference: the id a record may omit is still `paseo`, so an older
+    // record's absent key cannot be reinterpreted.
+    expect(DEFAULT_EXECUTOR_ID).toBe("paseo");
   });
 });
 
@@ -561,14 +578,15 @@ describe("GET /info templates (FR16)", () => {
       executorInfo: { hc: { reachable: true, templates } },
     });
     try {
-      const [paseoInfo, hcInfo] = host.executors;
-      expect(paseoInfo?.id).toBe("paseo");
-      expect(paseoInfo).not.toHaveProperty("templates");
+      const [hcInfo, paseoInfo] = host.executors;
       expect(hcInfo?.id).toBe("hc");
       expect(hcInfo?.templates).toHaveLength(100);
       expect(hcInfo?.templates).toEqual([...templates].sort().slice(0, 100));
       // The published descriptor is what the RPC contract accepts.
       expect(() => ExecutorInfoSchema.parse(hcInfo)).not.toThrow();
+      // Registry order (`hc` first), and a roster never leaks onto paseo's provider/model matrix.
+      expect(paseoInfo?.id).toBe("paseo");
+      expect(paseoInfo).not.toHaveProperty("templates");
     } finally {
       await host.close();
     }

@@ -534,25 +534,27 @@ describe("executor selection over HTTP (FR3, FR8, FR9)", () => {
       },
     });
     const info = (await call(harness.base, "GET", "/info")).body as ServerInfo;
-    expect(info.executors?.map((executor) => executor.id)).toEqual(["paseo", "hc"]);
+    // FR1/FR16: registry order — `hc` first, then `paseo` — whatever the server default is.
+    expect(info.executors?.map((executor) => executor.id)).toEqual(["hc", "paseo"]);
 
-    const [serverDefault, other] = info.executors ?? [];
-    expect(serverDefault).toMatchObject({ id: "paseo", default: true, reachable: true });
-    expect(serverDefault?.capabilities).toEqual({
+    const [hcEntry, paseoEntry] = info.executors ?? [];
+    // This host was opened without `defaultExecutor`, so its own fallback (`paseo`) is the default.
+    expect(paseoEntry).toMatchObject({ id: "paseo", default: true, reachable: true });
+    expect(paseoEntry?.capabilities).toEqual({
       structuredOutput: true,
       quota: true,
       interactiveBlocked: false,
       scheduleSafe: true,
     });
     // The injected descriptor wins where it speaks and the documented default fills the rest.
-    expect(other).toMatchObject({
+    expect(hcEntry).toMatchObject({
       id: "hc",
       default: false,
       reachable: false,
       version: "0.9.1",
       error: "no hc socket",
     });
-    expect(other?.capabilities).toEqual({
+    expect(hcEntry?.capabilities).toEqual({
       structuredOutput: false,
       quota: true,
       interactiveBlocked: true,
@@ -571,14 +573,14 @@ describe("executor selection over HTTP (FR3, FR8, FR9)", () => {
     });
 
     const info = (await call(harness.base, "GET", "/info")).body as ServerInfo;
-    const [serverDefault, other] = info.executors ?? [];
+    const [hcEntry, paseoEntry] = info.executors ?? [];
     // Only a roster-shaped catalog fills the field: paseo's is a provider/model matrix.
-    expect(serverDefault?.id).toBe("paseo");
-    expect(serverDefault).not.toHaveProperty("templates");
+    expect(paseoEntry?.id).toBe("paseo");
+    expect(paseoEntry).not.toHaveProperty("templates");
     // One entry per canonical `hc/<template>`, sorted where it is published.
-    expect(other?.id).toBe("hc");
-    expect(other?.templates).toEqual(["hc/claude-opus-high", "hc/smoke"]);
-    expect(ExecutorInfoSchema.parse(other).templates).toEqual(["hc/claude-opus-high", "hc/smoke"]);
+    expect(hcEntry?.id).toBe("hc");
+    expect(hcEntry?.templates).toEqual(["hc/claude-opus-high", "hc/smoke"]);
+    expect(ExecutorInfoSchema.parse(hcEntry).templates).toEqual(["hc/claude-opus-high", "hc/smoke"]);
 
     // A response captured from a server that predates the field still satisfies the contract,
     // which is what "additive" means for the CLI, the plugin, and the web UI.
@@ -587,7 +589,7 @@ describe("executor selection over HTTP (FR3, FR8, FR9)", () => {
     };
     for (const executor of legacy.executors ?? []) delete executor["templates"];
     const parsed = ServerInfoSchema.parse(legacy);
-    expect(parsed.executors?.map((executor) => executor.id)).toEqual(["paseo", "hc"]);
+    expect(parsed.executors?.map((executor) => executor.id)).toEqual(["hc", "paseo"]);
     expect(parsed.executors?.every((executor) => executor.templates === undefined)).toBe(true);
   });
 });

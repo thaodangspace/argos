@@ -6,7 +6,8 @@ terminals.
 A repository declares its workflow as YAML (`.argos/playbooks/*.yaml`); a deterministic engine
 executes it against agents launched through a named **executor**, with parallel steps, human gates,
 loops, script steps, crash-safe resumption, and cron schedules that fire playbooks unattended.
-Paseo is the default and unchanged; `hc` runs the same playbook on herdr-core terminals, and the
+Paseo and herdr-core (`hc`) are both first-class; `hc` is the default substrate whenever a core is
+reachable, `paseo` otherwise, and the same playbook runs on either. The
 substrate a run started on is frozen in its run record. **No LLM decides control flow** — models
 only do the work inside a step.
 
@@ -84,15 +85,16 @@ reopens/resumes any interrupted runs.
 ```sh
 argos serve                 # 127.0.0.1:7676
 argos serve --port 7800     # explicit port
-argos serve --default-executor hc   # paseo and hc are registered; hc is the default
+argos serve --default-executor paseo   # both registered; hc is the default, paseo spelled out
 argos doctor                # storage, schema, port, Paseo, providers, executors, gates
 ```
 
 `argos serve` builds the executor registry at startup: `paseo` always, `hc` when a core answers
 `hello`/`server.status` within 5 s (otherwise one warning and `hc` is left out). It prints one line
-naming the registry, `[argos] executors: paseo (default), hc`, and `argos doctor` reports each
-executor's reachability and version. (The default is `--default-executor`, else `ARGOS_EXECUTOR`,
-else `paseo`.)
+naming the registry in registry order, `[argos] executors: hc (default), paseo`, and `argos doctor`
+reports each executor's reachability and version. (The default is `--default-executor`, else
+`ARGOS_EXECUTOR`, else `hc` when its adapter registered, else `paseo` — so a machine with no
+herdr-core behaves exactly as before.)
 
 On `hc`, each step also carries the `herdr.space`/`herdr.tab` labels, so the Herdr app shows it as
 a pane while it runs (space `argos`, one tab per run). No other client reads a label and an install
@@ -201,13 +203,20 @@ The wake time is computed once and stored durably, so restarting `argos serve` n
 nor shortens the pause (a `sleep` script is killed by a restart and starts over). A delay step
 has no step timeout and takes no `timeout`, `retries`, `prompt`, `script`, or `outputs`.
 
-## Executors: Paseo or herdr-core
+## Executors: herdr-core or Paseo
 
-A run executes on exactly one **executor**. Paseo is the default and behaves exactly as before;
-`hc` runs the same playbook on herdr-core terminals. The id is resolved once, at start:
+A run executes on exactly one **executor**. herdr-core (`hc`) is the default whenever a core is
+reachable, and Paseo is the other substrate: the same playbook runs on either, and `paseo` behaves
+exactly as it always did. The id is resolved once, at start:
 
 `argos run --executor` / `POST /runs {executor}` → the schedule's `executor` → the playbook's
-`executor` → the server's default.
+`executor` → the server's default (`--default-executor`, else `ARGOS_EXECUTOR`, else `hc` when its
+adapter registered, else `paseo`).
+
+Because `hc` is the default whenever a core answers at startup, a playbook that targets Paseo must
+pin `executor: paseo` (or `defaults.executor: paseo`, or start the server with `--default-executor
+paseo`). An unpinned Paseo-targeted playbook is refused `model_unavailable` before any task, naming
+the `hc/<...>` targets it would have needed — never silently run on the wrong substrate.
 
 ```yaml
 # .argos/playbooks/hello.yaml — or `executor:` in defaults or defaults/main.yaml
@@ -229,7 +238,7 @@ it. An id the server does not carry is `executor_unavailable` (422) **before** a
 or run-index entry exists.
 
 ```sh
-argos run hello --executor hc        # override for one run (an unknown id exits 1, no request)
+argos run hello --executor paseo     # override for one run (an unknown id exits 1, no request)
 argos schedule add nightly --cron "0 3 * * *" --executor hc   # pin an unattended run
 argos ls                             # appends `[executor hc]` for a non-default run
 ```

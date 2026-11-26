@@ -6,7 +6,10 @@
  * the Paseo plugin (through `rpc/contracts.ts`), and the durable host must agree on one normalizer,
  * and the plugin bundles the RPC contract but must never load a durable layer or an adapter.
  *
- * `paseo` is the default and the only id a run record may omit (FR5); `hc` is herdr-core.
+ * Two ids, two meanings of "default". `hc` (herdr-core terminals) is the substrate a server starts
+ * runs on when nothing overrides it ({@link PREFERRED_EXECUTOR_ID}); `paseo` is the legacy substrate
+ * and the only id a run record may **omit** ({@link DEFAULT_EXECUTOR_ID}), so every record written
+ * before the registry existed keeps its meaning and its bytes.
  */
 
 import { z } from "zod";
@@ -15,11 +18,26 @@ import { ArgosError } from "../errors.js";
 
 // ------------------------------------------------------------------ ids
 
-/** FR1: the canonical executor ids. Only these are ever stored or rendered. */
-export const EXECUTOR_IDS = ["paseo", "hc"] as const;
+/**
+ * FR1: the canonical executor ids, in registry order — `hc` first, then `paseo`. Every surface that
+ * renders the set (`/info`, `argos doctor`, the `argos serve` startup line, a refusal message) reads
+ * this order, so an operator sees the preferred substrate first.
+ */
+export const EXECUTOR_IDS = ["hc", "paseo"] as const;
 export type ExecutorId = (typeof EXECUTOR_IDS)[number];
 
-/** FR5: the default substrate; a run record omits `executor` when it is this one. */
+/**
+ * FR16: the substrate `argos serve` starts a run on when neither `--default-executor` nor
+ * `ARGOS_EXECUTOR` names one. It is only ever the default **when it is registered**: a server whose
+ * herdr-core probe failed falls back to `paseo`, the one executor the registry always carries.
+ */
+export const PREFERRED_EXECUTOR_ID: ExecutorId = "hc";
+
+/**
+ * FR5: the legacy substrate, and the only id a run record may omit — so a record written before
+ * `executor` existed still hydrates as `paseo`, and a paseo run's JSON stays byte-identical. This is
+ * deliberately **not** the server default any more; see {@link PREFERRED_EXECUTOR_ID}.
+ */
 export const DEFAULT_EXECUTOR_ID: ExecutorId = "paseo";
 
 /** The canonical id, as stored in a run record and in every read model (FR5, FR8). */
@@ -98,22 +116,22 @@ export type ExecutorInfo = z.infer<typeof ExecutorInfoSchema>;
  * FR9: the documented capability default per substrate, used when the host was opened without a
  * descriptor for that id (and as the base a descriptor overrides).
  *
- * Paseo: native structured output, provider quota, one-shot agents (nothing to answer), safe under
- * a schedule. `hc` (herdr-core): terminals, so declared outputs go through the fenced-JSON
- * fallback, no provider counters, an agent can ask for input (`blocked`), and a schedule is as safe
- * as the step deadline — its terminal program must report status to finish early.
+ * `hc` (herdr-core): terminals, so declared outputs go through the fenced-JSON fallback, no provider
+ * counters, an agent can ask for input (`blocked`), and a schedule is as safe as the step deadline —
+ * its terminal program must report status to finish early. Paseo: native structured output, provider
+ * quota, one-shot agents (nothing to answer), safe under a schedule.
  */
 export const DEFAULT_EXECUTOR_CAPABILITIES: Readonly<Record<ExecutorId, ExecutorCapabilities>> = {
-  paseo: {
-    structuredOutput: true,
-    quota: true,
-    interactiveBlocked: false,
-    scheduleSafe: true,
-  },
   hc: {
     structuredOutput: false,
     quota: false,
     interactiveBlocked: true,
+    scheduleSafe: true,
+  },
+  paseo: {
+    structuredOutput: true,
+    quota: true,
+    interactiveBlocked: false,
     scheduleSafe: true,
   },
 };
