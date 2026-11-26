@@ -756,6 +756,8 @@ describe("cancel / retry / gates (FR26)", () => {
     });
     const pending = detail?.gates.find((gate) => gate.status === "pending");
     expect(pending?.gateId).toBe("review:1");
+    // inbox FR1: the gate's open time survives the strict HTTP schema, not just the projection.
+    expect(typeof pending?.createdAt).toBe("number");
 
     const info = (await call(harness.base, "GET", "/info")).body as ServerInfo;
     expect(info.pendingGates).toHaveLength(1);

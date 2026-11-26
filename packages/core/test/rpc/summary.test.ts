@@ -5,15 +5,16 @@
 
 import { describe, expect, it } from "vitest";
 
-import { createRunRecord, next, type RunRecord } from "../../src/engine/index.js";
+import { createRunRecord, next, type GateRecord, type RunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import { buildPlaybookGraph } from "../../src/playbook/graph.js";
 import {
+  GateSummarySchema,
   RunDetailSchema,
   STEP_OUTPUT_VALUE_LIMIT,
   type RunDetail,
 } from "../../src/rpc/contracts.js";
-import { toRunDetail, toRunSummary } from "../../src/rpc/summary.js";
+import { toGateSummary, toRunDetail, toRunSummary } from "../../src/rpc/summary.js";
 
 const ir = playbook({
   id: "demo",
@@ -50,6 +51,53 @@ function settledRecord(): RunRecord {
 function detail(record: RunRecord): RunDetail {
   return toRunDetail({ taskId: "42", record }, { events: [] });
 }
+
+/** One pending step gate, as the engine stores it. */
+const gate: GateRecord = {
+  id: "review:1",
+  kind: "step",
+  stepId: "review",
+  question: "Ship it?",
+  choices: { approve: { label: "Approve", comment: "none" } },
+  status: "pending",
+  createdAt: 1_700_000_000_000,
+};
+
+describe("toGateSummary (gate age, inbox FR1)", () => {
+  it("projects the gate's createdAt", () => {
+    const summary = toGateSummary("run-1", gate);
+    expect(summary.createdAt).toBe(1_700_000_000_000);
+    // The strict public schema accepts the projection as-is (a stray key would fail here).
+    expect(GateSummarySchema.parse(summary).createdAt).toBe(1_700_000_000_000);
+  });
+
+  it("omits the key for a record that predates the field", () => {
+    const { createdAt: _dropped, ...rest } = gate;
+    const legacy = rest as unknown as GateRecord;
+
+    const summary = toGateSummary("run-1", legacy);
+    expect(summary).not.toHaveProperty("createdAt");
+    // Absent, never `null` or `0`: the JSON of a hand-built fixture stays stable.
+    expect(JSON.stringify(summary)).not.toContain("createdAt");
+  });
+
+  it("accepts a gate object without createdAt (an older server)", () => {
+    const older = {
+      runId: "run-1",
+      gateId: "review:1",
+      stepId: "review",
+      kind: "step",
+      question: "Ship it?",
+      choices: { approve: { label: "Approve", comment: "none" } },
+      status: "pending",
+    };
+
+    expect(GateSummarySchema.parse(older)).not.toHaveProperty("createdAt");
+    expect(GateSummarySchema.parse({ ...older, createdAt: 1_700_000_000_000 }).createdAt).toBe(
+      1_700_000_000_000,
+    );
+  });
+});
 
 describe("toRunDetail (step logs)", () => {
   it("carries attempts, outcome, and declared outputs per step", () => {

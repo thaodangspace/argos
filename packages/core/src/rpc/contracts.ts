@@ -504,6 +504,13 @@ export const GateSummarySchema = z.strictObject({
   question: z.string(),
   choices: z.record(z.string(), GateChoiceSummarySchema),
   status: z.enum(["pending", "decided"]),
+  /**
+   * When the gate opened (`RunRecord.gates[n].createdAt`, inbox FR1), so a client can order gates
+   * by what has waited longest. Optional because it is additive: a summary built by an older
+   * server (and a record written before the field) omits it, and `ARGOS_RPC_VERSION` moves only
+   * for breaking changes, which an absent key is not.
+   */
+  createdAt: z.number().optional(),
   decision: z.string().min(1).optional(),
   decidedBy: z.string().min(1).optional(),
   decidedVia: z.string().min(1).optional(),

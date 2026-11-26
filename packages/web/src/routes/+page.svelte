@@ -37,11 +37,12 @@
     toggleHidden,
     writeHidden,
   } from "#lib/state/hidden-workflows";
-  import { RunsStore } from "#lib/state/runs.svelte";
+  import { runsHub } from "#lib/state/runs-hub.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
 
   const api = createApi();
-  const store = new RunsStore();
+  // The whole app shares one stream: the layout's anchor lease plus this route's lease (inbox FR6).
+  const store = runsHub.store;
   const storage = browserStorage();
 
   let now = $state(Date.now());
@@ -97,14 +98,14 @@
     list = readSearch();
     hidden = readHidden(storage);
     void loadSchedules();
-    store.start(api);
+    const lease = runsHub.acquire(api);
     const onPop = (): void => {
       list = readSearch();
     };
     window.addEventListener("popstate", onPop);
     return () => {
       window.removeEventListener("popstate", onPop);
-      store.stop();
+      lease.release();
     };
   });
 

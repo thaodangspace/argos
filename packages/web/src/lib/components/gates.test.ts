@@ -7,6 +7,7 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 
+import type { GateSummary } from "@thaodangspace/argos-core/rpc/contracts";
 import { gateView, type GateView } from "@thaodangspace/argos-core/view";
 
 import GateCard from "./GateCard.svelte";
@@ -69,5 +70,33 @@ describe("GateCard", () => {
     });
     expect(screen.queryAllByRole("button")).toHaveLength(0);
     expect(screen.getByText("approve")).toBeTruthy();
+  });
+
+  it("qualifies the question id and its label with the run (inbox FR7)", () => {
+    const summary = (runId: string, question: string): GateSummary => ({
+      runId,
+      gateId: "fix:1",
+      stepId: "fix",
+      kind: "step",
+      question,
+      choices: { approve: { label: "Approve", comment: "optional" } },
+      status: "pending",
+    });
+    const runA = gateView(summary("01J0000000000000000000000A", "Fix run A?"));
+    const runB = gateView(summary("01J0000000000000000000000B", "Fix run B?"));
+    render(GateCard, { props: { gate: runA, onDecide: vi.fn() } });
+    render(GateCard, { props: { gate: runB, onDecide: vi.fn() } });
+
+    const articles = [...document.querySelectorAll("article.gate")];
+    expect(articles).toHaveLength(2);
+    const labelledBy = articles.map((article) => article.getAttribute("aria-labelledby"));
+    expect(labelledBy).toEqual([
+      "gate-01J0000000000000000000000A-fix:1",
+      "gate-01J0000000000000000000000B-fix:1",
+    ]);
+    expect(new Set(labelledBy).size).toBe(2);
+    expect(articles.map((article) => article.querySelector("p.question")?.id)).toEqual(labelledBy);
+    // A bare `gate-<gateId>` id would collide on an inbox that holds both runs.
+    expect(document.querySelectorAll("#gate-fix\\:1")).toHaveLength(0);
   });
 });

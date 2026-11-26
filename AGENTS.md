@@ -99,9 +99,27 @@ while anything is in use, and offers `✕` per workflow: hiding is a **per-brows
 preference** (`lib/state/hidden-workflows.ts`), so nothing is deleted and a hidden schedule keeps
 firing. The server never learns about it, which is exactly why it is not called "archive".
 
+**The gate inbox is one list over one shared runs stream.** `lib/gate-inbox.ts` is the pure,
+web-local projection: `gateInbox(runs, { now, timeZone, deciding })` returns `GateInboxEntry[]`
+oldest first (by `createdAt`, then run id, then gate id, so a re-render never reshuffles), each
+entry joining `gateView()` to its run's playbook, project, trigger, executor, and step, with the
+age clamped at `0` and formatted by a local `formatAge` that prints at most two units (`3d 4h`,
+`3h 12m`, `2m`, `45s`) because the shared `formatDuration` stops at hours. It takes no
+hidden-workflow input on purpose: the rail's `✕` hides a list row, never work that waits for a
+person. The stream behind it is `lib/state/runs-hub.svelte.ts`: `RunsHub`/`RunsLease` over one
+reference-counted `RunsStore`, with the singleton `runsHub` — `routes/+layout.svelte` holds the
+**anchor** lease for the life of the app and renders `components/GateBadge.svelte` with
+`pendingGates(runsHub.store.runs).length`, while the list, run, and `routes/gates/+page.svelte`
+routes acquire a lease on mount and release it on teardown, so the app opens one SSE connection and
+the badge, the list, and the inbox are one value. `/ui/gates` renders
+`components/GateInbox.svelte` (one `GateCard` per entry, one page-level `RunActions`, the title
+`Gates · Argos`, and a 1 s ticker that runs only while an entry exists); a `GateCard`'s
+`id`/`aria-labelledby` are `gate-<runId>-<gateId>`, because one page can hold the same `gateId` of
+two runs.
+
 **The timezone picker is the topbar's, and it is not URL state.**
 `components/TimeZoneSelect.svelte` (options from `listTimeZones()`, Local first) writes
-`state/timezone.svelte.ts`, one module store both pages read; the choice persists in this browser's
+`state/timezone.svelte.ts`, one module store every page reads; the choice persists in this browser's
 `localStorage` (`argos.ui.timezone`, empty = follow the browser) exactly like the theme and the
 hidden list, because it is a *rendering* choice, not a *scope* — the URL answers "which runs", this
 answers "which clock". The default is the browser's own zone, so a reader eight hours east of
@@ -1060,8 +1078,11 @@ Contract highlights: `StartRunRequest`, `DecideGateRequest`, `RunSummary`, `RunD
 `ServerInfo`, `DoctorReport`, and the schedule shapes (`ScheduleCreateRequest`,
 `ScheduleEditRequest`, `ScheduleSummary`, `ScheduleDetail`, `ScheduleFire`). `RunSummary`/
 `RunDetail` never contain `ir`, prompts, agent messages, transcripts, or credential-like inputs;
-`RunDetail.gates` comes from the gate documents (fresher than the mirror after a decision). The
-executor surfaces are additive: `StartRunRequest.executor?` (normalized server-side; unknown
+`RunDetail.gates` comes from the gate documents (fresher than the mirror after a decision).
+`GateSummary.createdAt?` is the additive field the web inbox orders by: `toGateSummary` projects
+the gate record's open time, a record that predates the field omits the key rather than writing
+`null`, an older server still parses, and `ARGOS_RPC_VERSION` (1) moves only for a breaking change.
+The executor surfaces are additive: `StartRunRequest.executor?` (normalized server-side; unknown
 `invalid_request`, unregistered `executor_unavailable`), `RunSummary.executor?` (present only when
 not `paseo`), `ServerInfo.executors?: ExecutorInfo[]`, and `ScheduleSummary.executor?`.
 `ExecutorInfo.templates?` is the live roster of an executor whose catalog **is** a template roster
@@ -1106,7 +1127,7 @@ by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunId
 | `GET /events` | SSE: one `snapshot` then `run` per changed mirror; `: ping` heartbeat; commit-driven |
 | `GET /info`, `GET /health` | doctor data / liveness; `/info` includes `executors[]` (`{id, default, reachable, version?, capabilities, templates?}`) |
 | `GET /playbooks?cwd=` | discovery for the UI's start form: `{cwd, playbooks:[{id,file,hash,inputs,executor?,isolation?,stepCount}], errors}`; a broken playbook is a per-file `errors[]` entry; `cwd` is validated like `POST /runs` |
-| `GET /ui`, `/ui/*` | the embedded SPA (static build, `paths.base = "/ui"`): shell + assets, extension-less deep links fall back to `index.html`, a missing asset is 404, `_app/immutable/*` is immutable-cached. HTML responses set the per-process `HttpOnly; SameSite=Strict` session cookie (spec FR3); API auth accepts that cookie or the bearer token, and a cookie-authenticated write also requires `Origin` = `Host`. `GET /` redirects to `/ui/` only when the UI is present |
+| `GET /ui`, `/ui/*` | the embedded SPA (static build, `paths.base = "/ui"`): shell + assets, extension-less deep links fall back to `index.html`, a missing asset is 404, `_app/immutable/*` is immutable-cached. HTML responses set the per-process `HttpOnly; SameSite=Strict` session cookie (spec FR3); API auth accepts that cookie or the bearer token, and a cookie-authenticated write also requires `Origin` = `Host`. `GET /` redirects to `/ui/` only when the UI is present. `/ui/gates` is one of those client routes with no API route behind it: the inbox reads `GET /runs`, whose summaries already carry each run's gates |
 
 `POST /runs` and every schedule fire share `resolveRunRequest` (`durable/run-request.ts`): `cwd`
 validation, then `loadPlaybook`, then input coercion/defaults. `POST /runs` defaults `cwd` to the
@@ -1559,6 +1580,12 @@ suite green.
   the Paseo panel for removal). It reads the schedule roster only to label a workflow "in use" — it
   cannot create, pause, or remove one. It renders the same read model as the CLI, so it never shows
   agent prompts or transcripts — a step's log ends at its declared outputs, attempts, and history.
+  The gate inbox (`/ui/gates`) is one oldest-first list with no filter, pagination, bulk action, or
+  snooze, and it has no API route of its own — it is a client-side join over `GET /runs`. Its order
+  and labels are exact only against a server that projects `GateSummary.createdAt`; an older server
+  falls back to `run.updatedAt` per gate, which makes the order approximate because a gated run can
+  keep advancing other steps. The rail's `✕` never hides an inbox card: hiding hides list rows, not
+  work that waits for a person.
 - **Hiding a workflow in the UI is a view preference, not an archive.** `✕` in the rail writes a
   workflow id into this browser's `localStorage`; the workflow keeps its schedule and can still be
   started from the CLI, another browser profile, or the Paseo panel, and the hidden list is not

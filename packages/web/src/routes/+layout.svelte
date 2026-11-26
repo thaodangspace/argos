@@ -1,7 +1,14 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+
+  import { pendingGates } from "@thaodangspace/argos-core/view";
+
+  import { createApi } from "#lib/api";
+  import GateBadge from "#lib/components/GateBadge.svelte";
   import StartRunDialog from "#lib/components/StartRunDialog.svelte";
   import TimeZoneSelect from "#lib/components/TimeZoneSelect.svelte";
   import { browserStorage } from "#lib/state/hidden-workflows";
+  import { runsHub } from "#lib/state/runs-hub.svelte";
   import { ThemeStore } from "#lib/state/theme.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { href, runHref } from "#lib/paths";
@@ -17,6 +24,15 @@
   timeZoneStore.init(storage);
 
   let startOpen = $state(false);
+
+  // The anchor lease (inbox FR6): the layout keeps the shared runs stream open for the whole app,
+  // so a route's own lease and the header badge read one value from one SSE connection.
+  onMount(() => {
+    const lease = runsHub.acquire(createApi());
+    return () => {
+      lease.release();
+    };
+  });
 
   async function started(runId: string): Promise<void> {
     startOpen = false;
@@ -38,6 +54,9 @@
     zones={timeZoneStore.choices}
     onSelect={(zone) => timeZoneStore.select(zone, storage)}
   />
+  <!-- The badge reads the same store the anchor lease above keeps open, so its count is live on
+       every page. It has no hidden-workflow input (inbox FR9): hiding a row never hides waiting work. -->
+  <GateBadge count={pendingGates(runsHub.store.runs).length} />
   <button type="button" class="cta" onclick={() => (startOpen = true)}>Run workflow</button>
   <button
     type="button"
