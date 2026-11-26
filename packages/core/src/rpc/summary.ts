@@ -131,6 +131,9 @@ export function toGateSummary(
   const decidedBy = document?.decidedBy ?? gate.decidedBy;
   const decidedVia = document?.decidedVia ?? gate.decidedVia;
   const decidedAt = document?.decidedAt ?? gate.decidedAt;
+  // inbox FR1: an older record predates the field, so the key is absent rather than null and a
+  // summary of a hand-built fixture stays byte-identical.
+  const createdAt: number | undefined = gate.createdAt;
   const choices: Record<string, GateSummary["choices"][string]> = {};
   for (const [id, choice] of Object.entries(gate.choices)) {
     choices[id] = {
@@ -149,6 +152,7 @@ export function toGateSummary(
     question: gate.question,
     choices,
     status: decided ? "decided" : "pending",
+    ...(createdAt === undefined ? {} : { createdAt }),
     ...(decision === undefined || decision === null ? {} : { decision }),
     ...(decidedBy === undefined || decidedBy === null ? {} : { decidedBy }),
     ...(decidedVia === undefined || decidedVia === null ? {} : { decidedVia }),
