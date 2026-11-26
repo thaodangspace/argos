@@ -2,7 +2,8 @@
  * Style guard for the web app (spec FR17, FR18): hand-written CSS must not come back.
  *
  * Five rules; rule 4 is the stale-exemption check that keeps the allowlist honest:
- *   1. no `<style>` block and no `style=` attribute in any `.svelte` under `src/`. A path in
+ *   1. no `<style>` block, `style=` attribute, or `style:` directive in any `.svelte` under `src/`,
+ *      and `src/app.css` is the only `.css` file there. A path in
  *      `STYLE_ALLOWLIST` would keep exactly **one** `<style>` block — the one it has today; a second
  *      one is a new stylesheet already. The list is empty, and its stale rule below keeps it honest;
  *   2. no class built by interpolation (`tone-{tone}`) — Tailwind's scanner cannot see it, so the
@@ -101,6 +102,10 @@ function styleOffences(text: string): { index: number; what: string }[] {
   for (const match of text.matchAll(/(?<![-\w])style\s*=/g)) {
     offences.push({ index: match.index, what: "style= attribute" });
   }
+  // Svelte's inline-style directive: `style:color={x}` is hand-written CSS in a wrapper.
+  for (const match of text.matchAll(/(?<![-\w])style:[a-z-]+=/g)) {
+    offences.push({ index: match.index, what: "style: directive" });
+  }
   return offences;
 }
 
@@ -189,12 +194,21 @@ describe("web style guard", () => {
     for (const file of SVELTE_FILES) {
       // The same set: a file still allowed its own `<style>` is still allowed its interpolation.
       if (allowed.has(file.path)) continue;
-      for (const match of file.text.matchAll(/class="([^"]*)"/g)) {
-        const value = match[1] ?? "";
+      // Both quote styles: `class='…'` is as valid a Svelte attribute as `class="…"`.
+      for (const match of file.text.matchAll(/class=(?:"([^"]*)"|'([^']*)')/g)) {
+        const value = match[1] ?? match[2] ?? "";
         if (!isInterpolatedClass(value)) continue;
         offenders.push(message(file.path, lineOf(file.text, match.index), "interpolated class name"));
       }
     }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps src/app.css the only stylesheet under src", () => {
+    // Spec FR3: one CSS entry. A second `.css` file is a second stylesheet, whichever route imports it.
+    const offenders = FILES.filter(
+      (file) => file.path.endsWith(".css") && file.path !== "src/app.css",
+    ).map((file) => message(file.path, 1, "extra stylesheet"));
     expect(offenders).toEqual([]);
   });
 
