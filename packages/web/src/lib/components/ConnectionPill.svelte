@@ -1,4 +1,7 @@
 <script lang="ts">
+  import type { StatusTone } from "@thaodangspace/argos-core/view";
+
+  import { TONE_BG, toneClass } from "#lib/ui/tone";
   import type { EventStatus } from "../events.js";
 
   let { status }: { status: EventStatus } = $props();
@@ -12,72 +15,29 @@
           ? "Reconnecting"
           : "Disconnected",
   );
+
+  const tone: StatusTone = $derived(
+    status === "open" ? "success" : status === "closed" ? "danger" : "warning",
+  );
+
+  // Skeleton's tonal presets are bare (`preset-tonal-warning`, never `preset-tonal-warning-500`);
+  // one literal per tone, so the scanner sees every class (spec FR4).
+  const PRESET: Readonly<Record<StatusTone, string>> = {
+    neutral: "preset-tonal",
+    accent: "preset-tonal-primary",
+    success: "preset-tonal-success",
+    warning: "preset-tonal-warning",
+    danger: "preset-tonal-error",
+  };
+
+  /** The dot only breathes while a connection is being (re)established. */
+  const blinks = $derived(status === "connecting" || status === "reconnecting");
 </script>
 
-<span
-  class="pill"
-  class:open={status === "open"}
-  class:warn={status === "connecting" || status === "reconnecting"}
-  class:down={status === "closed"}
-  role="status"
-  aria-live="polite"
->
-  <span class="dot"></span>
+<span class={["badge", toneClass(PRESET, tone)]} data-tone={tone} role="status" aria-live="polite">
+  <span
+    class={["size-1.5 flex-none rounded-full", toneClass(TONE_BG, tone), blinks && "animate-pulse"]}
+    aria-hidden="true"
+  ></span>
   {label}
 </span>
-
-<style>
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 2px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--muted);
-  }
-
-  .open {
-    color: var(--success);
-    border-color: color-mix(in srgb, var(--success) 40%, transparent);
-  }
-  .open .dot {
-    background: var(--success);
-  }
-
-  .warn {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 40%, transparent);
-  }
-  .warn .dot {
-    background: var(--warning);
-    animation: blink 1.4s ease-in-out infinite;
-  }
-
-  .down {
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  }
-  .down .dot {
-    background: var(--danger);
-  }
-
-  @keyframes blink {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.3;
-    }
-  }
-</style>

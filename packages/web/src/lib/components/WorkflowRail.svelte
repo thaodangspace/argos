@@ -8,8 +8,14 @@
    * one-off runs). Idle entries stay collapsed unless nothing is in use, and any workflow can be
    * hidden from the rail (`onHide`, remembered in `localStorage` by the page) — hiding is a view
    * preference, so a hidden schedule keeps firing and nothing is deleted.
+   *
+   * The idle toggle is a native `<button aria-expanded aria-controls>` with a conditional render, not
+   * a Skeleton `Collapsible`: spec FR12 caps the Zag escalations at three and this surface carries no
+   * behaviour a disclosure button does not already have.
    */
   import type { FacetOption, RunFacets, RunListQuery } from "@thaodangspace/argos-core/view";
+
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
 
   let {
     facets,
@@ -41,6 +47,15 @@
   // A server whose workflows are all idle (no schedules yet) must not show an empty rail.
   const idleShown = $derived(idleOpen || live.length === 0);
 
+  // Literal class strings (never built by concatenation): Tailwind's scanner reads this file's text.
+  const HEADING =
+    "mt-2 mb-0.5 px-1.5 text-[11px] font-semibold uppercase tracking-[0.04em] text-surface-600-400";
+  const ROW =
+    "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-surface-700-300 hover:bg-surface-200-800/60 aria-[current=true]:bg-primary-500/15 aria-[current=true]:font-semibold aria-[current=true]:text-surface-950-50";
+  const WORKFLOW_ROW =
+    "flex w-full min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-surface-700-300 hover:bg-surface-200-800/60 aria-[current=true]:bg-primary-500/15 aria-[current=true]:font-semibold aria-[current=true]:text-surface-950-50";
+  const COUNT = "inline-flex items-center gap-1 text-[12px] tabular-nums text-surface-600-400";
+
   /**
    * The rail shows one count per entry: a glyph next to a number read as a count of that glyph
    * (`✕ 48` looked like forty-eight failures). The breakdown is the tooltip instead.
@@ -54,21 +69,23 @@
   }
 </script>
 
-<nav class="rail" aria-label="Run scope">
+<nav
+  class="sticky top-3 flex flex-col gap-1 rounded-lg border border-surface-200-800 bg-surface-100-900 p-2 text-[13px]"
+  aria-label="Run scope"
+>
   <button
     type="button"
-    class="row scope"
-    class:active={unscoped}
+    class={ROW}
     aria-current={unscoped ? "true" : undefined}
     onclick={() => onSelect({ workflow: undefined, project: undefined })}
   >
-    <span class="name">All workflows</span>
-    <span class="count">{total}</span>
+    <span class="truncate">All workflows</span>
+    <span class={COUNT}>{total}</span>
   </button>
 
   {#if live.length > 0}
-    <section aria-labelledby="rail-workflows">
-      <h2 id="rail-workflows">Workflows</h2>
+    <section class="flex flex-col gap-1" aria-labelledby="rail-workflows">
+      <h2 id="rail-workflows" class={HEADING}>Workflows</h2>
       {#each live as entry (entry.id)}
         {@render workflowRow(entry)}
       {/each}
@@ -76,24 +93,24 @@
   {/if}
 
   {#if idle.length > 0}
-    <section aria-label="Idle workflows">
+    <section class="flex flex-col gap-1" aria-label="Idle workflows">
       {#if live.length > 0}
         <button
           type="button"
-          class="row section-toggle"
+          class="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-[0.04em] text-surface-600-400 hover:bg-surface-200-800/60"
           aria-expanded={idleShown}
           aria-controls="rail-idle-list"
           onclick={() => (idleOpen = !idleOpen)}
         >
-          <span class="heading">Idle</span>
-          <span class="count">{idle.length}</span>
+          <span>Idle</span>
+          <span class={COUNT}>{idle.length}</span>
         </button>
       {:else}
-        <h2>Workflows</h2>
+        <h2 class={HEADING}>Workflows</h2>
       {/if}
 
       {#if idleShown}
-        <div id="rail-idle-list">
+        <div id="rail-idle-list" class="flex flex-col gap-1">
           {#each idle as entry (entry.id)}
             {@render workflowRow(entry)}
           {/each}
@@ -103,20 +120,23 @@
   {/if}
 
   {#if facets.projects.length > 1}
-    <section aria-labelledby="rail-projects">
-      <h2 id="rail-projects">Projects</h2>
+    <section class="flex flex-col gap-1" aria-labelledby="rail-projects">
+      <h2 id="rail-projects" class={HEADING}>Projects</h2>
       {#each facets.projects as entry (entry.id)}
         <button
           type="button"
-          class="row scope"
-          class:active={query.project === entry.id}
+          class={ROW}
           aria-current={query.project === entry.id ? "true" : undefined}
           title={entry.id}
           onclick={() => onSelect({ project: entry.id })}
         >
-          <span class="name">{entry.id}</span>
-          <span class="count" title={breakdown(entry)}>
-            {#if entry.active > 0}<span class="dot tone-accent" aria-hidden="true">●</span>{/if}
+          <span class="truncate">{entry.id}</span>
+          <span class={COUNT} title={breakdown(entry)}>
+            {#if entry.active > 0}<span
+                class="text-[9px] {toneClass(TONE_TEXT, 'accent')}"
+                data-tone="accent"
+                aria-hidden="true">●</span
+              >{/if}
             {entry.count}
           </span>
         </button>
@@ -125,33 +145,39 @@
   {/if}
 
   {#if hiddenCount > 0}
-    <button type="button" class="footer" onclick={onShowHidden}>
+    <button
+      type="button"
+      class="mt-1 rounded-md border border-surface-200-800 px-2 py-1 text-left text-[11px] text-surface-600-400 hover:bg-surface-200-800/60 hover:text-surface-950-50"
+      onclick={onShowHidden}
+    >
       {hiddenCount} hidden · Show
     </button>
   {/if}
 </nav>
 
 {#snippet workflowRow(entry: FacetOption)}
-  <div class="wrap" class:active={query.workflow === entry.id}>
+  <div class="group flex items-center rounded-md">
     <button
       type="button"
-      class="row scope"
-      class:active={query.workflow === entry.id}
-      class:idle={!entry.live}
+      class={WORKFLOW_ROW}
       aria-current={query.workflow === entry.id ? "true" : undefined}
       title={entry.id}
       onclick={() => onSelect({ workflow: entry.id })}
     >
-      <span class="name">{entry.id}</span>
-      <span class="count" title={breakdown(entry)}>
-        {#if entry.active > 0}<span class="dot tone-accent" aria-hidden="true">●</span>{/if}
+      <span class="truncate {entry.live ? '' : 'text-surface-600-400'}">{entry.id}</span>
+      <span class={COUNT} title={breakdown(entry)}>
+        {#if entry.active > 0}<span
+            class="text-[9px] {toneClass(TONE_TEXT, 'accent')}"
+            data-tone="accent"
+            aria-hidden="true">●</span
+          >{/if}
         {entry.count}
       </span>
     </button>
     {#if query.workflow !== entry.id}
       <button
         type="button"
-        class="hide"
+        class="btn-icon shrink-0 text-[11px] opacity-40 hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100"
         aria-label={`Hide ${entry.id}`}
         title={`Hide ${entry.id} from this rail (nothing is deleted)`}
         onclick={() => onHide(entry.id)}
@@ -161,138 +187,3 @@
     {/if}
   </div>
 {/snippet}
-
-<style>
-  .rail {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-    padding: 6px;
-    position: sticky;
-    top: 12px;
-  }
-
-  h2 {
-    margin: 10px 6px 2px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--muted);
-  }
-
-  .heading {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--muted);
-  }
-
-  .wrap {
-    display: flex;
-    align-items: center;
-    border-radius: 6px;
-  }
-
-  .wrap:hover,
-  .wrap.active {
-    background: var(--accent-soft);
-  }
-
-  .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    width: 100%;
-    padding: 5px 8px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    font-size: 13px;
-    text-align: left;
-  }
-
-  .scope:hover {
-    background: var(--surface-hover);
-  }
-
-  .wrap .scope,
-  .wrap .scope:hover {
-    background: transparent;
-  }
-
-  .scope.active {
-    color: var(--text);
-    font-weight: 600;
-  }
-
-  .scope.idle .name {
-    color: var(--muted);
-  }
-
-  .section-toggle:hover {
-    background: var(--surface-hover);
-  }
-
-  .name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .count {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--muted);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .dot {
-    font-size: 9px;
-  }
-
-  /* Reachable by pointer, keyboard and touch: dimmed until the row is touched. */
-  .hide {
-    flex: 0 0 auto;
-    padding: 0 6px;
-    border: 0;
-    background: transparent;
-    color: var(--muted);
-    opacity: 0.4;
-    cursor: pointer;
-    font-size: 11px;
-    line-height: 1;
-  }
-
-  .wrap:hover .hide,
-  .hide:focus-visible {
-    opacity: 1;
-    color: var(--text);
-  }
-
-  .footer {
-    margin-top: 6px;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 11px;
-    text-align: left;
-  }
-
-  .footer:hover {
-    color: var(--text);
-    background: var(--surface-hover);
-  }
-</style>

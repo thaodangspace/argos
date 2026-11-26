@@ -43,6 +43,8 @@
   } = $props();
 
   const entries = $derived(gateInbox(runs, { now, timeZone, deciding }));
+
+  const CONTEXT = "mb-1.5 flex flex-wrap items-baseline gap-1.5 text-[12px] text-surface-600-400";
 </script>
 
 {#if entries.length === 0}
@@ -52,29 +54,33 @@
       hint="A gate opens when a playbook step asks for a human decision, and it leaves this page the moment someone decides it. In a shell, `argos gates` lists the same queue."
     />
   {:else}
-    <div class="loading" aria-busy="true">Loading gates…</div>
+    <div class="p-8 text-center text-surface-600-400" aria-busy="true">Loading gates…</div>
   {/if}
 {:else}
-  <ul class="inbox" aria-label="Pending gates">
+  <ul class="m-0 list-none p-0" aria-label="Pending gates">
     {#each entries as entry (entry.key)}
-      <li class="entry">
-        <div class="context">
-          <span class="playbook">{entry.run.playbookId}</span>
-          <span class="dot" aria-hidden="true">·</span>
-          <span class="project">{entry.run.project}</span>
-          <span class="dot" aria-hidden="true">·</span>
-          <span class="run-id">#{shortId(entry.run.id)}</span>
-          <span class="dot" aria-hidden="true">·</span>
-          <span class="trigger">{RUN_TRIGGER_LABELS[entry.run.triggerFacet]}</span>
-          <span class="executor">{entry.run.executor}</span>
-          <span class="spacer"></span>
-          <span class="age">waiting {entry.ageLabel}</span>
+      <li class="mb-4">
+        <div class={CONTEXT}>
+          <span class="font-semibold text-surface-950-50">{entry.run.playbookId}</span>
+          <span class="opacity-50" aria-hidden="true">·</span>
+          <span>{entry.run.project}</span>
+          <span class="opacity-50" aria-hidden="true">·</span>
+          <span class="font-mono">#{shortId(entry.run.id)}</span>
+          <span class="opacity-50" aria-hidden="true">·</span>
+          <span class="capitalize">{RUN_TRIGGER_LABELS[entry.run.triggerFacet]}</span>
+          <span class="rounded bg-surface-500/15 px-1.5" data-tone="neutral"
+            >{entry.run.executor}</span
+          >
+          <span class="flex-1"></span>
+          <span class="font-mono">waiting {entry.ageLabel}</span>
           {#if entry.sinceLabel !== ""}
-            <span class="since">{entry.sinceLabel}</span>
+            <span class="font-mono text-surface-600-400">{entry.sinceLabel}</span>
           {/if}
         </div>
-        <p class="open">
-          <a href={stepHref(entry.run.id, entry.run.stepId)}>Open step {entry.run.stepId}</a>
+        <p class="mt-0 mb-1.5 text-[12px]">
+          <a class="text-primary-700-300 hover:underline" href={stepHref(entry.run.id, entry.run.stepId)}
+            >Open step {entry.run.stepId}</a
+          >
         </p>
         <GateCard
           gate={entry.gate}
@@ -84,69 +90,3 @@
     {/each}
   </ul>
 {/if}
-
-<style>
-  .loading {
-    padding: 32px;
-    text-align: center;
-    color: var(--muted);
-  }
-
-  .inbox {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .entry {
-    margin-bottom: 16px;
-  }
-
-  .context {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 6px;
-    margin-bottom: 6px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  .playbook {
-    color: var(--text);
-    font-weight: 600;
-  }
-
-  .run-id,
-  .age,
-  .since {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  }
-
-  .executor {
-    padding: 0 6px;
-    border-radius: 4px;
-    background: var(--neutral-soft);
-  }
-
-  .spacer {
-    flex: 1;
-  }
-
-  .since {
-    color: var(--muted);
-  }
-
-  .open {
-    margin: 0 0 6px;
-    font-size: 12px;
-  }
-
-  .open a {
-    color: var(--accent);
-  }
-
-  .dot {
-    color: var(--muted);
-  }
-</style>

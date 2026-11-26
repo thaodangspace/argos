@@ -9,18 +9,17 @@
  */
 
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GateSummary, RunSummary } from "@thaodangspace/argos-core/rpc/contracts";
 
 import { ArgosApiError, type ArgosApi } from "#lib/api";
 import { runHref } from "#lib/paths";
 import { RunActions } from "#lib/run-actions.svelte";
-import { ToastStore } from "#lib/state/toasts.svelte";
+import { toaster, ToastStore } from "#lib/state/toasts.svelte";
 
 import GateBadge from "./GateBadge.svelte";
 import GateInbox from "./GateInbox.svelte";
-import Toasts from "./Toasts.svelte";
 
 const NOW = 1_700_000_100_000;
 const RUN_A = "01J0000000000000000000000A";
@@ -174,10 +173,17 @@ function cards(): HTMLElement[] {
 }
 
 function questions(): (string | null | undefined)[] {
-  return cards().map((card) => card.querySelector("p.question")?.textContent);
+  return cards().map((card) => card.querySelector('[id^="gate-"]')?.textContent);
 }
 
 describe("GateInbox", () => {
+  // The toaster is module-level (the layout renders one `Toast.Group` for the whole app), so a
+  // leftover toast from one case would be visible in the next. `remove()` is Zag's immediate clear:
+  // `dismiss()` animates out and keeps the entry until the machine's remove delay elapses.
+  afterEach(() => {
+    toaster.remove();
+  });
+
   it("lists three pending gates over two runs, oldest first", () => {
     mountInbox(harness());
     expect(questions()).toEqual([
@@ -265,7 +271,6 @@ describe("GateInbox", () => {
     });
     const decide = vi.spyOn(test.api, "decideGate");
     mountInbox(test);
-    render(Toasts, { props: { store: test.toasts } });
 
     const card = cards()[0] as HTMLElement;
     await fireEvent.click(within(card).getByRole("button", { name: /Approve/ }));
@@ -275,10 +280,28 @@ describe("GateInbox", () => {
 
     expect(test.toasts.items).toHaveLength(1);
     expect(test.toasts.items[0]).toMatchObject({ code: "gate_already_decided", tone: "info" });
-    expect(screen.getByRole("status").textContent).toContain("already decided");
+    // The page's own store is what recorded it; the rendered toast is the shared toaster's. The
+    // title is the message and the description is the stable code — never prose in the description.
+    expect(toaster.getVisibleToasts()[0]).toMatchObject({
+      title: "This gate was already decided; refreshing.",
+      description: "gate_already_decided",
+      type: "info",
+    });
     // Refreshing is the response; a retry would be a second POST for a gate someone else won.
     expect(decide).toHaveBeenCalledTimes(1);
     expect(test.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards a pushed toast to the shared toaster (title = message, description = code)", () => {
+    const toasts = new ToastStore();
+    toasts.push("x", { code: "y", tone: "error" });
+    expect(toaster.getVisibleToasts()[0]).toMatchObject({
+      title: "x",
+      description: "y",
+      type: "error",
+    });
+    toasts.clear();
+    expect(toaster.getVisibleToasts()).toEqual([]);
   });
 
   it("names `argos gates` in the empty state (inbox FR10)", () => {

@@ -204,9 +204,9 @@ describe("RunGraph", () => {
     });
     const byId = new Map(nodes(container).map((node) => [node.dataset["nodeId"], node]));
 
-    expect(byId.get("plan")?.classList.contains("selected")).toBe(true);
-    expect(byId.get("review")?.classList.contains("skipped")).toBe(true);
-    expect(byId.get("impl")?.classList.contains("skipped")).toBe(false);
+    expect(byId.get("plan")?.dataset["selected"]).toBe("true");
+    expect(byId.get("review")?.dataset["skipped"]).toBe("true");
+    expect(byId.get("impl")?.dataset["skipped"]).toBeUndefined();
   });
 
   it("draws a ring and an n pending badge on a node with a pending gate", () => {
@@ -214,11 +214,9 @@ describe("RunGraph", () => {
       props: { graph, steps: stepsOf(), selectedId: null, onSelect: vi.fn() },
     });
     const impl = nodes(container).find((node) => node.dataset["nodeId"] === "impl");
-    expect(impl?.querySelector(".gate-ring")).not.toBeNull();
-    expect(impl?.querySelector(".gate-count")?.textContent?.trim()).toBe("1 pending");
-    expect(
-      container.querySelector("[data-node-id='plan'] .gate-ring"),
-    ).toBeNull();
+    expect(impl?.querySelector('[data-gate="ring"]')).not.toBeNull();
+    expect(impl?.querySelector("[data-gate-count]")?.textContent?.trim()).toBe("1 pending");
+    expect(container.querySelector("[data-node-id='plan'] [data-gate='ring']")).toBeNull();
   });
 
   it("falls back to the neutral tone for a tone it does not know", () => {
@@ -228,9 +226,10 @@ describe("RunGraph", () => {
     const { container } = render(RunGraph, {
       props: { graph, steps, selectedId: null, onSelect: vi.fn() },
     });
-    const impl = container.querySelector("[data-node-id='impl'] .dot");
-    expect(impl?.getAttribute("class")).toContain("tone-neutral");
-    expect(impl?.getAttribute("class")).not.toContain("tone-mystery");
+    // The unknown tone is normalized to `neutral` (spec FR9: `data-tone` is always a `StatusTone`).
+    const dot = container.querySelector("[data-node-id='impl'] circle");
+    expect(dot?.getAttribute("data-tone")).toBe("neutral");
+    expect(dot?.getAttribute("data-tone")).not.toBe("mystery");
   });
 
   it("renders 61 nodes fit to width with the size note", () => {

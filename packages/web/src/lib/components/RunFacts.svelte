@@ -14,101 +14,53 @@
   let { run }: { run: RunView } = $props();
 </script>
 
-<section class="facts" aria-labelledby="run-details">
-  <h2 id="run-details">Run details</h2>
-  <dl>
-    <dt>Workflow</dt>
-    <dd><a href={workflowHref(run.playbookId)}>{run.playbookId}</a></dd>
+<section
+  class="card border border-surface-200-800 bg-surface-100-900 px-3 py-2.5 text-[12px]"
+  aria-labelledby="run-details"
+>
+  <h2
+    id="run-details"
+    class="mt-0 mb-2 text-[11px] font-semibold tracking-[0.04em] text-surface-600-400 uppercase"
+  >
+    Run details
+  </h2>
+  <dl class="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2.5 gap-y-1">
+    <dt class="text-surface-600-400">Workflow</dt>
+    <dd class="m-0 truncate">
+      <a class="hover:text-primary-700-300" href={workflowHref(run.playbookId)}>{run.playbookId}</a>
+    </dd>
 
-    <dt>Started</dt>
-    <dd>{run.createdLabel}<span class="muted"> · {run.startedRelative}</span></dd>
+    <dt class="text-surface-600-400">Started</dt>
+    <dd class="m-0 truncate">
+      {run.createdLabel}<span class="text-surface-600-400"> · {run.startedRelative}</span>
+    </dd>
 
-    <dt>Duration</dt>
-    <dd>{run.durationLabel}</dd>
+    <dt class="text-surface-600-400">Duration</dt>
+    <dd class="m-0 truncate tabular-nums">{run.durationLabel}</dd>
 
-    <dt>Trigger</dt>
-    <dd class="trigger">{run.triggerLabel}</dd>
+    <dt class="text-surface-600-400">Trigger</dt>
+    <dd class="m-0 truncate capitalize">{run.triggerLabel}</dd>
 
-    <dt>Project</dt>
-    <dd title={run.cwd}>{run.project}</dd>
+    <dt class="text-surface-600-400">Project</dt>
+    <dd class="m-0 truncate" title={run.cwd}>{run.project}</dd>
 
-    <dt>Executor</dt>
-    <dd>{run.executor ?? "paseo"}</dd>
+    <dt class="text-surface-600-400">Executor</dt>
+    <dd class="m-0 truncate">{run.executor ?? "paseo"}</dd>
 
     {#if run.worktree}
-      <dt>Worktree</dt>
-      <dd class="path" title={run.worktree}>{run.worktree}</dd>
+      <dt class="text-surface-600-400">Worktree</dt>
+      <dd class="m-0 truncate font-mono" title={run.worktree}>{run.worktree}</dd>
     {/if}
 
     {#if run.usageLabel}
-      <dt>Usage</dt>
-      <dd>{run.usageLabel}</dd>
+      <dt class="text-surface-600-400">Usage</dt>
+      <dd class="m-0 truncate tabular-nums">{run.usageLabel}</dd>
     {/if}
 
-    <dt>Run id</dt>
-    <dd class="id">
-      <span title={run.id}>{run.runIdShort}</span>
+    <dt class="text-surface-600-400">Run id</dt>
+    <dd class="m-0 flex items-center gap-2 truncate font-mono">
+      <span class="truncate" title={run.id}>{run.runIdShort}</span>
       <CopyButton text={run.id} label="Copy the full run id" />
     </dd>
   </dl>
 </section>
-
-<style>
-  .facts {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-    padding: 10px 12px;
-    font-size: 12px;
-  }
-
-  h2 {
-    margin: 0 0 8px;
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  dl {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 4px 10px;
-    margin: 0;
-  }
-
-  dt {
-    color: var(--muted);
-  }
-
-  dd {
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  a:hover {
-    color: var(--accent);
-  }
-
-  .trigger {
-    text-transform: capitalize;
-  }
-
-  .path,
-  .id {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  }
-
-  .id {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .muted {
-    color: var(--muted);
-  }
-</style>

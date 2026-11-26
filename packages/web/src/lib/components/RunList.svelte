@@ -45,11 +45,19 @@
   });
 </script>
 
-<div class="list">
+<div class="overflow-hidden rounded-lg border border-surface-200-800 bg-surface-100-900">
   {#each sections as section (section.day)}
-    <section class="day" aria-labelledby={section.label === "" ? undefined : `day-${section.day}`}>
+    <section
+      class="border-b border-surface-200-800 last:border-b-0"
+      aria-labelledby={section.label === "" ? undefined : `day-${section.day}`}
+    >
       {#if section.label !== ""}
-        <h2 id={`day-${section.day}`}>{section.label}</h2>
+        <h2
+          id={`day-${section.day}`}
+          class="sticky top-0 z-[1] m-0 border-b border-surface-200-800 bg-surface-200-800 px-3.5 py-1 text-[11px] font-semibold uppercase tracking-[0.04em] text-surface-600-400"
+        >
+          {section.label}
+        </h2>
       {/if}
       {#each section.runs as run (run.id)}
         <RunRow {run} {relative} {showPlaybook} {showProject} />
@@ -58,56 +66,13 @@
   {/each}
 
   {#if remaining > 0}
-    <button type="button" class="more" onclick={() => (pages += 1)}>
+    <button
+      type="button"
+      class="w-full border-0 border-t border-surface-200-800 bg-transparent p-2.5 text-[12px] text-primary-700-300 hover:bg-surface-200-800/60"
+      onclick={() => (pages += 1)}
+    >
       Load {Math.min(pageSize, remaining)} more
-      <span class="remaining">· {remaining} hidden</span>
+      <span class="text-surface-600-400">· {remaining} hidden</span>
     </button>
   {/if}
 </div>
-
-<style>
-  .list {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-    overflow: hidden;
-  }
-
-  .day h2 {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    margin: 0;
-    padding: 4px 14px;
-    background: var(--surface-hover);
-    border-bottom: 1px solid var(--border);
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .day + .day h2 {
-    border-top: 1px solid var(--border);
-  }
-
-  .more {
-    width: 100%;
-    padding: 10px;
-    border: 0;
-    border-top: 1px solid var(--border);
-    background: transparent;
-    color: var(--accent);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .more:hover {
-    background: var(--surface-hover);
-  }
-
-  .remaining {
-    color: var(--muted);
-  }
-</style>

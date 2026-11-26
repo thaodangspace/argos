@@ -13,11 +13,11 @@ export function preferredTheme(stored: string | null, prefersDark: boolean): The
   return prefersDark ? "dark" : "light";
 }
 
-/** Write the theme onto the document (`data-theme` drives the token file). */
+/** Write the mode onto the document: the `dark` class is what drives Skeleton's `light-dark()`. */
 export function applyTheme(theme: Theme, root?: HTMLElement | null): void {
   const target = root ?? (typeof document === "undefined" ? null : document.documentElement);
   if (target === null) return;
-  target.dataset["theme"] = theme;
+  target.classList.toggle("dark", theme === "dark");
 }
 
 export class ThemeStore {

@@ -31,8 +31,12 @@ function importSpecifiers(text: string): string[] {
 }
 
 describe("web import graph", () => {
-  // The guard itself needs `node:fs`; it is not part of the bundle.
-  const files = sourceFiles(srcDir).filter((file) => !file.endsWith("import-graph.test.ts"));
+  // The two guards read the tree with `node:fs`; they are metadata about the bundle, never part of
+  // it, so they are the only files this rule excuses.
+  const guardFiles = ["import-graph.test.ts", "style-guard.test.ts"];
+  const files = sourceFiles(srcDir).filter(
+    (file) => !guardFiles.some((name) => file.endsWith(name)),
+  );
 
   it("has sources to check", () => {
     expect(files.length).toBeGreaterThanOrEqual(1);

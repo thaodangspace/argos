@@ -15,23 +15,12 @@
   }
 </script>
 
-<button type="button" class="copy" onclick={copy} aria-label={label} title={label}>
+<button
+  type="button"
+  class="btn btn-xs preset-tonal-surface"
+  onclick={copy}
+  aria-label={label}
+  title={label}
+>
   {copied ? "Copied" : "Copy"}
 </button>
-
-<style>
-  .copy {
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: transparent;
-    color: var(--muted);
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .copy:hover {
-    color: var(--text);
-    background: var(--surface-hover);
-  }
-</style>

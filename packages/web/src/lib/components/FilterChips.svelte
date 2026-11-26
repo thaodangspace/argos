@@ -12,53 +12,16 @@
   } = $props();
 </script>
 
-<nav class="chips" aria-label="Filter workflow runs">
+<nav class="flex flex-wrap gap-1.5" aria-label="Filter workflow runs">
   {#each filters as filter (filter.id)}
     <button
       type="button"
-      class:active={filter.id === active}
+      class="chip preset-tonal aria-pressed:preset-filled-primary-500"
       aria-pressed={filter.id === active}
       onclick={() => onSelect(filter.id)}
     >
       {filter.label}
-      <span class="count">{filter.count}</span>
+      <span class="tabular-nums opacity-75">{filter.count}</span>
     </button>
   {/each}
 </nav>
-
-<style>
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 12px;
-  }
-
-  button:hover {
-    background: var(--surface-hover);
-    color: var(--text);
-  }
-
-  .active {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--text);
-  }
-
-  .count {
-    font-variant-numeric: tabular-nums;
-    opacity: 0.75;
-  }
-</style>

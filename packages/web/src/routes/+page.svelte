@@ -194,26 +194,35 @@
   <title>{scopeTitle(view.query)} · Argos</title>
 </svelte:head>
 
-<section class="head">
+<section class="mb-3.5 flex items-center justify-between gap-4">
   <div>
-    <h1>{scopeTitle(view.query)}</h1>
-    <p class="summary" aria-live="polite">{scopeSubtitle(view.query, view.visibleCount)}</p>
+    <h1 class="m-0 text-xl font-semibold wrap-anywhere">{scopeTitle(view.query)}</h1>
+    <p class="mt-0.5 mb-0 text-[13px] text-surface-600-400" aria-live="polite">
+      {scopeSubtitle(view.query, view.visibleCount)}
+    </p>
   </div>
   <ConnectionPill status={store.status} />
 </section>
 
 {#if store.error !== null}
-  <div class="banner" role="alert">
-    <strong>{store.error.code}</strong>
+  <div
+    class="mb-3.5 flex flex-wrap items-center gap-2 rounded-md border border-error-500/40 bg-error-500/15 px-3 py-2.5 text-[13px]"
+    role="alert"
+  >
+    <strong class="font-mono text-error-700-300">{store.error.code}</strong>
     <span>{store.error.message}</span>
     {#if store.error.code === "unreachable" || store.error.code === "unauthorized"}
-      <span class="hint">Start the server with <code>argos serve</code>, then reload.</span>
+      <span class="text-surface-600-400"
+        >Start the server with
+        <code class="rounded bg-surface-500/15 px-1 py-px font-mono text-[12px]">argos serve</code>, then
+        reload.</span
+      >
     {/if}
   </div>
 {/if}
 
-<div class="layout">
-  <aside class="side">
+<div class="grid items-start gap-5 lg:grid-cols-[220px_1fr]">
+  <aside class="hidden lg:block">
     <WorkflowRail
       facets={view.facets}
       query={view.query}
@@ -225,7 +234,7 @@
     />
   </aside>
 
-  <div class="main">
+  <div class="min-w-0">
     <ListToolbar
       filters={view.filters}
       query={view.query}
@@ -246,14 +255,14 @@
         showProject={view.facets.projects.length > 1}
       />
     {:else if view.loading || !store.loaded}
-      <div class="loading" aria-busy="true">Loading runs…</div>
+      <div class="p-8 text-center text-surface-600-400" aria-busy="true">Loading runs…</div>
     {:else if filtered && view.runs.length > 0}
       <EmptyState
         title="No runs match this scope"
         hint="No run of this server is in the selected workflow, project, trigger, or status."
       />
-      <p class="clear">
-        <button type="button" onclick={clearFilters}>Clear filters</button>
+      <p class="mt-2.5 mb-0">
+        <button type="button" class="btn text-[12px]" onclick={clearFilters}>Clear filters</button>
       </p>
     {:else}
       <EmptyState
@@ -263,100 +272,3 @@
     {/if}
   </div>
 </div>
-
-<style>
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 14px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-    overflow-wrap: anywhere;
-  }
-
-  .summary {
-    margin: 2px 0 0;
-    color: var(--muted);
-    font-size: 13px;
-  }
-
-  .layout {
-    display: grid;
-    grid-template-columns: minmax(170px, 210px) minmax(0, 1fr);
-    gap: 16px;
-    align-items: start;
-  }
-
-  .main {
-    min-width: 0;
-  }
-
-  .banner {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 14px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
-    border-radius: 6px;
-    background: var(--danger-soft);
-    font-size: 13px;
-  }
-
-  .banner strong {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    color: var(--danger);
-  }
-
-  .hint {
-    color: var(--muted);
-  }
-
-  code {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    font-size: 12px;
-    padding: 1px 4px;
-    border-radius: 4px;
-    background: var(--neutral-soft);
-  }
-
-  .loading {
-    padding: 32px;
-    text-align: center;
-    color: var(--muted);
-  }
-
-  .clear {
-    margin: 10px 0 0;
-  }
-
-  .clear button {
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .clear button:hover {
-    background: var(--surface-hover);
-  }
-
-  @media (max-width: 900px) {
-    .layout {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .side {
-      display: none;
-    }
-  }
-</style>
