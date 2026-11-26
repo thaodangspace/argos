@@ -2,19 +2,26 @@
   import type { Snippet } from "svelte";
   import { shortId, type RunView } from "@thaodangspace/argos-core/view";
 
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
+
   import StatusGlyph from "./StatusGlyph.svelte";
 
   let { run, actions }: { run: RunView; actions?: Snippet } = $props();
 </script>
 
-<header class="run-head">
-  <div class="identity">
-    <h1>
+<header
+  class="mb-4 flex flex-col gap-4 border-b border-surface-200-800 pb-3.5 sm:flex-row sm:items-start sm:justify-between"
+>
+  <div class="min-w-0">
+    <h1 class="m-0 flex flex-wrap items-baseline gap-2 text-lg font-semibold">
       {run.playbookId}
-      <span class="id">#{run.runIdShort}</span>
+      <span class="font-mono text-[13px] font-normal text-surface-600-400">#{run.runIdShort}</span>
     </h1>
-    <div class="meta">
-      <span class="status tone-{run.tone}">
+    <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-surface-600-400">
+      <span
+        class={["inline-flex items-center gap-1 font-semibold", toneClass(TONE_TEXT, run.tone)]}
+        data-tone={run.tone}
+      >
         <StatusGlyph
           glyph={run.glyph}
           tone={run.tone}
@@ -23,134 +30,36 @@
         />
         {run.statusLabel}
       </span>
-      <span class="dot" aria-hidden="true">·</span>
-      <span class="trigger">{run.triggerLabel}</span>
-      <span class="dot" aria-hidden="true">·</span>
-      <span class="duration">{run.durationLabel}</span>
-      {#if run.executor}<span class="badge">{run.executor}</span>{/if}
+      <span class="opacity-50" aria-hidden="true">·</span>
+      <span class="capitalize">{run.triggerLabel}</span>
+      <span class="opacity-50" aria-hidden="true">·</span>
+      <span class="tabular-nums">{run.durationLabel}</span>
+      {#if run.executor}<span
+          class="rounded border border-surface-200-800 px-1.5 text-surface-950-50">{run.executor}</span
+        >{/if}
       {#if run.forkedFrom}
-        <span class="badge">
+        <span class="rounded border border-surface-200-800 px-1.5 text-surface-950-50">
           forked from #{shortId(run.forkedFrom.runId)} @ {run.forkedFrom.stepId}
         </span>
       {/if}
-      {#if run.scheduleId}<span class="badge">schedule</span>{/if}
+      {#if run.scheduleId}<span
+          class="rounded border border-surface-200-800 px-1.5 text-surface-950-50">schedule</span
+        >{/if}
     </div>
-    <div class="where">
-      <span class="cwd" title={run.cwd}>{run.cwd}</span>
+    <div class="mt-1.5 flex flex-wrap gap-2.5 font-mono text-[12px] text-surface-600-400">
+      <span class="max-w-[60ch] truncate" title={run.cwd}>{run.cwd}</span>
       {#each run.inputs as input (input.name)}
-        <span class="input" title={`${input.name}=${input.value}`}>{input.name}={input.value}</span>
+        <span class="max-w-[32ch] truncate text-surface-950-50" title={`${input.name}=${input.value}`}
+          >{input.name}={input.value}</span
+        >
       {/each}
-      {#if run.worktree}<span class="cwd" title={run.worktree}>worktree {run.worktree}</span>{/if}
-      {#if run.usageLabel}<span class="usage">{run.usageLabel}</span>{/if}
+      {#if run.worktree}<span class="max-w-[60ch] truncate" title={run.worktree}
+          >worktree {run.worktree}</span
+        >{/if}
+      {#if run.usageLabel}<span class="font-sans">{run.usageLabel}</span>{/if}
     </div>
   </div>
-  <div class="actions">
+  <div class="flex flex-wrap justify-end gap-2 max-sm:justify-start">
     {@render actions?.()}
   </div>
 </header>
-
-<style>
-  .run-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 16px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 600;
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .id {
-    color: var(--muted);
-    font-size: 13px;
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    font-weight: 400;
-  }
-
-  .meta {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  .status {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-weight: 600;
-  }
-
-  .dot {
-    opacity: 0.5;
-  }
-
-  .trigger {
-    text-transform: capitalize;
-  }
-
-  .badge {
-    padding: 0 6px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text);
-  }
-
-  .where {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 6px;
-    color: var(--muted);
-    font-size: 12px;
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  }
-
-  .cwd {
-    max-width: 60ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .input {
-    max-width: 32ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text);
-  }
-
-  .usage {
-    font-family: inherit;
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  @media (max-width: 720px) {
-    .run-head {
-      flex-direction: column;
-    }
-    .actions {
-      justify-content: flex-start;
-    }
-  }
-</style>

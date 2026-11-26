@@ -87,7 +87,7 @@ describe("GateCard", () => {
     render(GateCard, { props: { gate: runA, onDecide: vi.fn() } });
     render(GateCard, { props: { gate: runB, onDecide: vi.fn() } });
 
-    const articles = [...document.querySelectorAll("article.gate")];
+    const articles = [...document.querySelectorAll("article[aria-labelledby]")];
     expect(articles).toHaveLength(2);
     const labelledBy = articles.map((article) => article.getAttribute("aria-labelledby"));
     expect(labelledBy).toEqual([
@@ -95,7 +95,7 @@ describe("GateCard", () => {
       "gate-01J0000000000000000000000B-fix:1",
     ]);
     expect(new Set(labelledBy).size).toBe(2);
-    expect(articles.map((article) => article.querySelector("p.question")?.id)).toEqual(labelledBy);
+    expect(articles.map((article) => article.querySelector('[id^="gate-"]')?.id)).toEqual(labelledBy);
     // A bare `gate-<gateId>` id would collide on an inbox that holds both runs.
     expect(document.querySelectorAll("#gate-fix\\:1")).toHaveLength(0);
   });

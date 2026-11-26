@@ -47,27 +47,13 @@ const ALLOW_LEGACY_BLOCK = true;
 const APP_CSS_ALLOWLIST: readonly string[] = [];
 
 /**
- * The `.svelte` files that still carry a `<style>` block (Phase 3 census: 17). Monotonic: a phase
+ * The `.svelte` files that still carry a `<style>` block (Phase 4 census: 3). Monotonic: a phase
  * removes exactly its own files and adds none, and this test fails when an entry goes stale.
  */
 const STYLE_ALLOWLIST: readonly string[] = [
-  "src/lib/components/ConnectionPill.svelte",
-  "src/lib/components/CopyButton.svelte",
-  "src/lib/components/GateBadge.svelte",
-  "src/lib/components/GateCard.svelte",
-  "src/lib/components/GateInbox.svelte",
-  "src/lib/components/RunFacts.svelte",
   "src/lib/components/RunGraph.svelte",
-  "src/lib/components/RunHeader.svelte",
-  "src/lib/components/RunLog.svelte",
   "src/lib/components/StartRunDialog.svelte",
-  "src/lib/components/StatusGlyph.svelte",
-  "src/lib/components/StepLog.svelte",
-  "src/lib/components/StepRail.svelte",
   "src/lib/components/Toasts.svelte",
-  "src/lib/components/ViewToggle.svelte",
-  "src/routes/gates/+page.svelte",
-  "src/routes/runs/[id]/+page.svelte",
 ];
 
 /** Spec FR3, in order and complete. */

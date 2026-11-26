@@ -22,6 +22,7 @@
   import Toasts from "#lib/components/Toasts.svelte";
   import ViewToggle from "#lib/components/ViewToggle.svelte";
   import { href, runHref, workflowHref } from "#lib/paths";
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
   import { RunActions } from "#lib/run-actions.svelte";
   import { DetailStore } from "#lib/state/detail.svelte";
   import { runsHub } from "#lib/state/runs-hub.svelte";
@@ -182,8 +183,9 @@
   {#if run !== null}
     <button
       type="button"
-      class="action"
-      class:confirm={actions.confirmingCancel}
+      class={actions.confirmingCancel
+        ? "btn btn-sm preset-filled-error-500 disabled:cursor-not-allowed disabled:opacity-50"
+        : "btn btn-sm preset-tonal disabled:cursor-not-allowed disabled:opacity-50"}
       disabled={!run.active || actions.busy}
       onclick={() => actions.cancel(data.runId)}
     >
@@ -191,11 +193,23 @@
     </button>
     {#if !run.active && currentStep !== null}
       {#if currentStep.retryable}
-        <button type="button" class="action" disabled={actions.busy} onclick={() => actions.retry(data.runId, currentStep)}>Retry step</button>
+        <button
+          type="button"
+          class="btn btn-sm preset-tonal disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={actions.busy}
+          onclick={() => actions.retry(data.runId, currentStep)}>Retry step</button
+        >
       {/if}
-      <button type="button" class="action" disabled={actions.busy} onclick={() => actions.fork(data.runId, currentStep)}>Fork from step</button>
+      <button
+        type="button"
+        class="btn btn-sm preset-tonal disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={actions.busy}
+        onclick={() => actions.fork(data.runId, currentStep)}>Fork from step</button
+      >
     {/if}
-    <button type="button" class="action" onclick={() => (startOpen = true)}>Start similar</button>
+    <button type="button" class="btn btn-sm preset-tonal" onclick={() => (startOpen = true)}
+      >Start similar</button
+    >
   {/if}
 {/snippet}
 
@@ -205,31 +219,44 @@
       title="Run not found"
       hint="It may have been removed from Argos. Go back to the workflow list to pick another run."
     />
-    <p class="back"><a href={href("/")}>← All workflows</a></p>
+    <p class="mb-3 flex flex-wrap items-center gap-1.5 text-[12px] text-surface-600-400">
+      <a class="hover:text-surface-950-50" href={href("/")}>← All workflows</a>
+    </p>
   {:else if detail.error !== null}
-    <div class="banner" role="alert">
-      <strong>{detail.error.code}</strong>
+    <div
+      class="mb-3.5 flex flex-wrap items-center gap-2 rounded-lg border border-error-500/40 bg-error-500/15 p-3 text-[13px]"
+      role="alert"
+    >
+      <strong class={["font-mono", toneClass(TONE_TEXT, "danger")]} data-tone="danger"
+        >{detail.error.code}</strong
+      >
       <span>{detail.error.message}</span>
     </div>
-    <p class="back"><a href={href("/")}>← All workflows</a></p>
+    <p class="mb-3 flex flex-wrap items-center gap-1.5 text-[12px] text-surface-600-400">
+      <a class="hover:text-surface-950-50" href={href("/")}>← All workflows</a>
+    </p>
   {:else}
-    <div class="loading" aria-busy="true">Loading run…</div>
+    <div class="p-8 text-center text-surface-600-400" aria-busy="true">Loading run…</div>
   {/if}
 {:else}
-  <p class="back">
-    <a href={workflowHref(run.playbookId)}>← {run.playbookId}</a>
-    <span class="sep" aria-hidden="true">·</span>
-    <a href={href("/")}>All workflows</a>
+  <p class="mb-3 flex flex-wrap items-center gap-1.5 text-[12px] text-surface-600-400">
+    <a class="hover:text-surface-950-50" href={workflowHref(run.playbookId)}>← {run.playbookId}</a>
+    <span class="opacity-50" aria-hidden="true">·</span>
+    <a class="hover:text-surface-950-50" href={href("/")}>All workflows</a>
   </p>
 
   <RunHeader {run} actions={headerActions} />
 
-  <div class="viewbar">
-    <ViewToggle view={showGraph ? "graph" : "rail"} graphAvailable={graph !== undefined} onView={setView} />
+  <div class="mb-2.5 flex justify-end">
+    <ViewToggle
+      view={showGraph ? "graph" : "rail"}
+      graphAvailable={graph !== undefined}
+      onView={setView}
+    />
   </div>
 
   {#if pendingGates.length > 0}
-    <section class="gates" aria-label="Pending gates">
+    <section class="mb-1" aria-label="Pending gates">
       {#each pendingGates as gate (gate.key)}
         <GateCard
           {gate}
@@ -241,7 +268,7 @@
   {/if}
 
   {#if showGraph && graph !== undefined}
-    <div class="graph-pane">
+    <div class="mb-3.5 min-w-0">
       <RunGraph
         graph={graph}
         steps={run.steps}
@@ -250,7 +277,7 @@
       />
       <RunFacts {run} />
     </div>
-    <div class="pane">
+    <div class="min-w-0">
       {#if currentStep !== null}
         <StepLog step={currentStep} />
       {:else}
@@ -259,12 +286,12 @@
       <RunLog entries={runLog} />
     </div>
   {:else}
-    <div class="layout">
-      <div class="side">
+    <div class="grid items-start gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+      <div class="flex min-w-0 flex-col gap-3">
         <StepRail steps={run.steps} selectedId={currentStep?.id ?? null} onSelect={selectStep} />
         <RunFacts {run} />
       </div>
-      <div class="pane">
+      <div class="min-w-0">
         {#if currentStep !== null}
           <StepLog step={currentStep} />
         {:else}
@@ -291,112 +318,3 @@
 {/if}
 
 <Toasts store={toasts} />
-
-<style>
-  .back {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  .back a:hover {
-    color: var(--text);
-  }
-
-  .sep {
-    opacity: 0.5;
-  }
-
-  .side {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    min-width: 0;
-  }
-
-  .layout {
-    display: grid;
-    grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
-    gap: 16px;
-    align-items: start;
-  }
-
-  .pane {
-    min-width: 0;
-  }
-
-  .viewbar {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: 10px;
-  }
-
-  .graph-pane {
-    min-width: 0;
-    margin-bottom: 14px;
-  }
-
-  .banner {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
-    border-radius: 6px;
-    background: var(--danger-soft);
-    font-size: 13px;
-  }
-
-  .banner strong {
-    color: var(--danger);
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  }
-
-  .action {
-    padding: 4px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .action:hover:not(:disabled) {
-    background: var(--surface-hover);
-  }
-
-  .action:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .confirm {
-    border-color: var(--danger);
-    color: var(--danger);
-    background: var(--danger-soft);
-  }
-
-  .gates {
-    margin-bottom: 4px;
-  }
-
-  .loading {
-    padding: 32px;
-    text-align: center;
-    color: var(--muted);
-  }
-
-  @media (max-width: 860px) {
-    .layout {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .layout :global(.rail) {
-      position: static;
-      max-height: none;
-    }
-  }
-</style>

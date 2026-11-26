@@ -174,7 +174,7 @@ function cards(): HTMLElement[] {
 }
 
 function questions(): (string | null | undefined)[] {
-  return cards().map((card) => card.querySelector("p.question")?.textContent);
+  return cards().map((card) => card.querySelector('[id^="gate-"]')?.textContent);
 }
 
 describe("GateInbox", () => {

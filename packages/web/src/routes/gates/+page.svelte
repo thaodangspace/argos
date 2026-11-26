@@ -15,6 +15,7 @@
   import Toasts from "#lib/components/Toasts.svelte";
   import { gateInbox, type GateInboxEntry } from "#lib/gate-inbox";
   import { runHref } from "#lib/paths";
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
   import { RunActions } from "#lib/run-actions.svelte";
   import { runsHub } from "#lib/state/runs-hub.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
@@ -80,21 +81,27 @@
   }
 </script>
 
+
 <svelte:head>
   <title>Gates · Argos</title>
 </svelte:head>
 
-<section class="head">
+<header class="mb-3.5 flex items-center justify-between gap-4">
   <div>
-    <h1>Gates</h1>
-    <p class="summary" aria-live="polite">{totalLabel}</p>
+    <h1 class="m-0 text-xl font-semibold">Gates</h1>
+    <p class="mt-0.5 text-[13px] text-surface-600-400" aria-live="polite">{totalLabel}</p>
   </div>
   <ConnectionPill status={store.status} />
-</section>
+</header>
 
 {#if store.error !== null}
-  <div class="banner" role="alert">
-    <strong>{store.error.code}</strong>
+  <div
+    class="mb-3.5 flex flex-wrap items-center gap-2 rounded-lg border border-error-500/40 bg-error-500/15 p-3 text-[13px]"
+    role="alert"
+  >
+    <strong class={["font-mono", toneClass(TONE_TEXT, "danger")]} data-tone="danger"
+      >{store.error.code}</strong
+    >
     <span>{store.error.message}</span>
   </div>
 {/if}
@@ -109,43 +116,3 @@
 />
 
 <Toasts store={toasts} />
-
-<style>
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 14px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-  }
-
-  .summary {
-    margin: 2px 0 0;
-    color: var(--muted);
-    font-size: 13px;
-  }
-
-  .banner {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 14px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
-    border-radius: 6px;
-    background: var(--danger-soft);
-    font-size: 13px;
-  }
-
-  .banner strong {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    color: var(--danger);
-  }
-</style>

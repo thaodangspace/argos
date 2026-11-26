@@ -11,38 +11,11 @@
   import { href } from "#lib/paths";
 
   let { count }: { count: number } = $props();
+
+  // Skeleton's tonal presets are bare (`preset-tonal-warning`); quiet when nothing waits.
+  const PILL = $derived(count === 0 ? "badge preset-tonal-surface" : "badge preset-tonal-warning");
 </script>
 
-<a class="badge" class:quiet={count === 0} href={href("/gates")}>
-  Gates <span class="count" aria-live="polite">{count}</span>
+<a class={PILL} href={href("/gates")}>
+  Gates <span class="font-semibold tabular-nums" aria-live="polite">{count}</span>
 </a>
-
-<style>
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    font-size: 13px;
-    text-decoration: none;
-    white-space: nowrap;
-  }
-
-  .badge:hover {
-    background: var(--surface-hover);
-  }
-
-  .count {
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    color: var(--warning);
-  }
-
-  .quiet .count {
-    color: var(--muted);
-  }
-</style>
