@@ -12,6 +12,10 @@ with `argos hc templates`. The program is copied out of the CLI tarball, so noth
 points into a checkout. `argos hc templates verify` and `argos doctor` then answer "is what I
 installed still what is running?".
 
+`hc` is the substrate `argos serve` starts runs on whenever a core answered its startup probe, so a
+fresh install makes these templates the default way a playbook's steps run; `executor: paseo` (or
+`--default-executor paseo`) keeps a repository on Paseo.
+
 ## The three things
 
 | Path | Owner | Contents |

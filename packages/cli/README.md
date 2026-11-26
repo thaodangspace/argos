@@ -24,8 +24,8 @@ herdr-core core (`hc`), which `argos serve` probes at startup.
 
 ```sh
 argos serve                  # 127.0.0.1:7676, the only process that opens $ARGOS_HOME/argos.sqlite
-argos serve --default-executor hc   # or ARGOS_EXECUTOR=hc; prints `[argos] executors: paseo, hc (default)`
-argos doctor                 # storage, schema, port, Paseo, providers, executors, pending gates
+argos serve --default-executor paseo   # hc is the default; name paseo to override (or ARGOS_EXECUTOR=paseo)
+argos doctor                 # prints e.g. `executors  hc (default, reachable), paseo (reachable)`
 argos validate               # check the playbooks in the current checkout
 argos run fix --input issue="login returns 500"
 argos run fix --executor hc  # one run on herdr-core (a playbook may also pin `executor:`)

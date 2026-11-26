@@ -58,7 +58,12 @@ export interface ArgosHostOptions {
    * run index entry, or worktree exists.
    */
   readonly executors?: Partial<Record<ExecutorId, StepExecutor>>;
-  /** FR2: the substrate a run without an override starts on; default `paseo`. */
+  /**
+   * FR2: the substrate a run without an override starts on. The host's own fallback is the legacy
+   * `paseo` entry; `argos serve` passes the operator's choice explicitly, which is
+   * `--default-executor`, else `ARGOS_EXECUTOR`, else `PREFERRED_EXECUTOR_ID` (`hc`) when that
+   * substrate is registered, else `paseo`.
+   */
   readonly defaultExecutor?: ExecutorId;
   /**
    * FR24/FR18: one target catalog per executor. `paseo` falls back to {@link modelCatalog}, so the

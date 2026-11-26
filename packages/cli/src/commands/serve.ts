@@ -8,6 +8,10 @@
  * gracefully. The host is retried once on a transient open failure; `storage_locked` and
  * `executor_unavailable` are never retried because another live process owns the home and a
  * missing adapter does not appear by waiting.
+ *
+ * `hc` is the preferred substrate: with no `--default-executor`/`ARGOS_EXECUTOR`, a server whose
+ * core answered starts every run on `hc`, and one whose probe failed starts them on `paseo` (the
+ * registry's `paseo` entry, which always exists). An id the operator names is never substituted.
  */
 
 import { resolve } from "node:path";
@@ -17,6 +21,7 @@ import {
   DEFAULT_EXECUTOR_ID,
   EXECUTOR_IDS,
   EXECUTOR_TEMPLATE_LIMIT,
+  PREFERRED_EXECUTOR_ID,
   executorIdFor,
   type ExecutorId,
   type ExecutorInfo,
@@ -83,11 +88,25 @@ export function formatScheduleFireLine(event: ScheduleFireEvent): string {
 
 /**
  * FR9/NFR: the one stderr line `argos serve` prints at startup listing the registry, e.g.
- * `[argos] executors: paseo (default), hc`. Ids only — never a path, a token, or an input value.
+ * `[argos] executors: hc (default), paseo`. Ids only — never a path, a token, or an input value.
  */
 export function formatExecutorLine(executors: readonly ExecutorInfo[]): string {
   const listed = executors.map((executor) => (executor.default ? `${executor.id} (default)` : executor.id));
   return `[argos] executors: ${listed.length === 0 ? "(none)" : listed.join(", ")}\n`;
+}
+
+/**
+ * FR16: the substrate a run starts on when the request, the schedule, and the playbook all say
+ * nothing — `--default-executor`/`ARGOS_EXECUTOR` when the operator named one (verbatim: a name the
+ * registry cannot run is refused, never substituted), else `hc` (the preferred substrate) as soon as
+ * its adapter registered, else `paseo`, the one entry the registry always carries.
+ */
+export function resolveDefaultExecutor(
+  requested: ExecutorId | undefined,
+  hcRegistered: boolean,
+): ExecutorId {
+  if (requested !== undefined) return requested;
+  return hcRegistered ? PREFERRED_EXECUTOR_ID : DEFAULT_EXECUTOR_ID;
 }
 
 function configuredPort(value: string | undefined): number {
@@ -272,9 +291,12 @@ async function buildHcRegistration(
 async function buildDependencies(
   home: string,
   io: CliIo,
-  defaultExecutor: ExecutorId,
+  requested: ExecutorId | undefined,
 ): Promise<Dependencies> {
   const hc = await buildHcRegistration(home, io);
+  // FR16: the operator's choice wins; with none, `hc` (the preferred substrate) when its adapter is
+  // registered, else `paseo` — the entry `ArgosHost.open` always receives.
+  const defaultExecutor = resolveDefaultExecutor(requested, hc !== undefined);
   // The registry additions of a registered `hc`: its executor, its template catalog, and the
   // reachability `/info` reports. `paseo` stays `options.executor` and its own catalog option, so
   // the two descriptors must be **merged**, not spread over each other.
@@ -391,23 +413,23 @@ export async function serveCommand(args: ParsedArgs, io: CliIo): Promise<number>
   }
   const port = configuredPort(portFlag);
 
-  // FR16: `--default-executor`, else `ARGOS_EXECUTOR`, else `paseo` (the flag wins). A value that is
-  // not an executor at all is refused here, before anything is opened; a known id the registry does
-  // not carry is refused by `ArgosHost.open` with `executor_unavailable`, naming the id and the
+  // FR16: `--default-executor`, else `ARGOS_EXECUTOR`, else the preferred substrate (`hc` when its
+  // adapter registered, else `paseo` — resolved once the registry is known). A value that is not an
+  // executor at all is refused here, before anything is opened; a known id the registry does not
+  // carry is refused by `ArgosHost.open` with `executor_unavailable`, naming the id and the
   // registered set. Either way no home, pid file, or database is touched.
   const executorValue = flag(args, "default-executor") ?? process.env["ARGOS_EXECUTOR"];
-  const resolvedExecutor = executorValue === undefined ? DEFAULT_EXECUTOR_ID : executorIdFor(executorValue);
-  if (resolvedExecutor === undefined) {
+  const resolvedExecutor = executorValue === undefined ? undefined : executorIdFor(executorValue);
+  if (executorValue !== undefined && resolvedExecutor === undefined) {
     io.stderr(
-      `argos: --default-executor ${JSON.stringify(executorValue ?? "")} is unknown: use one of ${EXECUTOR_IDS.join(", ")}\n`,
+      `argos: --default-executor ${JSON.stringify(executorValue)} is unknown: use one of ${EXECUTOR_IDS.join(", ")}\n`,
     );
     return EXIT_RUNTIME;
   }
-  const defaultExecutor: ExecutorId = resolvedExecutor;
 
   let dependencies: Dependencies | undefined;
   try {
-    dependencies = await buildDependencies(home, io, defaultExecutor);
+    dependencies = await buildDependencies(home, io, resolvedExecutor);
     // FR9/NFR Observability: one stderr line naming the registry and the default. `--json` keeps
     // stdout to its single receipt line, so this never disturbs the startup contract.
     io.stderr(formatExecutorLine(dependencies.host.executors));

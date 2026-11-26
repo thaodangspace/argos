@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { formatExecutorLine, formatScheduleFireLine, type ScheduleFireEvent } from "../src/commands/serve.js";
+import { formatExecutorLine, formatScheduleFireLine, resolveDefaultExecutor, type ScheduleFireEvent } from "../src/commands/serve.js";
 import { runCli } from "../src/main.js";
 import { capture, makeTempHome, withEnv } from "./support/cli.js";
 import { HC_EXECUTOR, PASEO_EXECUTOR, SCHEDULE_ID, SCHEDULE_SUMMARY } from "./support/fixtures.js";
@@ -78,14 +78,25 @@ describe("argos serve fire line (FR10.4)", () => {
 
 describe("argos serve executor startup (FR9, FR16)", () => {
   it("prints one line naming the registry and the default", () => {
-    expect(formatExecutorLine([PASEO_EXECUTOR, HC_EXECUTOR])).toBe(
-      "[argos] executors: paseo (default), hc\n",
+    // Registry order is `hc` first (FR1), so the line reads the same way a fresh server prints it.
+    expect(formatExecutorLine([HC_EXECUTOR, PASEO_EXECUTOR])).toBe(
+      "[argos] executors: hc, paseo (default)\n",
     );
     // The default is whatever the server resolved, never hard-coded to paseo.
     expect(
-      formatExecutorLine([{ ...PASEO_EXECUTOR, default: false }, { ...HC_EXECUTOR, default: true }]),
-    ).toBe("[argos] executors: paseo, hc (default)\n");
+      formatExecutorLine([{ ...HC_EXECUTOR, default: true }, { ...PASEO_EXECUTOR, default: false }]),
+    ).toBe("[argos] executors: hc (default), paseo\n");
     expect(formatExecutorLine([])).toBe("[argos] executors: (none)\n");
+  });
+
+  it("prefers hc, falls back to paseo, and never rewrites an operator's choice", () => {
+    // No flag/env: `hc` is the preferred substrate once its adapter registered...
+    expect(resolveDefaultExecutor(undefined, true)).toBe("hc");
+    // ...and a server whose core probe failed starts on the entry the registry always carries.
+    expect(resolveDefaultExecutor(undefined, false)).toBe("paseo");
+    // An explicit choice is returned verbatim: `ArgosHost.open` refuses an unregistered one.
+    expect(resolveDefaultExecutor("paseo", true)).toBe("paseo");
+    expect(resolveDefaultExecutor("hc", false)).toBe("hc");
   });
 
   it("refuses an unknown --default-executor before opening anything", async () => {
@@ -99,7 +110,7 @@ describe("argos serve executor startup (FR9, FR16)", () => {
       );
       expect(code).toBe(1);
       expect(captured.stderr()).toContain("--default-executor");
-      expect(captured.stderr()).toContain("paseo, hc");
+      expect(captured.stderr()).toContain("hc, paseo");
       // Nothing was served, so stdout stayed empty.
       expect(captured.stdout()).toBe("");
     } finally {

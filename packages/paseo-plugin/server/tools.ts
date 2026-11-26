@@ -186,8 +186,8 @@ export function argosTools(client: ArgosRpc): AgentToolDefinition[] {
       "Start an Argos YAML playbook (YAML files under .argos/playbooks in the workspace). " +
       "Returns the run id to follow with argos_run_status. cwd defaults to the calling agent's " +
       "working directory and must name that directory or a subdirectory. " +
-      "Pass executor to pick the substrate for this run (paseo, hc); omit it to use the " +
-      "playbook's own default, then the server's. " +
+      "Pass executor to pick the substrate for this run (hc, paseo); omit it to use the " +
+      "playbook's own default, then the server's (herdr-core when it is registered, else Paseo). " +
       "An invalid playbook returns isError with code playbook_invalid; a bad input, an unknown " +
       "executor id, or an out-of-scope cwd returns invalid_request; a substrate this server does " +
       "not provide returns executor_unavailable.",

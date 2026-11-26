@@ -178,7 +178,7 @@ describe("executor refusals (FR4)", () => {
     expect(issue?.stepId).toBeUndefined();
     // The issue names the document position: the file plus the key, never a step path.
     expect(issue?.path).toBe(`${file}: executor`);
-    expect(issue?.message).toContain("paseo, hc");
+    expect(issue?.message).toContain("hc, paseo");
   });
 
   it("rejects an unknown value in a defaults layer too", () => {

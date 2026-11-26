@@ -163,7 +163,7 @@ describe("argos run --json", () => {
     const result = await invoke(["run", "gated", "--executor", "nope", "--json"]);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("--executor");
-    expect(result.stderr).toContain("paseo, hc");
+    expect(result.stderr).toContain("hc, paseo");
     expect(result.stdout).toBe("");
     expect(current().stub.requests.length).toBe(before);
   });
@@ -853,7 +853,7 @@ describe("argos schedule (FR10.2)", () => {
     ]);
     expect(unknown.code).toBe(1);
     expect(unknown.stderr).toContain("--executor");
-    expect(unknown.stderr).toContain("paseo, hc");
+    expect(unknown.stderr).toContain("hc, paseo");
     expect(unknown.stdout).toBe("");
     expect(current().stub.requests.length).toBe(before);
   });

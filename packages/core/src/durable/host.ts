@@ -294,6 +294,9 @@ export class ArgosHost {
       [DEFAULT_EXECUTOR_ID]: options.executor,
       ...options.executors,
     };
+    // FR2/FR16: the substrate a run without a request/schedule/playbook override starts on. `argos
+    // serve` always passes the operator's choice — or `PREFERRED_EXECUTOR_ID` when that substrate is
+    // registered — so this fallback is the library's own: the legacy `paseo` entry.
     const defaultExecutor: ExecutorId = options.defaultExecutor ?? DEFAULT_EXECUTOR_ID;
     const catalogs: Partial<Record<ExecutorId, TargetCatalog>> = { ...options.catalogs };
     const executorInfo: Partial<Record<ExecutorId, ExecutorDescriptor>> = {
@@ -431,9 +434,9 @@ export class ArgosHost {
    * server default, whether it is reachable, its documented capabilities (with any injected
    * override), and the adapter's error when it is not reachable.
    *
-   * Ordered by {@link EXECUTOR_IDS} (`paseo` first) rather than by registration, so the line an
-   * operator reads is stable. Read-only and side-effect free: `argos serve` prints it at startup and
-   * `argos doctor` reads it over `/info`.
+   * Ordered by {@link EXECUTOR_IDS} (`hc` first, then `paseo`) rather than by registration, so the
+   * line an operator reads is stable. Read-only and side-effect free: `argos serve` prints it at
+   * startup and `argos doctor` reads it over `/info`.
    */
   get executors(): readonly ExecutorInfo[] {
     return EXECUTOR_IDS.filter((id) => this.#executors[id] !== undefined).map((id) => {
@@ -615,8 +618,9 @@ export class ArgosHost {
       if (id === undefined) this.#refuseExecutor(input.executor);
       return id;
     }
-    // FR4: the playbook's default. An absent key means `paseo`, which is what `defaultExecutor`
-    // is when the operator never changed it; a declared id is checked for registration below.
+    // FR4: the playbook's default. An absent key means whatever substrate this host starts runs on
+    // (`#defaultExecutor`, which `argos serve` picks); a declared id is checked for registration
+    // below. An old record's own key is already frozen and never re-resolved.
     return input.ir.executor ?? this.#defaultExecutor;
   }
 
