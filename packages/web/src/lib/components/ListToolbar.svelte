@@ -19,6 +19,7 @@
     type RunTriggerFacet,
   } from "@thaodangspace/argos-core/view";
 
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
   import FilterChips from "./FilterChips.svelte";
 
   let {
@@ -49,22 +50,31 @@
       (entry): entry is FacetOption => entry !== undefined,
     ),
   );
+
+  const SORT_BUTTON =
+    "btn rounded-none border-r border-surface-200-800 text-[12px] font-normal text-surface-700-300 last:border-r-0 aria-pressed:bg-primary-500/15 aria-pressed:font-semibold aria-pressed:text-surface-950-50";
+  const FACET_LABEL =
+    "inline-flex items-center gap-1.5 text-[12px] text-surface-600-400 whitespace-nowrap";
+  const FACET_SELECT = "select w-auto text-[12px]";
 </script>
 
-<section class="toolbar" aria-label="Filter workflow runs">
-  <div class="row">
-    <p class="count" aria-live="polite">
-      <strong>{total}</strong>
+<section class="mb-3 flex flex-col gap-2" aria-label="Filter workflow runs">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <p class="m-0 text-[13px] tabular-nums text-surface-600-400" aria-live="polite">
+      <strong class="text-surface-950-50">{total}</strong>
       {total === 1 ? "run" : "runs"}
       {#if running > 0}
-        <span class="sep">·</span><span class="tone-accent">{running} in progress</span>
+        <span class="mx-1.5 opacity-60">·</span><span
+          class={toneClass(TONE_TEXT, "accent")}
+          data-tone="accent">{running} in progress</span
+        >
       {/if}
     </p>
-    <div class="sort" role="group" aria-label="Order">
+    <div class="inline-flex overflow-hidden rounded-md border border-surface-200-800" role="group" aria-label="Order">
       {#each RUN_SORTS as option (option)}
         <button
           type="button"
-          class:active={sort === option}
+          class={SORT_BUTTON}
           aria-pressed={sort === option}
           onclick={() => onSort(option)}
         >
@@ -74,14 +84,15 @@
     </div>
   </div>
 
-  <div class="row">
+  <div class="flex flex-wrap items-center justify-between gap-3">
     <FilterChips {filters} active={query.status} onSelect={onStatus} />
 
-    <div class="facets">
+    <div class="flex flex-wrap items-center gap-2">
       {#if facets.projects.length > 1}
-        <label>
+        <label class={FACET_LABEL}>
           <span>Project</span>
           <select
+            class={FACET_SELECT}
             value={query.project ?? ""}
             onchange={(event) =>
               onFacet("project", (event.currentTarget as HTMLSelectElement).value || undefined)}
@@ -94,9 +105,10 @@
         </label>
       {/if}
 
-      <label>
+      <label class={FACET_LABEL}>
         <span>Workflow</span>
         <select
+          class={FACET_SELECT}
           value={query.workflow ?? ""}
           onchange={(event) =>
             onFacet("workflow", (event.currentTarget as HTMLSelectElement).value || undefined)}
@@ -108,9 +120,10 @@
         </select>
       </label>
 
-      <label>
+      <label class={FACET_LABEL}>
         <span>Trigger</span>
         <select
+          class={FACET_SELECT}
           value={query.trigger ?? ""}
           onchange={(event) =>
             onFacet(
@@ -126,9 +139,10 @@
       </label>
 
       {#if facets.executors.length > 1}
-        <label>
+        <label class={FACET_LABEL}>
           <span>Executor</span>
           <select
+            class={FACET_SELECT}
             value={query.executor ?? ""}
             onchange={(event) =>
               onFacet("executor", (event.currentTarget as HTMLSelectElement).value || undefined)}
@@ -143,92 +157,3 @@
     </div>
   </div>
 </section>
-
-<style>
-  .toolbar {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
-  .count {
-    margin: 0;
-    color: var(--muted);
-    font-size: 13px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .count strong {
-    color: var(--text);
-  }
-
-  .sep {
-    margin: 0 6px;
-    opacity: 0.6;
-  }
-
-  .sort {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-
-  .sort button {
-    padding: 4px 10px;
-    border: 0;
-    background: transparent;
-    color: var(--muted);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .sort button + button {
-    border-left: 1px solid var(--border);
-  }
-
-  .sort button:hover {
-    background: var(--surface-hover);
-    color: var(--text);
-  }
-
-  .sort button.active {
-    background: var(--accent-soft);
-    color: var(--text);
-    font-weight: 600;
-  }
-
-  .facets {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  label {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  select {
-    padding: 3px 6px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    font-size: 12px;
-  }
-</style>

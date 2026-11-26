@@ -5,36 +5,10 @@
   }: { title: string; hint: string } = $props();
 </script>
 
-<div class="empty">
-  <div class="mark" aria-hidden="true">◎</div>
-  <h2>{title}</h2>
-  <p>{hint}</p>
+<div
+  class="rounded-lg border border-dashed border-surface-300-700 px-6 py-14 text-center text-surface-600-400"
+>
+  <div class="mb-2 text-[28px]" aria-hidden="true">◎</div>
+  <h2 class="mb-1.5 text-[15px] text-surface-950-50">{title}</h2>
+  <p class="mx-auto max-w-[52ch] text-[13px]">{hint}</p>
 </div>
-
-<style>
-  .empty {
-    text-align: center;
-    padding: 56px 24px;
-    border: 1px dashed var(--border);
-    border-radius: 8px;
-    color: var(--muted);
-  }
-
-  .mark {
-    font-size: 28px;
-    color: var(--muted);
-    margin-bottom: 8px;
-  }
-
-  h2 {
-    margin: 0 0 6px;
-    font-size: 15px;
-    color: var(--text);
-  }
-
-  p {
-    margin: 0 auto;
-    max-width: 52ch;
-    font-size: 13px;
-  }
-</style>

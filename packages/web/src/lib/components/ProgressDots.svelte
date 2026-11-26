@@ -1,12 +1,19 @@
 <script lang="ts">
   import type { StepProgressView } from "@thaodangspace/argos-core/view";
 
+  import { TONE_BG_SOFT, toneClass } from "#lib/ui/tone";
+
   let { steps }: { steps: readonly StepProgressView[] } = $props();
 </script>
 
-<span class="dots" aria-hidden="true">
+<span class="inline-flex items-center gap-1" aria-hidden="true">
   {#each steps as step (step.id)}
-    <span class="dot bg-{step.tone}" title={`${step.label}: ${step.status}`}></span>
+    <span
+      class="size-1.5 rounded-full opacity-85 {toneClass(TONE_BG_SOFT, step.tone)}"
+      data-dot={step.id}
+      data-tone={step.tone}
+      title={`${step.label}: ${step.status}`}
+    ></span>
   {/each}
 </span>
 {#if steps.length > 0}
@@ -14,18 +21,3 @@
     {steps.filter((step) => step.status === "completed").length} of {steps.length} steps completed
   </span>
 {/if}
-
-<style>
-  .dots {
-    display: inline-flex;
-    gap: 3px;
-    align-items: center;
-  }
-
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    opacity: 0.85;
-  }
-</style>

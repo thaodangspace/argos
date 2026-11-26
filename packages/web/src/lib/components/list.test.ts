@@ -64,7 +64,7 @@ describe("RunRow", () => {
     expect(screen.getByText("#01J00000")).toBeTruthy();
     expect(screen.getByText("1/2 steps · ship running")).toBeTruthy();
     expect(screen.getByText("Running")).toBeTruthy();
-    expect(document.querySelectorAll(".dot")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-dot]")).toHaveLength(2);
   });
 
   it("shows the executor badge and cost when the run reports them", () => {
@@ -269,7 +269,7 @@ describe("ListToolbar", () => {
         onSort,
       },
     });
-    expect(screen.getByText("2", { selector: ".count strong" })).toBeTruthy();
+    expect(screen.getByText("2", { selector: "[aria-live='polite'] strong" })).toBeTruthy();
     expect(screen.getByText("2 in progress")).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "Recent activity" }));
     expect(onSort).toHaveBeenCalledWith("activity");

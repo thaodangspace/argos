@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RunView } from "@thaodangspace/argos-core/view";
 
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
   import ProgressDots from "./ProgressDots.svelte";
   import StatusGlyph from "./StatusGlyph.svelte";
   import { runHref } from "../paths.js";
@@ -24,146 +25,42 @@
   const relativeTitle = $derived(
     relative === "activity" ? `updated ${run.updatedLabel}` : `started ${run.createdLabel}`,
   );
+
+  const ROW =
+    "card grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-surface-200-800 px-3.5 py-2.5 text-surface-950-50 hover:bg-surface-200-800/60 max-sm:grid-cols-[20px_minmax(0,1fr)]";
+  const TIMES =
+    "flex min-w-[88px] flex-col items-end text-[12px] tabular-nums text-surface-600-400 max-sm:col-start-2 max-sm:min-w-0 max-sm:flex-row max-sm:justify-start max-sm:gap-2";
 </script>
 
-<a class="row" href={runHref(run.id)} aria-label={`Run ${run.runIdShort} of ${run.playbookId}: ${run.statusLabel}`}>
-  <span class="lead">
+<a class={ROW} href={runHref(run.id)} aria-label={`Run ${run.runIdShort} of ${run.playbookId}: ${run.statusLabel}`}>
+  <span class="flex justify-center">
     <StatusGlyph glyph={run.glyph} tone={run.tone} label={run.statusLabel} pulse={run.status === "running"} />
   </span>
 
-  <span class="main">
-    <span class="title">
-      {#if showProject && run.project !== ""}<span class="project">{run.project}</span>{/if}
-      {#if showPlaybook}<span class="playbook">{run.playbookId}</span>{/if}
-      <span class="detail">{run.detail}</span>
-      <span class="id">#{run.runIdShort}</span>
+  <span class="flex min-w-0 flex-col gap-0.5">
+    <span class="flex min-w-0 items-baseline gap-2">
+      {#if showProject && run.project !== ""}<span
+          class="whitespace-nowrap rounded border border-surface-200-800 px-1 text-[11px] text-surface-600-400"
+          >{run.project}</span
+        >{/if}
+      {#if showPlaybook}<span class="whitespace-nowrap font-semibold">{run.playbookId}</span>{/if}
+      <span class="truncate text-surface-600-400">{run.detail}</span>
+      <span class="whitespace-nowrap font-mono text-[12px] text-surface-600-400">#{run.runIdShort}</span>
     </span>
-    <span class="sub">
-      <span class="status tone-{run.tone}">{run.statusLabel}</span>
-      <span class="trigger">{run.triggerLabel}</span>
-      {#if run.executor}<span class="executor">{run.executor}</span>{/if}
-      {#if run.costLabel}<span class="cost">{run.costLabel}</span>{/if}
+    <span class="flex flex-wrap gap-2 text-[12px] text-surface-600-400">
+      <span class="badge {toneClass(TONE_TEXT, run.tone)}" data-tone={run.tone}>{run.statusLabel}</span>
+      <span class="capitalize">{run.triggerLabel}</span>
+      {#if run.executor}<span class="rounded border border-surface-200-800 px-1">{run.executor}</span>{/if}
+      {#if run.costLabel}<span>{run.costLabel}</span>{/if}
     </span>
   </span>
 
-  <span class="progress"><ProgressDots steps={run.progress} /></span>
+  <span class="flex items-center max-sm:col-start-2 max-sm:flex-row max-sm:justify-start"
+    ><ProgressDots steps={run.progress} /></span
+  >
 
-  <span class="times">
-    <span class="duration">{run.durationLabel}</span>
-    <span class="relative" title={relativeTitle}>{relativeLabel}</span>
+  <span class={TIMES}>
+    <span class="text-surface-950-50">{run.durationLabel}</span>
+    <span title={relativeTitle}>{relativeLabel}</span>
   </span>
 </a>
-
-<style>
-  .row {
-    display: grid;
-    grid-template-columns: 20px minmax(0, 1fr) auto auto;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border-top: 1px solid var(--border);
-    color: var(--text);
-  }
-
-  .row:hover {
-    background: var(--surface-hover);
-  }
-
-  .lead {
-    display: flex;
-    justify-content: center;
-  }
-
-  .main {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .title {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .playbook {
-    font-weight: 600;
-    white-space: nowrap;
-  }
-
-  .project {
-    padding: 0 5px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--muted);
-    font-size: 11px;
-    white-space: nowrap;
-  }
-
-  .detail {
-    color: var(--muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .id {
-    color: var(--muted);
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-
-  .sub {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  .trigger {
-    text-transform: capitalize;
-  }
-
-  .executor {
-    padding: 0 5px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-  }
-
-  .progress {
-    display: flex;
-    align-items: center;
-  }
-
-  .times {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    min-width: 88px;
-    color: var(--muted);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .duration {
-    color: var(--text);
-  }
-
-  @media (max-width: 640px) {
-    .row {
-      grid-template-columns: 20px minmax(0, 1fr);
-    }
-    .progress,
-    .times {
-      grid-column: 2;
-      flex-direction: row;
-      justify-content: flex-start;
-      gap: 8px;
-      min-width: 0;
-    }
-  }
-</style>

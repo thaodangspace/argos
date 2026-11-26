@@ -23,9 +23,10 @@
   } = $props();
 </script>
 
-<label class="zone">
-  <span class="zone-label">Time zone</span>
+<label class="inline-flex items-center gap-1.5 text-[12px] text-surface-600-400">
+  <span class="whitespace-nowrap max-sm:sr-only">Time zone</span>
   <select
+    class="select w-auto max-w-60 text-[12px] max-sm:max-w-36"
     value={value ?? ""}
     title="Timestamps are shown in this zone"
     onchange={(event) => onSelect((event.currentTarget as HTMLSelectElement).value)}
@@ -36,39 +37,3 @@
     {/each}
   </select>
 </label>
-
-<style>
-  .zone {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  .zone select {
-    max-width: 15rem;
-    padding: 3px 6px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    font-size: 12px;
-  }
-
-  .zone-label {
-    white-space: nowrap;
-  }
-
-  @media (max-width: 640px) {
-    .zone-label {
-      position: absolute;
-      left: -9999px;
-    }
-
-    .zone select {
-      max-width: 9rem;
-    }
-  }
-</style>
