@@ -24,7 +24,7 @@
   import { href, runHref, workflowHref } from "#lib/paths";
   import { RunActions } from "#lib/run-actions.svelte";
   import { DetailStore } from "#lib/state/detail.svelte";
-  import { RunsStore } from "#lib/state/runs.svelte";
+  import { runsHub } from "#lib/state/runs-hub.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { ToastStore } from "#lib/state/toasts.svelte";
   import {
@@ -37,7 +37,8 @@
   let { data }: PageProps = $props();
 
   const api = createApi();
-  const list = new RunsStore();
+  // The shared stream (inbox FR6): the layout holds the anchor lease and this route joins it.
+  const list = runsHub.store;
   const detail = new DetailStore();
   const toasts = new ToastStore();
 
@@ -51,7 +52,7 @@
   const showGraph = $derived(viewMode === "graph" && graph !== undefined);
 
   onMount(() => {
-    list.start(api);
+    const lease = runsHub.acquire(api);
     void detail.open(api, data.runId);
     const initial = readViewParams(window.location.search);
     selectedStepId = initial.step;
@@ -81,7 +82,10 @@
     return () => {
       window.removeEventListener("popstate", onPop);
       window.removeEventListener("keydown", onKey);
-      list.stop();
+      // Bump the detail token before dropping the lease: a `GET /runs/:id` that resolves after
+      // navigation is dropped instead of writing into a page that is gone.
+      detail.close();
+      lease.release();
     };
   });
 
@@ -157,7 +161,7 @@
   }
 
   async function refresh(): Promise<void> {
-    await list.load(api);
+    await runsHub.load();
     await detail.open(api, data.runId);
   }
 

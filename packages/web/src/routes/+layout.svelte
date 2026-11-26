@@ -1,7 +1,11 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+
+  import { createApi } from "#lib/api";
   import StartRunDialog from "#lib/components/StartRunDialog.svelte";
   import TimeZoneSelect from "#lib/components/TimeZoneSelect.svelte";
   import { browserStorage } from "#lib/state/hidden-workflows";
+  import { runsHub } from "#lib/state/runs-hub.svelte";
   import { ThemeStore } from "#lib/state/theme.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { href, runHref } from "#lib/paths";
@@ -17,6 +21,15 @@
   timeZoneStore.init(storage);
 
   let startOpen = $state(false);
+
+  // The anchor lease (inbox FR6): the layout keeps the shared runs stream open for the whole app,
+  // so a route's own lease and the header badge read one value from one SSE connection.
+  onMount(() => {
+    const lease = runsHub.acquire(createApi());
+    return () => {
+      lease.release();
+    };
+  });
 
   async function started(runId: string): Promise<void> {
     startOpen = false;
