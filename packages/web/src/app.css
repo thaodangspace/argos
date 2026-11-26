@@ -1,46 +1,28 @@
-/**
- * The one design-token file (spec FR16). Theme is `html[data-theme]`; components only ever use
- * these variables, so the dark/light palettes cannot drift apart.
- *
- * The palette follows GitHub Actions: a near-black surface, a raised card, and a semantic color per
- * status. Every status is also rendered as a glyph + text label (FR15), never color alone.
- */
+/* The only stylesheet in packages/web (spec FR3): Tailwind + Skeleton + the Hamlindigo theme. */
+@import "tailwindcss";
+@import "@skeletonlabs/skeleton";
+@import "@skeletonlabs/skeleton-svelte";
+@import "@skeletonlabs/skeleton/themes/hamlindigo";
 
-:root,
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface-hover: #1c2129;
-  --border: #30363d;
-  --border-strong: #484f58;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --accent-soft: rgba(88, 166, 255, 0.14);
-  --success: #3fb950;
-  --success-soft: rgba(63, 185, 80, 0.14);
-  --warning: #d29922;
-  --warning-soft: rgba(210, 153, 34, 0.16);
-  --danger: #f85149;
-  --danger-soft: rgba(248, 81, 73, 0.14);
-  --neutral-soft: rgba(139, 148, 158, 0.16);
-  --shadow: 0 1px 0 rgba(1, 4, 9, 0.6);
-}
+/* The colour mode is a class on <html>, never `data-theme` (spec FR5); Skeleton paints with
+   light-dark() pairs, so this variant is what makes the whole theme follow the toggle instead of
+   the operating system (spec FR6). */
+@custom-variant dark (&:where(.dark, .dark *));
 
-html[data-theme="light"] {
-  color-scheme: light;
+/* LEGACY — temporary, deleted in Phase 7.
+   The 27 components not yet migrated to utilities still read the old custom properties, so they are
+   re-declared here against the new mechanism (light under :root, dark under html.dark) and the
+   tone → colour bridge is kept verbatim. Nothing new may be added to this block. */
+:root {
   --bg: #ffffff;
   --surface: #f6f8fa;
   --surface-hover: #eef1f4;
   --border: #d0d7de;
-  --border-strong: #afb8c1;
   --text: #1f2328;
   --muted: #59636e;
   --accent: #0969da;
   --accent-soft: rgba(9, 105, 218, 0.1);
   --success: #1a7f37;
-  --success-soft: rgba(26, 127, 55, 0.1);
   --warning: #9a6700;
   --warning-soft: rgba(154, 103, 0, 0.12);
   --danger: #cf222e;
@@ -48,43 +30,24 @@ html[data-theme="light"] {
   --neutral-soft: rgba(89, 99, 110, 0.12);
 }
 
-* {
-  box-sizing: border-box;
+html.dark {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-hover: #1c2129;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88, 166, 255, 0.14);
+  --success: #3fb950;
+  --warning: #d29922;
+  --warning-soft: rgba(210, 153, 34, 0.16);
+  --danger: #f85149;
+  --danger-soft: rgba(248, 81, 73, 0.14);
+  --neutral-soft: rgba(139, 148, 158, 0.16);
 }
 
-html,
-body {
-  margin: 0;
-  padding: 0;
-}
-
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-}
-
-a {
-  color: inherit;
-  text-decoration: none;
-}
-
-button {
-  font: inherit;
-  color: inherit;
-}
-
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-/* Tone → color. One mapping for glyphs, dots, labels, and pills. */
+/* Tone → colour. One mapping for glyphs, dots, labels, and pills. */
 .tone-neutral {
   color: var(--muted);
 }
@@ -116,25 +79,4 @@ button {
 .bg-danger {
   background: var(--danger);
 }
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
-}
+/* END LEGACY */
