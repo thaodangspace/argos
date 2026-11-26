@@ -12,7 +12,6 @@
   import { createApi } from "#lib/api";
   import ConnectionPill from "#lib/components/ConnectionPill.svelte";
   import GateInbox from "#lib/components/GateInbox.svelte";
-  import Toasts from "#lib/components/Toasts.svelte";
   import { gateInbox, type GateInboxEntry } from "#lib/gate-inbox";
   import { runHref } from "#lib/paths";
   import { TONE_TEXT, toneClass } from "#lib/ui/tone";
@@ -114,5 +113,3 @@
   deciding={actions.deciding}
   onDecide={decide}
 />
-
-<Toasts store={toasts} />

@@ -19,7 +19,6 @@
   import StepLog from "#lib/components/StepLog.svelte";
   import StepRail from "#lib/components/StepRail.svelte";
   import StartRunDialog from "#lib/components/StartRunDialog.svelte";
-  import Toasts from "#lib/components/Toasts.svelte";
   import ViewToggle from "#lib/components/ViewToggle.svelte";
   import { href, runHref, workflowHref } from "#lib/paths";
   import { TONE_TEXT, toneClass } from "#lib/ui/tone";
@@ -316,5 +315,3 @@
     }}
   />
 {/if}
-
-<Toasts store={toasts} />

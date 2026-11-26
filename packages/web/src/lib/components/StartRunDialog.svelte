@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
 
+  import { Dialog } from "@skeletonlabs/skeleton-svelte";
   import type { Scalar, StartRunRequest } from "@thaodangspace/argos-core/rpc/contracts";
   import type { PlaybookInput, PlaybookSummary } from "@thaodangspace/argos-core/rpc/contracts";
 
@@ -12,6 +13,7 @@
     type FieldErrors,
   } from "#lib/start-form";
   import { addRecent, readRecents, writeRecents } from "#lib/state/recents";
+  import { TONE_TEXT, toneClass } from "#lib/ui/tone";
 
   let {
     open,
@@ -49,6 +51,9 @@
   let palette: HTMLInputElement | undefined = $state();
 
   const selected = $derived(playbooks.find((playbook) => playbook.id === selectedId) ?? null);
+
+  /** The panel's own surface: `card` is only a radius, so the border and padding are utilities. */
+  const PANEL = "card w-full max-w-[620px] border border-surface-200-800 bg-surface-100-900 p-0";
 
   function reset(): void {
     const stored = readRecents();
@@ -144,10 +149,6 @@
     }
   }
 
-  async function onKeydown(event: KeyboardEvent): Promise<void> {
-    if (event.key === "Escape" && !submitting) onClose();
-  }
-
   // One reset per open (not per render): `reset()` writes the form state it would otherwise read,
   // and the parent may pass a fresh `initial` object on every frame.
   let opened = false;
@@ -183,35 +184,53 @@
   }
 </script>
 
-{#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-  <div class="overlay" role="presentation" onclick={(event) => event.target === event.currentTarget && onClose()}>
-    <div
-      class="dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="start-run-title"
-      tabindex="-1"
-      onkeydown={onKeydown}
-    >
-      <header>
-        <h2 id="start-run-title">Run workflow</h2>
-        <button type="button" class="close" aria-label="Close" onclick={onClose}>×</button>
+<!-- Skeleton's `Dialog` (spec FR12) supplies what the hand-rolled overlay could not: a focus trap,
+     `Escape`, scroll lock, and focus restored to the trigger. The form inside is unchanged — a
+     native `<select>` of playbooks, a native checkbox per boolean input, and `start-form.ts`'
+     coercion and validation (spec FR14). -->
+<Dialog
+  {open}
+  onOpenChange={(details) => {
+    if (!details.open) onClose();
+  }}
+  initialFocusEl={() => palette ?? false}
+>
+  <Dialog.Backdrop class="fixed inset-0 z-30 bg-surface-950/60" />
+  <Dialog.Positioner
+    class="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto px-4 pt-[8vh] pb-4"
+  >
+    <Dialog.Content class={PANEL}>
+      <header
+        class="flex items-center justify-between border-b border-surface-200-800 px-4 py-3"
+      >
+        <Dialog.Title class="text-[15px] font-semibold text-surface-950-50">Run workflow</Dialog.Title>
+        <Dialog.CloseTrigger class="btn-icon btn-icon-sm" aria-label="Close"
+          ><span aria-hidden="true">×</span></Dialog.CloseTrigger
+        >
       </header>
+      <Dialog.Description class="sr-only">
+        List a repository's playbooks and start one.
+      </Dialog.Description>
 
-      <form onsubmit={submit}>
-        <label class="field">
+      <form class="flex flex-col gap-3 px-4 pt-3.5 pb-4" onsubmit={submit}>
+        <label class="label text-[12px] text-surface-700-300">
           <span>Working directory</span>
-          <div class="row">
+          <div class="flex gap-1.5">
             <input
               bind:this={palette}
               bind:value={cwd}
               list="argos-cwd-recents"
+              class="input"
               placeholder="/absolute/path/to/repo"
               spellcheck="false"
               autocomplete="off"
             />
-            <button type="button" class="secondary" disabled={loading} onclick={loadPlaybooks}>
+            <button
+              type="button"
+              class="btn preset-tonal shrink-0"
+              disabled={loading}
+              onclick={loadPlaybooks}
+            >
               {loading ? "Loading…" : "Load"}
             </button>
           </div>
@@ -220,17 +239,29 @@
               <option value={recent}></option>
             {/each}
           </datalist>
-          {#if errors["cwd"]}<span class="error">{errors["cwd"]}</span>{/if}
+          {#if errors["cwd"]}<span
+              class={["text-[12px]", toneClass(TONE_TEXT, "danger")]}
+              data-tone="danger">{errors["cwd"]}</span
+            >{/if}
         </label>
 
         {#if loadError !== null}
-          <p class="error" role="alert"><code>{loadError.code}</code> {loadError.message}</p>
+          <p
+            class={[
+              "card m-0 border border-error-500/40 bg-error-500/15 p-2.5 text-[13px]",
+              toneClass(TONE_TEXT, "danger"),
+            ]}
+            data-tone="danger"
+            role="alert"
+          >
+            <code class="font-mono">{loadError.code}</code> {loadError.message}
+          </p>
         {/if}
 
         {#if playbooks.length > 0}
-          <label class="field">
+          <label class="label text-[12px] text-surface-700-300">
             <span>Playbook</span>
-            <select value={selectedId} onchange={onSelectPlaybook}>
+            <select class="select" value={selectedId} onchange={onSelectPlaybook}>
               {#each playbooks as playbook (playbook.id)}
                 <option value={playbook.id}>
                   {playbook.id} · {playbook.stepCount} steps{playbook.inputs.length > 0
@@ -242,11 +273,11 @@
           </label>
 
           {#if loadWarnings.length > 0}
-            <details class="warnings">
+            <details class="text-[12px] text-surface-600-400">
               <summary>{loadWarnings.length} playbook(s) could not be loaded</summary>
               <ul>
                 {#each loadWarnings as warning (warning.file)}
-                  <li><code>{warning.code}</code> {warning.file}</li>
+                  <li><code class="font-mono">{warning.code}</code> {warning.file}</li>
                 {/each}
               </ul>
             </details>
@@ -254,15 +285,20 @@
 
           {#if selected !== null}
             {#each selected.inputs as input (input.name)}
-              <label class="field">
+              <label class="label text-[12px] text-surface-700-300">
                 <span>
                   {input.name}
-                  {#if input.required}<span class="required" aria-hidden="true">*</span>{/if}
-                  <span class="type">{input.type}</span>
+                  {#if input.required}<span
+                      class={["ml-0.5", toneClass(TONE_TEXT, "danger")]}
+                      data-tone="danger"
+                      aria-hidden="true">*</span
+                    >{/if}
+                  <span class="badge preset-tonal ml-1.5 text-[10px] uppercase">{input.type}</span>
                 </span>
                 {#if fieldKind(input) === "boolean"}
                   <input
                     type="checkbox"
+                    class="checkbox"
                     checked={values[input.name] === true}
                     onchange={(event) => {
                       values[input.name] = event.currentTarget.checked;
@@ -270,6 +306,7 @@
                   />
                 {:else if fieldKind(input) === "enum"}
                   <select
+                    class="select"
                     value={String(values[input.name] ?? "")}
                     onchange={(event) => {
                       values[input.name] = event.currentTarget.value;
@@ -285,30 +322,35 @@
                     type="text"
                     inputmode={fieldKind(input) === "number" ? "decimal" : undefined}
                     value={String(values[input.name] ?? "")}
-                    class:invalid={fieldError(input.name) !== undefined}
+                    class="input aria-invalid:border aria-invalid:border-error-500"
+                    aria-invalid={fieldError(input.name) !== undefined}
                     oninput={(event) => {
                       values[input.name] = event.currentTarget.value;
                     }}
                   />
                 {/if}
-                {#if input.description}<span class="hint">{input.description}</span>{/if}
+                {#if input.description}<span class="text-[11px] text-surface-600-400"
+                    >{input.description}</span
+                  >{/if}
                 {#if fieldError(input.name)}
-                  <span class="error">{fieldError(input.name)}</span>
+                  <span class={["text-[12px]", toneClass(TONE_TEXT, "danger")]} data-tone="danger"
+                    >{fieldError(input.name)}</span
+                  >
                 {/if}
               </label>
             {/each}
 
-            <div class="options">
-              <label class="field compact">
+            <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              <label class="label text-[12px] text-surface-700-300">
                 <span>Isolation</span>
-                <select bind:value={isolation}>
+                <select class="select" bind:value={isolation}>
                   <option value="none">none</option>
                   <option value="worktree">worktree</option>
                 </select>
               </label>
-              <label class="field compact">
+              <label class="label text-[12px] text-surface-700-300">
                 <span>Executor</span>
-                <select bind:value={executor}>
+                <select class="select" bind:value={executor}>
                   <option value="">server default</option>
                   {#each executors as id (id)}
                     <option value={id}>{id}</option>
@@ -318,198 +360,40 @@
             </div>
           {/if}
         {:else if !loading}
-          <p class="hint">
+          <p class="m-0 text-[11px] text-surface-600-400">
             Enter a repository directory and press Load to list its playbooks.
           </p>
         {/if}
 
         {#if serverError !== null}
-          <p class="error banner" role="alert">
-            <code>{serverError.code}</code> {serverError.message}
+          <p
+            class={[
+              "card m-0 border border-error-500/40 bg-error-500/15 p-2.5 text-[13px]",
+              toneClass(TONE_TEXT, "danger"),
+            ]}
+            data-tone="danger"
+            role="alert"
+          >
+            <code class="font-mono">{serverError.code}</code> {serverError.message}
           </p>
         {/if}
 
-        <footer>
-          <button type="button" class="secondary" onclick={onClose} disabled={submitting}>Cancel</button>
-          <button type="submit" class="primary" disabled={submitting || selected === null}>
+        <footer class="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            class="btn preset-tonal disabled:cursor-not-allowed disabled:opacity-50"
+            onclick={onClose}
+            disabled={submitting}>Cancel</button
+          >
+          <button
+            type="submit"
+            class="btn preset-filled-primary-500 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={submitting || selected === null}
+          >
             {submitting ? "Starting…" : "Run workflow"}
           </button>
         </footer>
       </form>
-    </div>
-  </div>
-{/if}
-
-<style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(1, 4, 9, 0.6);
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 8vh 16px 16px;
-    z-index: 30;
-    overflow-y: auto;
-  }
-
-  .dialog {
-    width: min(620px, 100%);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    box-shadow: 0 16px 48px rgba(1, 4, 9, 0.5);
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 15px;
-  }
-
-  .close {
-    border: 0;
-    background: transparent;
-    color: var(--muted);
-    font-size: 18px;
-    cursor: pointer;
-    line-height: 1;
-  }
-
-  form {
-    padding: 14px 16px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  .row {
-    display: flex;
-    gap: 6px;
-  }
-
-  input,
-  select {
-    width: 100%;
-    padding: 6px 8px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
-    font-size: 13px;
-  }
-
-  input[type="checkbox"] {
-    width: auto;
-    align-self: flex-start;
-  }
-
-  .invalid {
-    border-color: var(--danger);
-  }
-
-  .error {
-    color: var(--danger);
-    font-size: 12px;
-  }
-
-  .banner {
-    padding: 8px 10px;
-    border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border));
-    border-radius: 6px;
-    background: var(--danger-soft);
-  }
-
-  code {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  }
-
-  .required {
-    color: var(--danger);
-    margin-left: 2px;
-  }
-
-  .type {
-    margin-left: 6px;
-    padding: 0 4px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 10px;
-    text-transform: uppercase;
-  }
-
-  .hint {
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  .options {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-  }
-
-  .warnings {
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding-top: 4px;
-  }
-
-  .primary,
-  .secondary {
-    padding: 6px 12px;
-    border-radius: 6px;
-    font-size: 13px;
-    cursor: pointer;
-    border: 1px solid var(--border);
-  }
-
-  .primary {
-    background: var(--success);
-    border-color: var(--success);
-    color: #04130a;
-    font-weight: 600;
-  }
-
-  .primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .secondary {
-    background: transparent;
-    color: var(--text);
-  }
-
-  .secondary:hover:not(:disabled) {
-    background: var(--surface-hover);
-  }
-
-  @media (max-width: 560px) {
-    .options {
-      grid-template-columns: 1fr;
-    }
-  }
-</style>
+    </Dialog.Content>
+  </Dialog.Positioner>
+</Dialog>

@@ -3,8 +3,9 @@
  *
  * Five rules and one anti-stale pair:
  *   1. no `<style>` block and no `style=` attribute in any `.svelte` under `src/`. A path in
- *      `STYLE_ALLOWLIST` (which shrinks to empty in the last phase) may keep exactly **one** legacy
- *      `<style>` block — the one it has today; a second one is a new stylesheet already;
+ *      `STYLE_ALLOWLIST` would keep exactly **one** legacy `<style>` block — the one it has today; a
+ *      second one is a new stylesheet already. The list reached empty in Phase 6 and only its stale
+ *      rule keeps it honest;
  *   2. no class built by interpolation (`tone-{tone}`) — Tailwind's scanner cannot see it, so the
  *      class would be missing only in the production build (spec FR4). A file that still carries a
  *      legacy `<style>` keeps its legacy interpolation until its own phase migrates it, which is
@@ -47,13 +48,11 @@ const ALLOW_LEGACY_BLOCK = true;
 const APP_CSS_ALLOWLIST: readonly string[] = [];
 
 /**
- * The `.svelte` files that still carry a `<style>` block (Phase 5 census: 2). Monotonic: a phase
+ * The `.svelte` files that still carry a `<style>` block (Phase 6 census: 0). Monotonic: a phase
  * removes exactly its own files and adds none, and this test fails when an entry goes stale.
+ * Empty is the goal state — Phase 7 only deletes the LEGACY block and flips `ALLOW_LEGACY_BLOCK`.
  */
-const STYLE_ALLOWLIST: readonly string[] = [
-  "src/lib/components/StartRunDialog.svelte",
-  "src/lib/components/Toasts.svelte",
-];
+const STYLE_ALLOWLIST: readonly string[] = [];
 
 /** Spec FR3, in order and complete. */
 const APP_CSS_IMPORTS: readonly string[] = [
