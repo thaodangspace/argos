@@ -1,18 +1,17 @@
 /**
  * Style guard for the web app (spec FR17, FR18): hand-written CSS must not come back.
  *
- * Five rules and one anti-stale pair:
+ * Five rules; rule 4 is the stale-exemption check that keeps the allowlist honest:
  *   1. no `<style>` block and no `style=` attribute in any `.svelte` under `src/`. A path in
- *      `STYLE_ALLOWLIST` would keep exactly **one** legacy `<style>` block — the one it has today; a
- *      second one is a new stylesheet already. The list reached empty in Phase 6 and only its stale
- *      rule keeps it honest;
+ *      `STYLE_ALLOWLIST` would keep exactly **one** `<style>` block — the one it has today; a second
+ *      one is a new stylesheet already. The list is empty, and its stale rule below keeps it honest;
  *   2. no class built by interpolation (`tone-{tone}`) — Tailwind's scanner cannot see it, so the
- *      class would be missing only in the production build (spec FR4). A file that still carries a
- *      legacy `<style>` keeps its legacy interpolation until its own phase migrates it, which is
- *      exactly the same set: `STYLE_ALLOWLIST`, monotonic, checked for staleness below;
+ *      class would be missing only in the production build (spec FR4). A file that still carries its
+ *      own `<style>` keeps its interpolation until its phase migrates it, which is exactly the same
+ *      set: `STYLE_ALLOWLIST`, monotonic, checked for staleness below;
  *   3. `src/app.css` is a brace-depth scan, not a per-line regex: the four `@import`s in spec FR3's
- *      order, one `@custom-variant`, the marker-delimited LEGACY block, and anything named in
- *      `APP_CSS_ALLOWLIST` — nothing else;
+ *      order, exactly one `@custom-variant`, and anything named in `APP_CSS_ALLOWLIST` — nothing
+ *      else, so no selector, no declaration, no `@theme`/`@utility`/`@layer`;
  *   4. `STYLE_ALLOWLIST` fails when it lists a file that no longer offends, so no exemption outlives
  *      its phase;
  *   5. no `{@html}` anywhere under `src/` (spec FR18).
@@ -34,23 +33,17 @@ const srcDir = fileURLToPath(new URL("..", import.meta.url));
 const webDir = fileURLToPath(new URL("../..", import.meta.url));
 
 /**
- * Phase 7 deletes the LEGACY block from `src/app.css` and flips this to false in the same commit.
- * The guard fails when the constant and the markers disagree, in either direction.
- */
-const ALLOW_LEGACY_BLOCK = true;
-
-/**
- * Blocks `src/app.css` may hold outside the LEGACY region, named by their head (the text before the
- * opening brace). Empty on purpose: a utility that genuinely cannot express something goes here
- * **with a comment naming the utility that failed** and an entry below — the guard is never
- * loosened to fit markup.
+ * Blocks `src/app.css` may hold besides the four imports and the one `@custom-variant`, named by
+ * their head (the text before the opening brace). Empty on purpose: a utility that genuinely cannot
+ * express something goes here **with a comment naming the utility that failed** and an entry below —
+ * the guard is never loosened to fit markup.
  */
 const APP_CSS_ALLOWLIST: readonly string[] = [];
 
 /**
- * The `.svelte` files that still carry a `<style>` block (Phase 6 census: 0). Monotonic: a phase
- * removes exactly its own files and adds none, and this test fails when an entry goes stale.
- * Empty is the goal state — Phase 7 only deletes the LEGACY block and flips `ALLOW_LEGACY_BLOCK`.
+ * The `.svelte` files that still carry a `<style>` block (Phase 6 census: 0, Phase 7: 0).
+ * Monotonic: a phase removes exactly its own files and adds none, and this test fails when an entry
+ * goes stale. Empty is the goal state and where the migration left it.
  */
 const STYLE_ALLOWLIST: readonly string[] = [];
 
@@ -64,9 +57,6 @@ const APP_CSS_IMPORTS: readonly string[] = [
 
 /** Spec FR6: this variant is what makes Skeleton's `light-dark()` pairs follow the `.dark` class. */
 const APP_CSS_CUSTOM_VARIANT = "@custom-variant dark (&:where(.dark, .dark *));";
-
-const LEGACY_START = "/* LEGACY";
-const LEGACY_END = "/* END LEGACY */";
 
 interface SourceFile {
   /** Path relative to `packages/web/`, e.g. `src/lib/components/RunList.svelte`. */
@@ -180,7 +170,7 @@ describe("web style guard", () => {
     const allowed = new Set(STYLE_ALLOWLIST);
     const offenders: string[] = [];
     for (const file of SVELTE_FILES) {
-      // A not-yet-migrated file keeps the one `<style>` block it already has, and no more.
+      // A listed file keeps the one `<style>` block it already has, and no more.
       let exempt = allowed.has(file.path);
       for (const offence of styleOffences(file.text)) {
         if (offence.what === "<style> block" && exempt) {
@@ -197,6 +187,7 @@ describe("web style guard", () => {
     const allowed = new Set(STYLE_ALLOWLIST);
     const offenders: string[] = [];
     for (const file of SVELTE_FILES) {
+      // The same set: a file still allowed its own `<style>` is still allowed its interpolation.
       if (allowed.has(file.path)) continue;
       for (const match of file.text.matchAll(/class="([^"]*)"/g)) {
         const value = match[1] ?? "";
@@ -207,34 +198,18 @@ describe("web style guard", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("keeps src/app.css to the imports, the dark variant, and the LEGACY block", () => {
+  it("keeps src/app.css to the four imports and the one dark variant", () => {
     const path = "src/app.css";
     const appCss = FILES.find((file) => file.path === path);
     expect(appCss).toBeDefined();
     const css = appCss?.text ?? "";
     const offenders: string[] = [];
-
-    const legacyStart = css.indexOf(LEGACY_START);
-    const legacyEndMarker = css.indexOf(LEGACY_END);
-    const legacyEnd = legacyEndMarker === -1 ? -1 : legacyEndMarker + LEGACY_END.length;
-    const hasLegacy = legacyStart !== -1 && legacyEndMarker !== -1;
-
-    // No exemption may outlive its phase: the constant and the markers must agree.
-    if (ALLOW_LEGACY_BLOCK && !hasLegacy) {
-      offenders.push(message(path, 1, "app.css legacy block"));
-    }
-    if (!ALLOW_LEGACY_BLOCK && (legacyStart !== -1 || legacyEndMarker !== -1)) {
-      const index = legacyStart === -1 ? legacyEndMarker : legacyStart;
-      offenders.push(message(path, lineOf(css, index), "app.css legacy block"));
-    }
-
     const imports: { head: string; index: number }[] = [];
     let customVariants = 0;
 
     for (const chunk of cssChunks(css)) {
       if (chunk.kind === "block") {
-        const inLegacy = hasLegacy && chunk.index >= legacyStart && chunk.index < legacyEnd;
-        if (inLegacy && ALLOW_LEGACY_BLOCK) continue;
+        // No selector, no declaration, no `@theme`/`@utility`/`@layer`: there is no block at all.
         if (APP_CSS_ALLOWLIST.includes(chunk.head)) continue;
         offenders.push(message(path, lineOf(css, chunk.index), "app.css statement"));
         continue;

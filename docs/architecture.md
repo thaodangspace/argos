@@ -520,6 +520,24 @@ answers `404`.
   cancel/retry/fork, and `GET /playbooks?cwd=` for the "Run workflow" form. It renders steps, status,
   duration, attempts, usage/cost, declared outputs, gates, and history — never prompts or agent
   transcripts, which the contract does not expose.
+- **Styling.** Every screen is markup plus utilities: Tailwind 4 (through `@tailwindcss/vite`, ahead
+  of `sveltekit()` in the Vite plugin list) and Skeleton 5.0.6 with the Hamlindigo theme.
+  `packages/web/src/app.css` is the only stylesheet and holds exactly the four `@import`s
+  (`tailwindcss`, `@skeletonlabs/skeleton`, `@skeletonlabs/skeleton-svelte`,
+  `@skeletonlabs/skeleton/themes/hamlindigo`) and one
+  `@custom-variant dark (&:where(.dark, .dark *))` — no `@theme`, no `@utility`, no selector, no
+  declaration. That variant is load-bearing: Skeleton paints through `light-dark()` pairs, so the
+  class is what makes the toggle win over the operating system. `src/app.html` carries the two
+  attributes: `class="dark"` is the colour mode and the only thing `applyTheme` writes,
+  `data-theme="hamlindigo"` selects the theme and is never written at runtime. A tone becomes a
+  class only through the literal records in `lib/ui/tone.ts` (Skeleton colour pairings, so one class
+  serves both modes) — an interpolated `tone-{tone}` is invisible to Tailwind's scanner and would be
+  missing only in the production build. `lib/style-guard.test.ts` keeps it that way (no `<style>`, no
+  `style=`, no interpolated class, the `app.css` shape, no stale allowlist entry, no `{@html}`), and
+  `test/setup.ts` supplies the jsdom polyfills Zag's `Dialog`/`Toast` need while the default test
+  environment stays `node`. The palette is Hamlindigo, which deliberately replaces the old
+  GitHub-Actions colours; it ships system font stacks and zero `@font-face`, so the UI downloads no
+  font and requests no new origin.
 - **Shared view model.** Labels, tones, glyphs, filters, grouping, the step log and history text live
   in `@thaodangspace/argos-core/view`; the Paseo panel re-exports them and the web UI imports them, so
   a new status or history event is one edit for both clients (`core/test/view/purity.test.ts` keeps

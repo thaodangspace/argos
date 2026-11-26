@@ -88,7 +88,25 @@ chips count **inside** the scope. `groups`/`groupRuns` stay for the Paseo panel'
 it typechecks with `svelte-kit sync && svelte-check` and builds with Vite/`adapter-static` under
 base `/ui`. It pins its own `typescript@6.0.3` because SvelteKit/svelte-check peer on TS 6 while the
 repository compiles with TS 7.0.2; its only core subpaths are `/rpc/contracts` and `/view`
-(`test import graph in src/lib/import-graph.test.ts`). **The list's filter state lives in the URL**
+(`test import graph in src/lib/import-graph.test.ts`). **The styling is one CSS entry and no
+hand-written CSS.** `tailwindcss` arrives through `@tailwindcss/vite` (the plugin runs before
+`sveltekit()`), and Skeleton 5.0.6 supplies the component classes plus the Hamlindigo theme;
+`src/app.css` is the whole stylesheet and holds the four `@import`s (`tailwindcss`,
+`@skeletonlabs/skeleton`, `@skeletonlabs/skeleton-svelte`,
+`@skeletonlabs/skeleton/themes/hamlindigo`) and then one
+`@custom-variant dark (&:where(.dark, .dark *))` — no `@theme`, no `@utility`, no `@layer`, no
+selector, no declaration. Skeleton paints through `light-dark()` pairs, so that variant is what
+makes the in-app toggle work instead of the operating system. `src/app.html` carries the **two
+attributes**: `class="dark"` is the colour mode and the only thing `applyTheme` writes (the store
+is `lib/state/theme.svelte.ts`), while `data-theme="hamlindigo"` selects the theme and is never
+written at runtime. A tone becomes a class only through the literal records in `lib/ui/tone.ts`
+(`TONE_TEXT`/`TONE_BG`/`TONE_BG_SOFT`/`TONE_BORDER`/`TONE_FILL` plus `toneClass`, all Skeleton
+colour pairings, so one class serves both modes): a `tone-{tone}` interpolation reaches the DOM in
+jsdom and is invisible to Tailwind's scanner, so the class would be missing only in the production
+build. `lib/style-guard.test.ts` keeps that closed — it fails on a `<style>` block or `style=`
+attribute in any `src/**.svelte`, on an interpolated class, on any `app.css` statement outside the
+four imports and the one variant, on a stale `STYLE_ALLOWLIST` entry (the list is empty), and on
+`{@html}`. **The list's filter state lives in the URL**
 (`?status=&project=&workflow=&trigger=&executor=&sort=`, parsed and serialized by
 `src/lib/list-query.ts`), so a scope is shareable and the back button works; the page writes it with
 `history.replaceState` and re-reads it on `popstate`. The scope rail
@@ -1400,7 +1418,8 @@ import graph. The web suite (`packages/web`) covers the API client (schema valid
 the SSE client (frames, malformed payloads, capped backoff), the run/detail reducers, the typed start
 form, the list query round trip in the URL (`lib/list-query.test.ts`), the timeline list (day sections,
 `Load more`, the scope rail, the facet selects, the order toggle), and component rendering of the run
-page, gate card, and start dialog in jsdom; the web
+page, gate card, and start dialog in jsdom (`test/setup.ts`, wired by `setupFiles`, carries the
+jsdom polyfills Zag needs and does nothing under the default `node` environment); the web
 import-graph test pins its core subpaths. The CLI suite covers validate exit codes, golden JSON shapes (including
 `ls-schedule`, every `schedule-*` command, and `db-stats`/`db-purge`/`db-purge-dry`/`db-vacuum`),
 the no-storage import graph, the fire-line
@@ -1485,6 +1504,10 @@ suite green.
 | `zod` | `4.6.7` | core, plugin, cli | schema, RPC contract, tool inputs, pack/manifest schemas |
 | `react` | `19.3.0` | plugin dev | `.tsx` client entry |
 | `@types/react` | `19.3.0` | plugin dev | JSX types |
+| `tailwindcss` | `4.3.5` | web dev | utilities for every component; nothing is hand-written |
+| `@tailwindcss/vite` | `4.3.5` | web dev | the Vite plugin that compiles the one CSS entry |
+| `@skeletonlabs/skeleton` | `5.0.6` | web dev | component/utility CSS and the Hamlindigo theme |
+| `@skeletonlabs/skeleton-svelte` | `5.0.6` | web dev | the two Zag escalations (`Dialog`, `Toast`) and their state machines |
 
 ## Known limitations and deviations
 
