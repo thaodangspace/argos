@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { StepProgressView } from "@thaodangspace/argos-core/view";
 
-  import { TONE_BG_SOFT, toneClass } from "#lib/ui/tone";
+  import { TONE_BG, toneClass } from "#lib/ui/tone";
 
   let { steps }: { steps: readonly StepProgressView[] } = $props();
 </script>
@@ -9,7 +9,7 @@
 <span class="inline-flex items-center gap-1" aria-hidden="true">
   {#each steps as step (step.id)}
     <span
-      class="size-1.5 rounded-full opacity-85 {toneClass(TONE_BG_SOFT, step.tone)}"
+      class="size-1.5 rounded-full {toneClass(TONE_BG, step.tone)}"
       data-dot={step.id}
       data-tone={step.tone}
       title={`${step.label}: ${step.status}`}

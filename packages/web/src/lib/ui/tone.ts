@@ -25,13 +25,18 @@ export const TONE_TEXT: Readonly<Record<StatusTone, string>> = {
   danger: "text-error-700-300",
 };
 
-/** Solid background: dots, bars, and other small filled marks. */
+/**
+ * Solid background: dots, bars, and other small filled marks. `-800-200`, not `-500`: Vintage's
+ * light surface is mid-grey (`surface-100`), so its pastel 500s vanish on it (success/warning ≈1.1:1);
+ * 800 keeps the hue at 2.3–4.3:1 there and 200 reads ≥9:1 on the dark surface. Neutral (pending,
+ * skipped) is a translucent ink so it stays visible but quieter than any coloured mark.
+ */
 export const TONE_BG: Readonly<Record<StatusTone, string>> = {
-  neutral: "bg-surface-500",
-  accent: "bg-primary-500",
-  success: "bg-success-500",
-  warning: "bg-warning-500",
-  danger: "bg-error-500",
+  neutral: "bg-surface-700-300/50",
+  accent: "bg-primary-800-200",
+  success: "bg-success-800-200",
+  warning: "bg-warning-800-200",
+  danger: "bg-error-800-200",
 };
 
 /** Quiet background: badges, chips, and callouts. */
