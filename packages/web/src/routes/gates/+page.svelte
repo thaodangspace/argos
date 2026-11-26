@@ -49,12 +49,15 @@
     gateInbox(store.runs, { now, timeZone: timeZoneStore.timeZone, deciding: actions.deciding }),
   );
 
+  // Before the first read an empty inbox is unknown, not an all-clear, so the count line says so.
   const totalLabel = $derived(
-    entries.length === 0
-      ? "No gate is waiting for a decision."
-      : entries.length === 1
-        ? "1 gate is waiting for a decision."
-        : `${entries.length} gates are waiting for a decision.`,
+    !store.loaded
+      ? "Loading gates…"
+      : entries.length === 0
+        ? "No gate is waiting for a decision."
+        : entries.length === 1
+          ? "1 gate is waiting for a decision."
+          : `${entries.length} gates are waiting for a decision.`,
   );
 
   // The age labels tick, but only while something waits — an empty inbox renders static (inbox NFR).
@@ -98,6 +101,7 @@
 
 <GateInbox
   runs={store.runs}
+  loaded={store.loaded}
   {now}
   timeZone={timeZoneStore.timeZone}
   deciding={actions.deciding}

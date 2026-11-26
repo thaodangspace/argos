@@ -20,12 +20,15 @@
 
   let {
     runs,
+    loaded,
     now,
     timeZone,
     deciding,
     onDecide,
   }: {
     runs: readonly RunSummary[];
+    /** The first read succeeded: an empty inbox is then real, not "not loaded yet". */
+    loaded: boolean;
     /** The render instant for the age labels; the page's ticker advances it. */
     now: number;
     /** The reader's IANA zone for the absolute open time (inbox FR8); `undefined` is the runtime's. */
@@ -43,10 +46,14 @@
 </script>
 
 {#if entries.length === 0}
-  <EmptyState
-    title="No gates waiting"
-    hint="A gate opens when a playbook step asks for a human decision, and it leaves this page the moment someone decides it. In a shell, `argos gates` lists the same queue."
-  />
+  {#if loaded}
+    <EmptyState
+      title="No gates waiting"
+      hint="A gate opens when a playbook step asks for a human decision, and it leaves this page the moment someone decides it. In a shell, `argos gates` lists the same queue."
+    />
+  {:else}
+    <div class="loading" aria-busy="true">Loading gates…</div>
+  {/if}
 {:else}
   <ul class="inbox" aria-label="Pending gates">
     {#each entries as entry (entry.key)}
@@ -79,6 +86,12 @@
 {/if}
 
 <style>
+  .loading {
+    padding: 32px;
+    text-align: center;
+    color: var(--muted);
+  }
+
   .inbox {
     list-style: none;
     margin: 0;

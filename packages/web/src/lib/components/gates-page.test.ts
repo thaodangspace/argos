@@ -150,11 +150,16 @@ type Harness = ReturnType<typeof harness>;
 /** Mount the inbox the way the page does: `onDecide` is the page-level `RunActions.decide`. */
 function mountInbox(
   test: Harness,
-  options: { readonly runs?: readonly RunSummary[]; readonly deciding?: readonly string[] } = {},
+  options: {
+    readonly runs?: readonly RunSummary[];
+    readonly deciding?: readonly string[];
+    readonly loaded?: boolean;
+  } = {},
 ) {
   return render(GateInbox, {
     props: {
       runs: options.runs ?? RUNS,
+      loaded: options.loaded ?? true,
       now: NOW,
       timeZone: "UTC",
       deciding: options.deciding ?? test.actions.deciding,
@@ -281,6 +286,13 @@ describe("GateInbox", () => {
     expect(screen.queryByRole("list", { name: "Pending gates" })).toBeNull();
     expect(screen.getByText("No gates waiting")).toBeTruthy();
     expect(screen.getByText(/argos gates/)).toBeTruthy();
+  });
+
+  it("says it is loading, not empty, before the first read succeeds", () => {
+    const view = mountInbox(harness(), { runs: [], loaded: false });
+    expect(screen.queryByText("No gates waiting")).toBeNull();
+    expect(screen.queryByText(/argos gates/)).toBeNull();
+    expect(view.container.querySelector('[aria-busy="true"]')?.textContent).toBe("Loading gates…");
   });
 
   it("keeps a card whose workflow the rail hides (inbox FR9)", () => {
