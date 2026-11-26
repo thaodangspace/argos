@@ -2,7 +2,7 @@
 
 /**
  * The theme write (spec FR7): the colour mode is the `dark` class on `<html>`, never a `data-theme`
- * attribute — `data-theme="hamlindigo"` selects the Skeleton theme and is only ever written in
+ * attribute — `data-theme="vintage"` selects the Skeleton theme and is only ever written in
  * `app.html`. `preferredTheme` is already covered by `../state.test.ts`, so it is not repeated here.
  */
 
