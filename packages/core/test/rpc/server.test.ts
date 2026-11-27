@@ -16,6 +16,7 @@ import {
   GcWorktreesResponseSchema,
   PlaybookListResponseSchema,
   RPC_ERROR_STATUS,
+  RunDetailSchema,
   RunSummarySchema,
   ServerInfoSchema,
   statusForCode,
@@ -31,7 +32,7 @@ import { playbook, step } from "../../src/engine/test-util.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeExecutor } from "../fakes/executor.js";
 import { gatedPlaybook, makeTempHome, waitForReal } from "../durable/support.js";
-import { makeTempRepo, type TempRepo } from "../support/git.js";
+import { makeTempRepo, writeScript, type TempRepo } from "../support/git.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -399,6 +400,73 @@ describe("GET /runs (FR26)", () => {
     expect(list.text.toLowerCase()).not.toContain("transcript");
     expect(list.text).not.toContain(secretPrompt);
     expect(detail.steps[0]).not.toHaveProperty("prompt");
+  });
+});
+
+describe("GET /runs/:id (script attempt logs: FR5, FR6, FR7)", () => {
+  const SCRIPT_PLAYBOOK = [
+    "title: Scripted",
+    "steps:",
+    "  - id: ok",
+    "    kind: script",
+    "    script: ok.mjs",
+    "    poll_ms: 20",
+    "    outputs:",
+    "      stdout:",
+    "        type: string",
+    "      stderr:",
+    "        type: string",
+    "  - id: bad",
+    "    kind: script",
+    "    script: bad.mjs",
+    "    poll_ms: 20",
+    "",
+  ].join("\n");
+
+  it("publishes each attempt's detail, exitCode, and stream tails; the list stays lean", async () => {
+    const harness = await startHarness(new FakeExecutor());
+    const repo = await makeRepoWithText("scripted.yaml", SCRIPT_PLAYBOOK);
+    writeScript(repo, "ok.mjs", "#!/usr/bin/env node\nprocess.stdout.write('ok: working\\n');\n");
+    writeScript(
+      repo,
+      "bad.mjs",
+      "#!/usr/bin/env node\nprocess.stderr.write('Fetch failed: HTTP 503\\n');\nprocess.exit(3);\n",
+    );
+
+    const started = (await call(harness.base, "POST", "/runs", {
+      body: { playbookId: "scripted", cwd: repo },
+    })).body as { runId: string };
+    // One step fails, so the run is terminal as `failed` once both script tasks settled.
+    await waitForStatus(harness, started.runId, "failed");
+    const response = await call(harness.base, "GET", `/runs/${started.runId}`);
+    expect(response.status).toBe(200);
+
+    // The strict wire schema accepts what the route projected (a stray key would fail here).
+    const detail = RunDetailSchema.parse(response.body);
+    const byStep = new Map(detail.steps.map((entry) => [entry.id, entry]));
+
+    const ok = byStep.get("ok");
+    expect(ok?.kind).toBe("script");
+    expect(ok?.attempts[0]?.exitCode).toBe(0);
+    expect(ok?.attempts[0]?.streams?.stdout).toContain("ok: working");
+    expect(ok?.attempts[0]).not.toHaveProperty("detail");
+    // FR7: the declared stdout/stderr outputs are published per attempt instead.
+    expect(ok?.outputs).toBeUndefined();
+    expect(JSON.stringify(ok)).not.toContain('"outputs"');
+
+    const bad = byStep.get("bad");
+    expect(bad?.attempts[0]?.errorCode).toBe("step_failed");
+    expect(bad?.attempts[0]?.exitCode).toBe(3);
+    expect(bad?.attempts[0]?.detail).toContain("exited 3");
+    expect(bad?.attempts[0]?.streams?.stderr).toContain("Fetch failed: HTTP 503");
+
+    // The list never carries attempt detail, so a polling UI keeps its lean payload.
+    const list = await call(harness.base, "GET", "/runs");
+    const runs = (list.body as { runs: RunSummary[] }).runs;
+    expect(RunSummarySchema.parse(runs[0])).not.toHaveProperty("attempts");
+    for (const key of ["streams", "detail", "exitCode"]) {
+      expect(list.text).not.toContain(`"${key}"`);
+    }
   });
 });
 

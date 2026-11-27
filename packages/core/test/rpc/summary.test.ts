@@ -226,6 +226,136 @@ describe("toRunDetail (step logs)", () => {
   });
 });
 
+describe("toRunDetail (script attempt logs: FR5, FR6, FR7)", () => {
+  /**
+   * A run whose single script step settled one attempt carrying its own output tails, exactly as
+   * `argos.script`'s receipt reaches the reducer after Phase 2.
+   */
+  function scriptRecord(options: {
+    readonly outputs?: Readonly<Record<string, string>>;
+    readonly streams?: { readonly stdout?: string; readonly stderr?: string };
+    readonly detail?: string;
+    readonly exitCode?: number;
+  }): RunRecord {
+    const scripted = playbook({
+      id: "scripted",
+      steps: [
+        step({
+          id: "run",
+          kind: "script",
+          outputs: {
+            stdout: { type: "string" },
+            stderr: { type: "string" },
+            note: { type: "string" },
+          },
+        }),
+      ],
+    });
+    let record = createRunRecord({
+      id: "run-script",
+      ir: scripted,
+      inputs: {},
+      cwd: "/repo",
+      now: 1_000,
+    });
+    record = next(record, { type: "tick", now: 1_000 }).record;
+    record = next(record, {
+      type: "stepSettled",
+      stepId: "run",
+      endedAt: 2_000,
+      ...(options.detail === undefined ? {} : { errorCode: "step_failed" as const }),
+      ...(options.detail === undefined ? { outcome: "success" } : {}),
+      ...(options.outputs === undefined ? {} : { outputs: options.outputs }),
+      ...(options.streams === undefined ? {} : { streams: options.streams }),
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+      ...(options.exitCode === undefined ? {} : { exitCode: options.exitCode }),
+      now: 2_000,
+    }).record;
+    return record;
+  }
+
+  it("keeps the last STEP_OUTPUT_VALUE_LIMIT characters behind the marker (FR6)", () => {
+    const long = `${"start-".repeat(834)}${"z".repeat(STEP_OUTPUT_VALUE_LIMIT)}`;
+    expect(long.length).toBeGreaterThan(STEP_OUTPUT_VALUE_LIMIT);
+    const record = scriptRecord({ streams: { stdout: long }, exitCode: 0 });
+
+    const attempt = detail(record).steps[0]?.attempts[0];
+    const stdout = attempt?.streams?.stdout ?? "";
+    expect(stdout.startsWith("… (truncated)\n")).toBe(true);
+    // The marker line plus exactly the limit — the *end* of the log, never its start.
+    expect(stdout.slice("… (truncated)\n".length)).toBe(long.slice(long.length - STEP_OUTPUT_VALUE_LIMIT));
+    expect(stdout).toContain("z".repeat(STEP_OUTPUT_VALUE_LIMIT));
+    expect(attempt?.exitCode).toBe(0);
+  });
+
+  it("copies a short stream verbatim and never marks it", () => {
+    const record = scriptRecord({ streams: { stdout: "blocked\n", stderr: "waiting for quota\n" } });
+
+    expect(detail(record).steps[0]?.attempts[0]?.streams).toEqual({
+      stdout: "blocked\n",
+      stderr: "waiting for quota\n",
+    });
+  });
+
+  it("publishes detail and exitCode on a failed attempt", () => {
+    const record = scriptRecord({
+      streams: { stderr: "Fetch failed: HTTP 503\n" },
+      detail: "the script exited 1: Fetch failed: HTTP 503",
+      exitCode: 1,
+    });
+
+    const attempt = detail(record).steps[0]?.attempts[0];
+    expect(attempt?.detail).toBe("the script exited 1: Fetch failed: HTTP 503");
+    expect(attempt?.exitCode).toBe(1);
+    expect(attempt?.streams?.stderr).toBe("Fetch failed: HTTP 503\n");
+    expect(attempt?.errorCode).toBe("step_failed");
+  });
+
+  it("drops a script's projected stdout/stderr outputs while the record keeps them (FR7)", () => {
+    const record = scriptRecord({
+      outputs: { stdout: "blocked\n", stderr: "no quota left\n", note: "done" },
+      streams: { stdout: "blocked\n", stderr: "no quota left\n" },
+    });
+
+    const pick = detail(record).steps[0];
+    expect(pick?.outputs).toEqual({ note: "done" });
+    expect(pick?.outputs).not.toHaveProperty("stdout");
+    expect(pick?.outputs).not.toHaveProperty("stderr");
+    // The record is untouched: `when` conditions still read `steps.<id>.outputs.stderr`.
+    expect(record.steps["run"]?.outputs).toEqual({
+      stdout: "blocked\n",
+      stderr: "no quota left\n",
+      note: "done",
+    });
+  });
+
+  it("keeps a script's defined stdout/stderr outputs when its attempts carry no stream", () => {
+    // A record written before FR2: no `streams` anywhere, so FR7 has nothing to suppress.
+    const record = scriptRecord({ outputs: { stderr: "legacy\n" } });
+
+    expect(detail(record).steps[0]?.attempts[0]).not.toHaveProperty("streams");
+    expect(detail(record).steps[0]?.outputs).toEqual({ stderr: "legacy\n" });
+  });
+
+  it("stays within the public detail schema and off the list summary (G5, FR5)", () => {
+    const record = scriptRecord({
+      outputs: { stdout: "done\n" },
+      streams: { stdout: "done\n", stderr: "warn\n" },
+      exitCode: 0,
+    });
+
+    const run = detail(record);
+    expect(RunDetailSchema.safeParse(run).success).toBe(true);
+
+    const summary = toRunSummary({ taskId: "42", record });
+    const listed = summary.steps[0] as unknown as Record<string, unknown>;
+    expect(listed["attempts"]).toBeUndefined();
+    for (const key of ["streams", "detail", "exitCode"]) {
+      expect(JSON.stringify(summary)).not.toContain(`"${key}"`);
+    }
+  });
+});
+
 describe("toRunDetail (playbook graph, FR8)", () => {
   it("carries the graph projected from the frozen IR and never stores it", () => {
     const run = detail(settledRecord());

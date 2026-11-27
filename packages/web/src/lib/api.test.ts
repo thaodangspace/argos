@@ -36,6 +36,70 @@ describe("api client", () => {
     await expect(api.listRuns()).resolves.toHaveLength(1);
   });
 
+  it("parses a run detail whose attempts carry detail, exitCode, and stream tails (FR5)", async () => {
+    const api = createApi({
+      fetchImpl: async () =>
+        response({
+          ...summary,
+          steps: [
+            {
+              id: "run",
+              title: "Run",
+              kind: "script",
+              status: "failed",
+              attemptCount: 1,
+              attempts: [
+                {
+                  n: 1,
+                  startedAt: 1,
+                  endedAt: 2,
+                  outcome: "failed",
+                  errorCode: "step_failed",
+                  detail: "the script exited 3: Fetch failed: HTTP 503",
+                  exitCode: 3,
+                  streams: { stderr: "… (truncated)\nFetch failed: HTTP 503\n" },
+                },
+              ],
+            },
+          ],
+          history: [],
+        }),
+    });
+
+    const run = await api.getRun("01J0000000000000000000000A");
+    expect(run.steps[0]?.attempts[0]).toMatchObject({
+      exitCode: 3,
+      detail: "the script exited 3: Fetch failed: HTTP 503",
+      streams: { stderr: "… (truncated)\nFetch failed: HTTP 503\n" },
+    });
+  });
+
+  it("still parses a run detail without the additive attempt fields (older server)", async () => {
+    const api = createApi({
+      fetchImpl: async () =>
+        response({
+          ...summary,
+          steps: [
+            {
+              id: "a",
+              title: "A",
+              kind: "agent",
+              status: "completed",
+              attemptCount: 1,
+              attempts: [{ n: 1, startedAt: 1, endedAt: 2, outcome: "completed" }],
+            },
+          ],
+          history: [],
+        }),
+    });
+
+    const run = await api.getRun("01J0000000000000000000000A");
+    const attempt = run.steps[0]?.attempts[0] as unknown as Record<string, unknown>;
+    expect(attempt["detail"]).toBeUndefined();
+    expect(attempt["exitCode"]).toBeUndefined();
+    expect(attempt["streams"]).toBeUndefined();
+  });
+
   it("maps an error body to its stable code and status", async () => {
     const api = createApi({
       fetchImpl: async () => response({ error: { code: "gate_already_decided", message: "taken" } }, 409),
