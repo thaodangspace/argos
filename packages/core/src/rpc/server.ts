@@ -840,8 +840,12 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         // only fail later, at start time.
         const cwd = url.searchParams.get("cwd") ?? options.cwd ?? process.cwd();
         validateRunCwd(cwd);
-        // FR8: the graph is opt-in, so every existing client's body stays byte-identical.
-        const listing = listPlaybooks(cwd, home, { graph: url.searchParams.get("graph") === "1" });
+        // FR8: the graph and the per-issue detail are opt-in, so every existing client's body stays
+        // byte-identical (a `false` here omits both keys, exactly like the pre-editor response).
+        const listing = listPlaybooks(cwd, home, {
+          graph: url.searchParams.get("graph") === "1",
+          issues: url.searchParams.get("issues") === "1",
+        });
         sendJson(res, 200, PlaybookListResponseSchema.parse(listing), extra);
         return;
       }
