@@ -13,7 +13,8 @@
   import { ThemeStore } from "#lib/state/theme.svelte";
   import { timeZoneStore } from "#lib/state/timezone.svelte";
   import { toaster, type ToastTone } from "#lib/state/toasts.svelte";
-  import { href, runHref } from "#lib/paths";
+  import { href, playbooksHref, runHref } from "#lib/paths";
+  import { readRecents } from "#lib/state/recents";
   import "../app.css";
 
   let { children } = $props();
@@ -26,6 +27,9 @@
   timeZoneStore.init(storage);
 
   let startOpen = $state(false);
+  // The editor opens on the repository this browser last used (spec FR21), so the header link carries
+  // the friendly recent directory when there is one.
+  const playbooksLink = playbooksHref(readRecents()[0]);
 
   // One literal per tone (spec FR4): the toaster's type is Zag's word, ours is the same three.
   const TOAST_SURFACE: Readonly<Record<ToastTone, string>> = {
@@ -69,6 +73,7 @@
     <span>Argos</span>
   </a>
   <span class="flex-1"></span>
+  <a class="btn preset-tonal" href={playbooksLink}>Playbooks</a>
   <TimeZoneSelect
     system={timeZoneStore.system}
     value={timeZoneStore.timeZone}
