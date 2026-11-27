@@ -1286,9 +1286,11 @@ non-file, and only when the resolved path is inside the repository is the file w
 symlinked playbooks root is listed and readable, never writable); the playbook id comes from the
 matched entry, never from the request. Anything else is `invalid_request`.
 
-- **Writable roots.** A save may replace only `<cwd>/.argos/playbooks/<id>.yaml` or
-  `<cwd>/.paseo/plugins/playbooks/<id>.yaml`. A `<home>/playbooks` entry is listed and readable, and
-  a `PUT` to it is `invalid_request` naming the file (`PlaybookTarget.writable`).
+- **Writable roots.** A save may replace only a file discovery lists under `<cwd>/.argos/playbooks`
+  or `<cwd>/.paseo/plugins/playbooks` **whose resolved path is inside the repository's real tree** —
+  the root label alone is not enough, so a symlinked playbooks root is listed and readable but never
+  writable. A `<home>/playbooks` entry is listed and readable too, and a `PUT` to it (or to any
+  non-writable root) is `invalid_request` naming the file (`PlaybookTarget.writable`).
 - **Size cap.** `PLAYBOOK_TEXT_LIMIT` = 512 KiB (`rpc/contracts.ts`) applies to read, validate, and
   save; the request body cap stays 1 MiB.
 - **The digest precondition.** `baseSha256` (`/^[0-9a-f]{64}$/`) is mandatory — the sha256 of the

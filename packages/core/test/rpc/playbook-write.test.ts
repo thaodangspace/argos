@@ -339,6 +339,20 @@ describe("a playbook that disappears or cannot be read (FR10)", () => {
     ]);
   });
 
+  it("reads a vanished target as 409 deleted for a save, 400 for a read", () => {
+    const fixture = writeFixture();
+    const target = resolvePlaybookTarget({ cwd: fixture.repo, file: fixture.good });
+    rmSync(fixture.good);
+
+    // A save's digest reads pass `deleted`, so a vanish between the resolve and the read (or the
+    // pre-write re-verify) is the same conflict, never a read-shaped refusal.
+    const saveError = refusal(() => readPlaybookSource(target, "deleted"));
+    expect(saveError.code).toBe("playbook_conflict");
+    expect(saveError.reason).toBe("deleted");
+    // A read keeps its own answer: the file simply is not readable.
+    expect(refusal(() => readPlaybookSource(target)).code).toBe("invalid_request");
+  });
+
   it.skipIf(process.getuid?.() === 0)(
     "refuses an unreadable file as 400 invalid_request, never an ENOENT",
     () => {

@@ -126,19 +126,28 @@ function isEnoent(error: unknown): boolean {
 /**
  * One read under the cap. The stat is the cheap refusal (an oversized file is never loaded into
  * memory) and the byte length of the actual read is the honest one (the file can grow in between).
+ *
+ * A file that is gone answers what the caller's `whenMissing` says — the same `409 deleted` a save
+ * gives everywhere else — so a vanish between the resolver's `lstat` and this read cannot surface as
+ * a `400` (or, worse, an unhandled `ENOENT`) in the middle of a save.
  */
-function readCapped(file: string): Buffer {
+function readCapped(
+  file: string,
+  whenMissing?: "invalid_request" | "deleted",
+): Buffer {
   let size: number;
   try {
     size = statSync(file).size;
-  } catch {
+  } catch (error) {
+    if (isEnoent(error)) refuseMissing(file, whenMissing);
     refuse("playbook file is not readable");
   }
   if (size > PLAYBOOK_TEXT_LIMIT) refuse(playbookTextLimitDetail());
   let bytes: Buffer;
   try {
     bytes = readFileSync(file);
-  } catch {
+  } catch (error) {
+    if (isEnoent(error)) refuseMissing(file, whenMissing);
     refuse("playbook file is not readable");
   }
   if (bytes.byteLength > PLAYBOOK_TEXT_LIMIT) refuse(playbookTextLimitDetail());
@@ -221,7 +230,7 @@ export function resolvePlaybookTarget(input: {
   const mode: PlaybookTarget["mode"] =
     !isAbsolute(entry.root) && WRITABLE_ROOTS.has(entry.root) && insideRepo ? "repo" : "home";
 
-  const sha256 = digestOf(readCapped(resolved));
+  const sha256 = digestOf(readCapped(resolved, input.whenMissing));
   return {
     file: resolved,
     repoDir,
@@ -240,11 +249,14 @@ export function resolvePlaybookTarget(input: {
  * (and a save would then overwrite text the operator never saw). The cap and the readability refusal
  * are re-checked here because the file can change between the resolver and this read.
  */
-export function readPlaybookSource(target: PlaybookTarget): {
+export function readPlaybookSource(
+  target: PlaybookTarget,
+  whenMissing?: "invalid_request" | "deleted",
+): {
   readonly yaml: string;
   readonly sha256: string;
 } {
-  const bytes = readCapped(target.file);
+  const bytes = readCapped(target.file, whenMissing);
   return { yaml: bytes.toString("utf8"), sha256: digestOf(bytes) };
 }
 

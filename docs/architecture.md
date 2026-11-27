@@ -528,8 +528,10 @@ answers `404`.
   nothing), and `PUT /playbooks/file` (validate, then write atomically). `file` is never trusted:
   containment is `discoverPlaybooks` → `realpath` equality with one listing entry → an `lstat`
   re-check (see [Security](#playbook-edits-web-ui)). A save may replace only
-  `<cwd>/.argos/playbooks/<id>.yaml` or `<cwd>/.paseo/plugins/playbooks/<id>.yaml`; a
-  `<home>/playbooks` file is listed and readable but answers `invalid_request`. `baseSha256` is
+  `<cwd>/.argos/playbooks/<id>.yaml` or `<cwd>/.paseo/plugins/playbooks/<id>.yaml` **when the
+  resolved file is inside the repository's real tree**; a `<home>/playbooks` file, and any root that
+  resolves outside the checkout (a symlinked playbooks root), is listed and readable but answers
+  `invalid_request`. `baseSha256` is
   mandatory, and a stale or vanished file is `playbook_conflict` (409) with `details.reason`
   `changed`/`deleted`. `PLAYBOOK_TEXT_LIMIT` is 512 KiB on read, validate, and save.
   `GET /playbooks?issues=1` adds per-issue detail (`PLAYBOOK_ISSUE_LIMIT` = 20) on request only, so
@@ -706,9 +708,11 @@ the token already grants (start a run, run a script as the operator), never a br
 section above is the whole argument.
 
 - The write is limited to the two repository roots (`<cwd>/.argos/playbooks`,
-  `<cwd>/.paseo/plugins/playbooks`). `<home>/playbooks` is listed and readable, and a save there is
-  `invalid_request`. Containment is discovery → `realpath` equality with one listing entry → an
-  `lstat` re-check (no symlink, a regular file) → the 512 KiB `PLAYBOOK_TEXT_LIMIT`.
+  `<cwd>/.paseo/plugins/playbooks`) **and** to files whose resolved path is inside the repository's
+  real tree — the root label alone is not enough. `<home>/playbooks` is listed and readable, and a
+  save there (or to a root that resolves outside the checkout) is `invalid_request`. Containment is
+  discovery → `realpath` equality with one listing entry → an `lstat` re-check (no symlink, a regular
+  file) → the 512 KiB `PLAYBOOK_TEXT_LIMIT`.
 - The precondition is the digest of the bytes the buffer was edited from (`baseSha256`, mandatory):
   a changed file is `playbook_conflict` with `details.reason = "changed"`, a deleted one the same
   code with `reason = "deleted"`, so two tabs cannot silently overwrite each other.

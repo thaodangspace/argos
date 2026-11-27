@@ -334,7 +334,7 @@ export function writePlaybookFile(input: {
   // containment read and the loader both took time, and a change in that window would otherwise be
   // replaced silently. It is the same single read the read route uses, so the digest compared is the
   // digest of the bytes about to be replaced.
-  if (readPlaybookSource(target).sha256 !== input.baseSha256) {
+  if (readPlaybookSource(target, "deleted").sha256 !== input.baseSha256) {
     throw argosError(
       "playbook_conflict",
       { file: target.file },
