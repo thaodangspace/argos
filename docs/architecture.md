@@ -632,6 +632,14 @@ Possession of the token means full control of that server:
   `POST /db/vacuum` rewrites the database file. `GET` routes expose run metadata only: no prompts,
   transcripts, agent messages, or playbook IR ever appear in `RunSummary`/`RunDetail`.
 
+The single exception is program output the operator wrote: a script step's bounded stdout and
+stderr tails (the last 8 KiB of each in the record, tail-truncated to 4,000 characters on the wire,
+kept for the newest 10 attempts of a step), its exit code, and its one whitespace-collapsed reason
+line are published per attempt in `RunDetail` — never an agent prompt, an agent transcript, or
+herdr-core terminal text. That reason line is executor-agnostic by design: an hc agent step
+publishes its own exit-code or signal note through the same `detail` field, and it is a short
+self-report, never screen text.
+
 The token and `ARGOS_PASEO_PASSWORD` are never logged, never stored in the database, and never
 returned by a route.
 

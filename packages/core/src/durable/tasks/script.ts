@@ -602,11 +602,20 @@ export function createScriptTaskDefinition(options: ScriptTaskOptions = {}) {
           }
         }
 
+        // FR1: the bounded tails land in the receipt whether or not the playbook declares
+        // `stdout`/`stderr` outputs (those keep going to `outputs`, so conditions still work). An
+        // empty side is omitted rather than written as `""`.
         const result: Record<string, unknown> = {
           stepId: task.input.stepId,
           attempt: checkpoint.attempt,
           requestId: task.input.requestId,
           runs: checkpoint.runs,
+          ...(checkpoint.stdout === undefined || checkpoint.stdout === ""
+            ? {}
+            : { stdout: checkpoint.stdout }),
+          ...(checkpoint.stderr === undefined || checkpoint.stderr === ""
+            ? {}
+            : { stderr: checkpoint.stderr }),
         };
         if (errorCode !== undefined) result["errorCode"] = errorCode;
         else result["outcome"] = scriptOutcome(task.input.outcomes);

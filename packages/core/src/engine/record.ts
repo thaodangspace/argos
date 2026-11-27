@@ -71,6 +71,23 @@ export function isTerminalStepStatus(status: StepStatus): boolean {
 /** `provider/model` for an agent launch, or a free-form label for another executor. */
 export type AttemptOutcome = "completed" | "failed" | "timeout" | "cancelled";
 
+/**
+ * The bounded tails of one attempt's own program output (FR2). A script step puts the end of its
+ * stdout/stderr here; this is the operator's program text, never a prompt, a transcript, or an hc
+ * terminal. Both sides are optional and an empty side is omitted rather than stored as `""`.
+ */
+export interface AttemptStreams {
+  readonly stdout?: string;
+  readonly stderr?: string;
+}
+
+/**
+ * FR10: how many of a step's newest attempts keep their `streams`. An older attempt keeps its
+ * `detail` and `exitCode` (cheap, one line) and drops the tails, which bounds the run document at
+ * roughly `ATTEMPT_STREAM_KEEP` × two 8 KiB tails per step.
+ */
+export const ATTEMPT_STREAM_KEEP = 10;
+
 /** One launch attempt. `n` is 1-based; attempts are never dropped from the record. */
 export interface AttemptRecord {
   readonly n: number;
@@ -83,6 +100,16 @@ export interface AttemptRecord {
   readonly errorCode?: (typeof ARGOS_ERROR_CODES)[number];
   /** Provider/token accounting, free-form numbers (never prompts or transcripts). */
   readonly usage?: Readonly<Record<string, number>>;
+  /**
+   * FR3: one bounded line of reason — a script's `the script exited 1: …`, an agent executor's own
+   * note. The reducer is the single normalizer (whitespace collapsed, at most 500 characters), so
+   * every executor gets the same shape.
+   */
+  readonly detail?: string;
+  /** The attempt's last exit code, when the executor reports one (script steps). */
+  readonly exitCode?: number;
+  /** FR2/FR10: the bounded output tails, kept for the newest `ATTEMPT_STREAM_KEEP` attempts. */
+  readonly streams?: AttemptStreams;
 }
 
 export interface StepRecord {
@@ -278,6 +305,12 @@ const GateChoiceSchema = z.strictObject({
   outputs: z.record(z.string(), z.string()).optional(),
 });
 
+/** FR2: strict, so a hand-edited attempt cannot add a stream key of its own. */
+const AttemptStreamsSchema = z.strictObject({
+  stdout: z.string().optional(),
+  stderr: z.string().optional(),
+});
+
 const AttemptSchema = z.strictObject({
   n: z.number().int().positive(),
   agentId: z.string().min(1).optional(),
@@ -288,6 +321,11 @@ const AttemptSchema = z.strictObject({
   outcome: z.enum(["completed", "failed", "timeout", "cancelled"]).optional(),
   errorCode: ErrorCodeSchema.optional(),
   usage: z.record(z.string(), z.number()).optional(),
+  // FR3: the reducer writes this already normalized, so an over-long detail is a refused record
+  // rather than a silently rewritten one.
+  detail: z.string().max(500).optional(),
+  exitCode: z.number().int().optional(),
+  streams: AttemptStreamsSchema.optional(),
 });
 
 const StepRecordSchema = z.strictObject({

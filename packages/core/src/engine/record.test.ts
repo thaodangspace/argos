@@ -126,6 +126,58 @@ describe("hydrateRunRecord", () => {
     expect(JSON.stringify(hydrateRunRecord(plain))).toBe(plain);
   });
 
+  it("round-trips the attempt's detail, exit code, and streams (FR2)", () => {
+    let record = makeRecord(ir, { now: 1_000 });
+    record = next(record, { type: "tick", now: 1_000 }).record;
+    record = next(record, {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+      detail: "the script exited 1: boom",
+      exitCode: 1,
+      streams: { stdout: "out\n", stderr: "err\n" },
+    }).record;
+
+    const attempt = record.steps["a"]?.attempts[0];
+    expect(attempt?.detail).toBe("the script exited 1: boom");
+    expect(attempt?.exitCode).toBe(1);
+    expect(attempt?.streams).toEqual({ stdout: "out\n", stderr: "err\n" });
+
+    const json = JSON.stringify(record);
+    expect(json).toContain('"streams"');
+    expect(JSON.stringify(hydrateRunRecord(json))).toBe(json);
+  });
+
+  it("round-trips a pre-change record whose attempts carry none of the new keys", () => {
+    let record = makeRecord(ir, { now: 1_000 });
+    record = next(record, { type: "tick", now: 1_000 }).record;
+    record = next(record, { type: "stepSettled", stepId: "a", outcome: "success", endedAt: 1_100 }).record;
+
+    const json = JSON.stringify(record);
+    for (const key of ["\"detail\"", "\"exitCode\"", "\"streams\""]) {
+      expect(json).not.toContain(key);
+    }
+    expect(JSON.stringify(hydrateRunRecord(json))).toBe(json);
+  });
+
+  it("refuses an over-long attempt detail, and hydrates one that still holds newlines", () => {
+    const withDetail = (detail: string): unknown => {
+      const record = JSON.parse(JSON.stringify(makeRecord(ir))) as {
+        steps: Record<string, { attempts: unknown[] }>;
+      };
+      record.steps["a"]?.attempts.push({ n: 1, startedAt: 1, detail });
+      return record;
+    };
+
+    // The reducer is the normalizer (whitespace collapsed, cut to 500), so a record it wrote always
+    // hydrates; hydration refuses only a detail no engine write could have produced.
+    expect(() => hydrateRunRecord(withDetail("x".repeat(600)))).toThrow(InvalidRunRecordError);
+
+    const json = JSON.stringify(withDetail("first line\nsecond line"));
+    expect(JSON.stringify(hydrateRunRecord(json))).toBe(json);
+  });
+
   it("rejects a malformed script pin instead of trusting it", () => {
     for (const scripts of [
       { "tool.mjs": { path: "", sha256: "c".repeat(64) } },

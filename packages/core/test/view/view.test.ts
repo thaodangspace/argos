@@ -18,6 +18,7 @@ import {
 } from "../../src/rpc/contracts.js";
 import { HISTORY_EVENT_TYPES } from "../../src/history.js";
 import {
+  attemptViews,
   buildRunLog,
   buildStepLog,
   compactUsage,
@@ -54,6 +55,7 @@ import {
   RUN_STATUS_LABELS,
   STEP_STATUS_LABELS,
 } from "../../src/view/index.js";
+import type { StepAttemptView } from "../../src/view/index.js";
 
 const NOW = 1_700_000_100_000;
 
@@ -232,6 +234,137 @@ describe("the step log", () => {
     );
     expect(entries.find((entry) => entry.text === "line one")?.at).toBeNull();
     expect(logText(entries).split("\n")[0]).toMatch(/^\d{2}:\d{2}:\d{2}  /);
+  });
+
+  /** One settled script attempt as the view model sees it, with the streams fields optional. */
+  function scriptAttempt(overrides: Partial<StepAttemptView> = {}): StepAttemptView {
+    return {
+      n: 1,
+      startedAt: NOW - 125,
+      endedAt: NOW,
+      durationLabel: "125ms",
+      outcome: "failed",
+      errorCode: "step_failed",
+      usageLabel: null,
+      running: false,
+      ...overrides,
+    };
+  }
+
+  function scriptLog(attempts: readonly StepAttemptView[]): ReturnType<typeof buildStepLog> {
+    return buildStepLog({
+      step: detail().steps[1] as StepSummary,
+      history: [],
+      gates: [],
+      attempts,
+      outputs: [],
+    });
+  }
+
+  it("appends an attempt's reason to its end line", () => {
+    const entries = scriptLog([
+      scriptAttempt({ detail: "the script exited 1: Fetch failed: HTTP 503", exitCode: 1 }),
+    ]);
+    const end = entries.find((entry) => entry.text.startsWith("Attempt 1 failed"));
+    expect(end?.text).toBe(
+      "Attempt 1 failed in 125ms (step_failed): the script exited 1: Fetch failed: HTTP 503",
+    );
+    expect(end?.tone).toBe("danger");
+  });
+
+  it("emits the stream tails after the usage line and inside the copyable text", () => {
+    const entries = scriptLog([
+      scriptAttempt({
+        usageLabel: "$0.01",
+        detail: "the script exited 1: Fetch failed: HTTP 503",
+        exitCode: 1,
+        streams: { stdout: "line one\nline two\n", stderr: "Fetch failed: HTTP 503" },
+      }),
+    ]);
+    const texts = entries.map((entry) => entry.text);
+    const usage = texts.indexOf("Usage: $0.01");
+    // Start, end (with the reason), usage, then stdout's label and lines, then stderr's.
+    expect(texts.indexOf("stdout:")).toBeGreaterThan(usage);
+    expect(texts[texts.indexOf("stdout:") + 1]).toBe("line one");
+    expect(texts[texts.indexOf("stdout:") + 2]).toBe("line two");
+    expect(texts[texts.indexOf("stderr:") + 1]).toBe("Fetch failed: HTTP 503");
+    // A tail line carries no timestamp of its own and the neutral tone, like an output line.
+    for (const label of ["line one", "line two", "Fetch failed: HTTP 503"]) {
+      const line = entries.find((entry) => entry.text === label);
+      expect(line?.at).toBeNull();
+      expect(line?.tone).toBe("neutral");
+    }
+    const text = logText(entries);
+    const lines = text.split("\n");
+    const usageLine = lines.findIndex((line) => line.endsWith("  Usage: $0.01"));
+    expect(usageLine).toBeGreaterThan(-1);
+    expect(lines[usageLine + 1]).toMatch(/^\d{2}:\d{2}:\d{2}  stdout:$/);
+    expect(lines[usageLine + 2]).toBe("        line one");
+    expect(lines[usageLine + 3]).toBe("        line two");
+    expect(lines[usageLine + 4]).toMatch(/^\d{2}:\d{2}:\d{2}  stderr:$/);
+    expect(lines[usageLine + 5]).toBe("        Fetch failed: HTTP 503");
+  });
+
+  it("renders no trailing colon when a streamed attempt carries no reason", () => {
+    const entries = scriptLog([
+      {
+        n: 1,
+        startedAt: NOW - 125,
+        endedAt: NOW,
+        durationLabel: "125ms",
+        outcome: "completed",
+        streams: { stdout: "done" },
+        usageLabel: null,
+        running: false,
+      },
+    ]);
+    const end = entries.find((entry) => entry.text.startsWith("Attempt 1 completed"));
+    expect(end?.text).toBe("Attempt 1 completed in 125ms");
+    expect(entries.map((entry) => entry.text)).toEqual([
+      "Attempt 1 started",
+      "Attempt 1 completed in 125ms",
+      "stdout:",
+      "done",
+    ]);
+  });
+
+  it("emits nothing for an empty stream and nothing new for a pre-change attempt", () => {
+    const empty = scriptLog([scriptAttempt({ streams: { stdout: "", stderr: "" } })]);
+    expect(empty.map((entry) => entry.text)).toEqual([
+      "Attempt 1 started",
+      "Attempt 1 failed in 125ms (step_failed)",
+    ]);
+    const preChange = scriptLog([
+      scriptAttempt({ startedAt: NOW - 30_000, endedAt: NOW, durationLabel: "30s" }),
+    ]);
+    expect(preChange.map((entry) => entry.text)).toEqual([
+      "Attempt 1 started",
+      "Attempt 1 failed in 30s (step_failed)",
+    ]);
+  });
+
+  it("copies the reason, the exit code and the streams onto the attempt view", () => {
+    const [view] = attemptViews([
+      {
+        n: 1,
+        startedAt: NOW - 125,
+        endedAt: NOW,
+        outcome: "failed",
+        detail: "the script exited 1",
+        exitCode: 1,
+        streams: { stderr: "boom" },
+      },
+    ]);
+    expect(view).toMatchObject({
+      detail: "the script exited 1",
+      exitCode: 1,
+      streams: { stderr: "boom" },
+    });
+    // Absent keys stay absent rather than becoming `undefined`.
+    const [bare] = attemptViews([{ n: 2, startedAt: NOW, endedAt: NOW + 1 }]);
+    expect(Object.keys(bare ?? {})).not.toContain("detail");
+    expect(Object.keys(bare ?? {})).not.toContain("exitCode");
+    expect(Object.keys(bare ?? {})).not.toContain("streams");
   });
 
   it("builds a run log from run-level events only", () => {

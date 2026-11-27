@@ -186,6 +186,102 @@ describe("argos.run checkpoint (D4/D16)", () => {
     expect(() => hydrateRunRecord(JSON.stringify(extra))).toThrow(InvalidRunRecordError);
   });
 
+  it("hydrates a settlement that carries the attempt diagnostics (FR2)", () => {
+    const now = 1_767_225_600_000;
+    const record = createRunRecord({
+      id: "run-settlement",
+      ir: singleStepPlaybook(),
+      inputs: {},
+      cwd: "/tmp/argos-settlement",
+      now,
+    });
+    const checkpoint = {
+      phase: "settle",
+      record: JSON.parse(JSON.stringify(record)) as unknown,
+      childTasks: { a: 7 },
+      dispatched: { "7": "a" },
+      awaiting: [],
+      settles: [
+        {
+          taskId: 7,
+          stepId: "a",
+          outcome: "success",
+          detail: "the script exited 3: boom",
+          exitCode: 3,
+          streams: { stdout: "a normal line\n", stderr: "boom: fixture failure\n" },
+        },
+      ],
+      gateTasks: {},
+      gateSettles: [],
+      afterTasks: {},
+    };
+    const json = JSON.stringify(checkpoint);
+    const hydrated = hydrateRunCheckpoint(json);
+    expect(JSON.stringify(hydrated)).toBe(json);
+    expect(hydrated.settles[0]?.streams?.stdout).toBe("a normal line\n");
+    expect(hydrated.settles[0]?.exitCode).toBe(3);
+
+    // Strict: a stream key this schema does not declare is refused, not stripped.
+    const withUnknown = JSON.parse(json) as { settles: Array<{ streams: Record<string, unknown> }> };
+    const settlement = withUnknown.settles[0];
+    if (settlement === undefined) throw new Error("expected a settlement");
+    settlement.streams["truncated"] = true;
+    expect(() => hydrateRunCheckpoint(JSON.stringify(withUnknown))).toThrow(InvalidRunCheckpointError);
+  });
+
+  it("hydrates an un-normalized long reason, because a receipt's detail is raw (FR3)", () => {
+    // The engine cuts `detail` to 500 on the attempt; the settlement keeps the receipt's value, so a
+    // read-only violation description (up to `GIT_MESSAGE_LIMIT`) must not break hydration.
+    const now = 1_767_225_600_000;
+    const record = createRunRecord({
+      id: "run-settlement-long",
+      ir: singleStepPlaybook(),
+      inputs: {},
+      cwd: "/tmp/argos-settlement-long",
+      now,
+    });
+    const detail = `read-only step changed its working tree: ${"a/very/long/path\n".repeat(100)}`;
+    const checkpoint = {
+      phase: "settle",
+      record: JSON.parse(JSON.stringify(record)) as unknown,
+      childTasks: { a: 7 },
+      dispatched: { "7": "a" },
+      awaiting: [],
+      settles: [{ taskId: 7, stepId: "a", errorCode: "readonly_violation", detail }],
+      gateTasks: {},
+      gateSettles: [],
+      afterTasks: {},
+    };
+    const json = JSON.stringify(checkpoint);
+    expect(JSON.stringify(hydrateRunCheckpoint(json))).toBe(json);
+  });
+
+  it("hydrates a pre-change settlement and re-serializes it identically", () => {
+    const now = 1_767_225_600_000;
+    const record = createRunRecord({
+      id: "run-settlement-old",
+      ir: singleStepPlaybook(),
+      inputs: {},
+      cwd: "/tmp/argos-settlement-old",
+      now,
+    });
+    const checkpoint = {
+      phase: "settle",
+      record: JSON.parse(JSON.stringify(record)) as unknown,
+      childTasks: { a: 7 },
+      dispatched: { "7": "a" },
+      awaiting: [],
+      settles: [{ taskId: 7, stepId: "a", outcome: "success", outputs: { stdout: "done\n" } }],
+      gateTasks: {},
+      gateSettles: [],
+      afterTasks: {},
+    };
+    const json = JSON.stringify(checkpoint);
+    expect(json).not.toContain('"detail"');
+    expect(json).not.toContain('"streams"');
+    expect(JSON.stringify(hydrateRunCheckpoint(json))).toBe(json);
+  });
+
   it("keeps the newest 500 history events", () => {
     const events: HistoryEvent[] = [];
     for (let index = 0; index < HISTORY_LIMIT + 25; index += 1) {

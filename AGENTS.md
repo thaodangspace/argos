@@ -51,6 +51,16 @@ status labels/tones/glyphs, filters, `sortRuns`/`pendingGates`, `runView`/`group
 one edit for every client. It imports only `rpc/contracts` — never the durable host, engine, adapters, or a Node
 built-in (`test/view/purity.test.ts`).
 
+**A step's attempt log carries its own program output.** `StepAttemptView` (from `attemptViews`)
+adds `detail` (the one normalized reason line), `exitCode`, and `streams` (the bounded `stdout`/
+`stderr` tails) to each attempt, and `buildStepLog` renders them per attempt in one fixed order —
+start line, end line with `: <detail>`, usage, then `stdout:`/`stderr:` labels with their lines and
+no timestamp of their own — so `logText`, which "Copy step log" copies, carries the tails. Both
+clients change at once: the web UI renders `buildStepLog`, and `argos status --json` publishes the
+same fields through `StepAttemptSummary`. An agent attempt never has `streams` and has a `detail`
+only when its executor reports one (hc does; Paseo has none today), and a pre-change attempt renders
+as before.
+
 `view/graph.ts` is the graph renderer: `escapeMermaidLabel`/`mermaidNodeKey`/`renderMermaid`
 (the diffable text form `argos chart` prints, `--run` classes included), `decorateGraph` (the pure
 status join), and `layerGraph` (the integer, DOM-free geometry `RunGraph.svelte` draws as SVG). It
@@ -1035,7 +1045,15 @@ every other non-gate step keeps the agent executor.
 - `collect` commits a terminal completed task whose result is a `StepTaskResult`; success reports
   outcome `success` (or the first declared outcome) and exposes `stdout`, `stderr`,
   `exitCode`/`exit_code`, `runs`. Declared output names are never parsed as JSON. The receipt also
-  carries `exitCode`, `runs`, `signal`, and a bounded `detail`.
+  carries `exitCode`, `runs`, `signal`, and a bounded `detail`, and its `stdout`/`stderr` are the
+  `SCRIPT_OUTPUT_LIMIT` (8 KiB) **tails** of the final execution (an exit-75 re-run starts a fresh
+  tail, so only the last run's end survives), set whether or not the playbook
+  declares outputs and omitted when a side is empty (measured: a 200 KiB print leaves exactly
+  8 192 characters ending on the last line). The run record keeps them
+  per attempt as `AttemptRecord.streams`, beside `detail` (whitespace collapsed, cut to 500) and
+  `exitCode`; `ATTEMPT_STREAM_KEEP` = 10 bounds a step's document to its newest 10 attempts, older
+  ones keeping `detail`/`exitCode` and dropping `streams`. `detail` is executor-agnostic: a script's
+  reason, or hc's exit-code/signal note; a Paseo attempt has none.
 - Env filter (FR2, `src/engine/env.ts`): a script is deny-by-default. It inherits only the
   baseline — `PATH`, `HOME`, `LANG`, `LC_*`, `TZ`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`,
   `TMP`, `TEMP`, `SystemRoot`, `PATHEXT`, `COMSPEC` (matched case-insensitively) — plus the step's
@@ -1125,9 +1143,15 @@ where the list is built; `paseo` omits it). It is optional and additive, so abse
 tell", never "empty": an older server still parses, and `argos doctor`/`argos hc templates verify`
 say so instead of inventing news. The
 list projection stays lean; `RunDetail.steps` use `StepDetailSummary` instead of `StepSummary` and
-add each step's `attempts` (`n`, timing, `target`, `usage`, `outcome`, `errorCode`), its `outcome`,
-and its declared `outputs` (credential-shaped names dropped, values cut at
-`STEP_OUTPUT_VALUE_LIMIT` = 4,000) — that is what the UI renders as a step log. Each
+add each step's `attempts` (`n`, timing, `target`, `usage`, `outcome`, `errorCode`, plus the additive
+`detail`, `exitCode`, and `streams` of a settled attempt — a stream is the last
+`STEP_OUTPUT_VALUE_LIMIT` characters behind a `… (truncated)` line, so it keeps its tail while
+`boundedOutput` still keeps an agent output's head), its `outcome`, and its declared `outputs`
+(credential-shaped names dropped, values cut at `STEP_OUTPUT_VALUE_LIMIT` = 4,000; a script step
+whose attempts carry `streams` drops `stdout`/`stderr` here, because they are published per attempt
+instead — the record keeps them, so `when` conditions and the frozen document do not change) — that
+is what the UI renders as a step log. Those three attempt fields are optional and additive, so
+`ARGOS_RPC_VERSION` stays `1`. Each
 `StepSummary.usage` aggregates that step's attempts and `RunSummary.usage` is the workflow total
 over every main step (counters summed, `contextWindow*` gauges peaked, absent when nothing was
 reported); `argos ls` adds a COST column and `argos status` a `usage` line when there is one, and

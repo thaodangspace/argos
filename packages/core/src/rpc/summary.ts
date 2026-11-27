@@ -6,7 +6,7 @@
  * metadata and counts only, which is what keeps `GET /runs` safe to render in a browser.
  */
 
-import type { RunRecord, StepRecord } from "../engine/index.js";
+import type { AttemptRecord, RunRecord, StepRecord } from "../engine/index.js";
 import { aggregateUsage, attemptUsage, isSecretEnvName, isTerminalRunStatus } from "../engine/index.js";
 import type { HistoryDocValue, RunDoc } from "../durable/mirror.js";
 import type { FireEntry, ScheduleDoc } from "../durable/schedule-docs.js";
@@ -90,6 +90,29 @@ function boundedOutput(value: StepRecord["outputs"][string]): StepRecord["output
   return `${value.slice(0, STEP_OUTPUT_VALUE_LIMIT)}… (truncated)`;
 }
 
+/** FR6: the marker a tail-truncated stream starts with, on its own line. */
+const TAIL_MARKER = "… (truncated)";
+
+/**
+ * FR6: the last {@link STEP_OUTPUT_VALUE_LIMIT} characters of a stream, preceded by the marker line.
+ * A log's failure is at its end, so a stream keeps its **tail** where {@link boundedOutput} keeps an
+ * agent output's head (NG4). A value that fits is returned unchanged and unmarked.
+ */
+function boundedTail(value: string): string {
+  if (value.length <= STEP_OUTPUT_VALUE_LIMIT) return value;
+  return `${TAIL_MARKER}\n${value.slice(value.length - STEP_OUTPUT_VALUE_LIMIT)}`;
+}
+
+/** FR5/FR6: both sides of an attempt's streams, each a bounded tail; an absent side stays absent. */
+function boundedStreams(
+  streams: NonNullable<AttemptRecord["streams"]>,
+): NonNullable<AttemptRecord["streams"]> {
+  return {
+    ...(streams.stdout === undefined ? {} : { stdout: boundedTail(streams.stdout) }),
+    ...(streams.stderr === undefined ? {} : { stderr: boundedTail(streams.stderr) }),
+  };
+}
+
 /**
  * The detail-only step fields (`GET /runs/:id`): what the UI's per-step log renders. Declared
  * outputs go through {@link publicInputs} (a credential-shaped output name is dropped) and a long
@@ -102,18 +125,31 @@ export function stepDetailSummaries(record: RunRecord): StepDetailSummary[] {
     const outputs = publicInputs(state.outputs);
     const bounded: Record<string, StepRecord["outputs"][string]> = {};
     for (const [name, value] of Object.entries(outputs)) bounded[name] = boundedOutput(value);
+    const attempts = state.attempts.map((attempt) => ({
+      n: attempt.n,
+      startedAt: attempt.startedAt,
+      ...(attempt.endedAt === undefined ? {} : { endedAt: attempt.endedAt }),
+      ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome }),
+      ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+      ...(attempt.target === undefined ? {} : { target: attempt.target }),
+      ...(attempt.usage === undefined ? {} : { usage: attempt.usage }),
+      ...(attempt.detail === undefined ? {} : { detail: attempt.detail }),
+      ...(attempt.exitCode === undefined ? {} : { exitCode: attempt.exitCode }),
+      ...(attempt.streams === undefined ? {} : { streams: boundedStreams(attempt.streams) }),
+    }));
+    // FR7: a script step publishes its `stdout`/`stderr` tails per attempt, so the declared outputs
+    // stop duplicating them. Only the projection drops the keys — the run record keeps them, so
+    // `when` conditions and the frozen document are untouched. A step whose attempts carry no
+    // stream (a record written before FR2) keeps its declared outputs exactly as it always did.
+    const streamed = state.attempts.some((attempt) => attempt.streams !== undefined);
+    if (summary.kind === "script" && streamed) {
+      delete bounded["stdout"];
+      delete bounded["stderr"];
+    }
     return {
       ...summary,
       ...(state.outcome === undefined ? {} : { outcome: state.outcome }),
-      attempts: state.attempts.map((attempt) => ({
-        n: attempt.n,
-        startedAt: attempt.startedAt,
-        ...(attempt.endedAt === undefined ? {} : { endedAt: attempt.endedAt }),
-        ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome }),
-        ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
-        ...(attempt.target === undefined ? {} : { target: attempt.target }),
-        ...(attempt.usage === undefined ? {} : { usage: attempt.usage }),
-      })),
+      attempts,
       ...(Object.keys(bounded).length === 0 ? {} : { outputs: bounded }),
     };
   });

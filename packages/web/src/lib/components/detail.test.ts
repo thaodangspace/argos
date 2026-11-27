@@ -64,6 +64,9 @@ const detail: RunDetail = {
           endedAt: NOW - 10_000,
           outcome: "failed",
           errorCode: "step_failed",
+          detail: "the script exited 1: Fetch failed: HTTP 503",
+          exitCode: 1,
+          streams: { stderr: "Fetch failed: HTTP 503" },
         },
       ],
     },
@@ -164,6 +167,35 @@ describe("StepLog", () => {
     render(StepLog, { props: { step: ship } });
     expect(screen.getByText("step_failed")).toBeTruthy();
     expect(screen.getByText("Error: step_failed")).toBeTruthy();
+  });
+
+  it("renders a script attempt's reason and its stream tails inside the step log", () => {
+    const view = runView(detail, { detail, now: NOW });
+    const ship = view.steps[1];
+    if (ship === undefined) return;
+    render(StepLog, { props: { step: ship } });
+    // The reason sits on the end line (FR8), and the tail is a continuation line in the log.
+    expect(
+      screen.getByText(
+        "Attempt 1 failed in 10s (step_failed): the script exited 1: Fetch failed: HTTP 503",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("stderr:")).toBeTruthy();
+    expect(screen.getByText("Fetch failed: HTTP 503")).toBeTruthy();
+    // Continuation lines are inside the log list, so "Copy step log" carries them too.
+    expect(ship.logText).toContain("stderr:\n        Fetch failed: HTTP 503");
+    expect(screen.getByRole("button", { name: "Copy step log" })).toBeTruthy();
+  });
+
+  it("renders no stream lines for a step written before streams existed", () => {
+    const view = runView(detail, { detail, now: NOW });
+    const build = view.steps[0];
+    if (build === undefined) return;
+    render(StepLog, { props: { step: build } });
+    expect(screen.queryByText("stdout:")).toBeNull();
+    expect(screen.queryByText("stderr:")).toBeNull();
+    expect(build.logText).not.toMatch(/^\s*(stdout|stderr):$/m);
+    expect(build.logText).toContain("Attempt 1 completed in 30s");
   });
 });
 

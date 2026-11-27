@@ -555,6 +555,22 @@ export const StepAttemptSummarySchema = z.strictObject({
   target: z.string().min(1).optional(),
   /** Provider/token accounting when the executor reported it. */
   usage: z.record(z.string(), z.number()).optional(),
+  /**
+   * FR5: one bounded line of reason for a settled attempt (a script's `the script exited 1: …`,
+   * an executor's own note). The reducer writes it already normalized, so the wire only re-checks
+   * the cap.
+   */
+  detail: z.string().max(500).optional(),
+  /** FR5: the attempt's last exit code, when the executor reports one (script steps). */
+  exitCode: z.number().int().optional(),
+  /**
+   * FR5/FR6: the attempt's own program output, tail-truncated to {@link STEP_OUTPUT_VALUE_LIMIT}
+   * with the marker `… (truncated)` on its own line first. Never an agent prompt, a transcript, or
+   * an hc terminal text; an empty side is omitted rather than written as `""`.
+   */
+  streams: z
+    .strictObject({ stdout: z.string().optional(), stderr: z.string().optional() })
+    .optional(),
 });
 export type StepAttemptSummary = z.infer<typeof StepAttemptSummarySchema>;
 
@@ -568,7 +584,11 @@ export const StepDetailSummarySchema = StepSummarySchema.extend({
   outcome: z.string().min(1).optional(),
   /** Every attempt, oldest first. Empty for a step that never launched (a gate, a pending step). */
   attempts: z.array(StepAttemptSummarySchema),
-  /** Declared outputs, each string bounded to {@link STEP_OUTPUT_VALUE_LIMIT} characters. */
+  /**
+   * Declared outputs, each string bounded to {@link STEP_OUTPUT_VALUE_LIMIT} characters. FR7: a
+   * script step whose projected attempts carry `streams` omits `stdout` and `stderr` here, because
+   * those are published per attempt instead (the run record keeps them).
+   */
   outputs: z.record(z.string(), ScalarSchema).optional(),
 });
 export type StepDetailSummary = z.infer<typeof StepDetailSummarySchema>;

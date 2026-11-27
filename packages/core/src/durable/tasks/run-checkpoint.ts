@@ -56,6 +56,14 @@ export interface StepSettlement {
   readonly feedback?: string;
   /** Quota-exhausted targets observed by the attempt (FR24). */
   readonly exhausted?: readonly ExhaustedRecord[];
+  /**
+   * FR2: the settlement carries the attempt's reason, exit code, and bounded output tails from the
+   * task receipt into the engine. All three are optional, so a checkpoint written before they
+   * existed hydrates and re-serializes unchanged.
+   */
+  readonly detail?: string;
+  readonly exitCode?: number;
+  readonly streams?: { readonly stdout?: string; readonly stderr?: string };
 }
 
 /** One gate settlement, mapped from a terminal `argos.gate` outcome (FR19). */
@@ -122,6 +130,17 @@ const StepSettlementSchema = z.strictObject({
   usage: z.record(z.string(), z.number()).optional(),
   feedback: z.string().optional(),
   exhausted: z.array(z.strictObject({ target: z.string().min(1), at: z.number() })).optional(),
+  // FR2: strict, because a settlement is a checkpoint contract; the engine's `AttemptSchema` pins
+  // the same shapes, so both move together or a streamed settlement fails to hydrate. `detail` is
+  // deliberately **not** capped here: a receipt's reason is raw (an agent executor bounds its own,
+  // a read-only violation description can reach `GIT_MESSAGE_LIMIT`), and the engine normalizes and
+  // cuts it to 500 on the attempt. Capping it here would refuse to hydrate a checkpoint this code
+  // wrote, exactly across the crash window `await` → `settle`.
+  detail: z.string().optional(),
+  exitCode: z.number().int().optional(),
+  streams: z
+    .strictObject({ stdout: z.string().optional(), stderr: z.string().optional() })
+    .optional(),
 });
 
 const GateSettlementSchema = z.strictObject({
