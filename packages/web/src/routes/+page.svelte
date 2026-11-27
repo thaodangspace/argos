@@ -2,8 +2,8 @@
   /**
    * The run list (spec FR8/FR11): GitHub-Actions shaped. Time is the axis — one chronological list
    * with day sections — and project/workflow/trigger/executor are facets in the rail, the toolbar and
-   * the address bar. Grouping by workflow is still available on the Paseo panel, which renders the
-   * mobile-native CI view; this page answers "which workflow ran before which".
+   * the address bar. Grouping by workflow stays a facet (`groupRuns`), so two same-named playbooks
+   * from two checkouts stay apart; this page answers "which workflow ran before which".
    */
   import { onMount } from "svelte";
 

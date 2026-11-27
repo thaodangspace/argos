@@ -2,8 +2,7 @@
  * Status vocabulary for every Argos client (spec FR6).
  *
  * These labels, tones, and glyphs are the *only* place a run/step status becomes human text. The
- * Paseo panel maps a tone onto its theme tokens and the web UI maps the same tone onto CSS custom
- * properties, so the two surfaces cannot drift.
+ * web UI maps a tone onto Skeleton colour pairings, so a label and its colour cannot drift.
  */
 
 import type { RunStatus, StepKind, StepStatus } from "../rpc/contracts.js";

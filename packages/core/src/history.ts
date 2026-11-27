@@ -1,14 +1,13 @@
 /**
  * The history event vocabulary shared by the durable writer and the read model.
  *
- * It lives outside `durable/` for one reason: `rpc/contracts.ts` (imported by the CLI and the
- * Paseo plugin) may validate the projected history without dragging pi-durable in. Nothing here
+ * It lives outside `durable/` for one reason: `rpc/contracts.ts` (imported by the CLI and the web
+ * UI) may validate the projected history without dragging pi-durable in. Nothing here
  * imports anything, so both sides can use it.
  *
- * Adding an event means **two** edits: the list here (so the contract accepts it) and
- * `packages/paseo-plugin/shared/panel.ts`'s exhaustive `historyText`/`historyTone` switches, which
- * the compiler enforces — a new type without a label fails the plugin typecheck rather than
- * rendering as an empty log line.
+ * Adding an event means **two** edits: the list here (so the contract accepts it) and the shared
+ * `historyText`/`historyTone` switches in `src/view/step-log.ts`, which the compiler enforces — a
+ * new type without a label fails the typecheck rather than rendering as an empty log line.
  */
 export const HISTORY_EVENT_TYPES = [
   "run_started",

@@ -1,10 +1,9 @@
 /**
  * The read model every client renders: `toRunSummary` (what `GET /runs` projects), its detail
- * variant, and the shared `@thaodangspace/argos-core/view` projections the Paseo panel and the web
- * UI both call.
+ * variant, and the shared `@thaodangspace/argos-core/view` projections the web UI calls.
  *
- * The panel polls every 2 s and re-projects on each frame, so these are the functions a user feels
- * when a list is large — a 200-run workspace with a 50-step run selected is the far end of the range
+ * An open page re-projects on each SSE frame, so these are the functions a user feels when a list
+ * is large — a 200-run workspace with a 50-step run selected is the far end of the range
  * these benches keep cheap.
  *
  * Run: `npm run bench` (or `npx vitest bench packages/core/bench/view.bench.ts`).

@@ -1,8 +1,8 @@
 /**
- * The CLI/panel-style start form, parsed without a framework (spec FR6).
+ * The start form, parsed without a framework (spec FR6).
  *
  * The web UI does not use `key=value` text, but it uses the same validation result shape and error
- * vocabulary; keeping this here means both clients reject the same malformed input with the same
+ * vocabulary; keeping this here means every client rejects the same malformed input with the same
  * `invalid_request` code.
  */
 

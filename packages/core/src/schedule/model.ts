@@ -4,8 +4,8 @@
  *
  * This module imports **only** `zod` and the error type. `croner` — the one dependency a cron
  * expression needs — lives in `src/schedule/next.ts`, so `rpc/contracts.ts` can import these
- * schemas without pulling a scheduler (or a timer) into the CLI and the Paseo plugin, which bundle
- * the RPC contract but must never arm a timer.
+ * schemas without pulling a scheduler (or a timer) into the CLI and the web UI, which bundle the
+ * RPC contract but must never arm a timer.
  *
  * The defaults are the spec's: 50 fire-log entries, 1,000 run ids, 100 schedules, 30 kept runs, and
  * a two-minute tolerance that separates a `cron` fire from a `catch_up` one.

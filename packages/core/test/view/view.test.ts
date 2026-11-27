@@ -2,8 +2,7 @@
  * The shared view model (spec FR6): labels/tones, history text for every event type, the step log,
  * run views and grouping, gate views, the start form, and the formatters.
  *
- * These are the assertions the Paseo panel used to make; they now run against the core subpath so a
- * third client cannot use an untested copy.
+ * These assertions run against the core subpath, so no client can use an untested copy.
  */
 
 import { describe, expect, it } from "vitest";
@@ -571,7 +570,7 @@ describe("run list model", () => {
     const missing = panelView({ ...model, workflow: "docs" }, { now: NOW });
     expect(missing.list).toEqual([]);
     expect(missing.visibleCount).toBe(0);
-    // The CI grouping the Paseo panel renders is status-only, so it is not emptied by a facet.
+    // The CI grouping is status-only, so it is not emptied by a facet.
     expect(missing.groups).toHaveLength(1);
   });
 

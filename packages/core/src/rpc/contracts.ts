@@ -1,6 +1,6 @@
 /**
  * The RPC contract (FR26, Phase 8) — the single source of truth for the HTTP server, the CLI
- * client, the Paseo plugin, and the contract tests.
+ * client, the web UI, and the contract tests.
  *
  * Everything here is plain zod + inferred types. Three rules are load-bearing:
  *
@@ -24,8 +24,8 @@ import { HISTORY_EVENT_TYPES } from "../history.js";
 /**
  * The schedule vocabulary, shared with the scheduler itself (FR1.4, FR3.5, FR5.1, FR9.1).
  * `schedule/model.ts` imports only zod and the error type, so the contract stays free of `croner`
- * and of every durable module: the CLI and the Paseo plugin bundle these schemas and must never
- * arm a timer or open SQLite.
+ * and of every durable module: the CLI and the web UI bundle these schemas and must never arm a
+ * timer or open SQLite.
  */
 import {
   CatchUpInputSchema,
@@ -39,8 +39,8 @@ import {
 /**
  * FR1/FR3/FR8/FR9: the executor vocabulary, re-exported here for the same reason the schedule
  * vocabulary is imported from `schedule/model.ts` — `executor/model.ts` imports only zod and the
- * error type, so the CLI and the Paseo plugin share one normalizer and one info schema without
- * importing the core root, the durable host, or an adapter.
+ * error type, so the CLI and the web UI share one normalizer and one info schema without importing
+ * the core root, the durable host, or an adapter.
  */
 import {
   DEFAULT_EXECUTOR_ID,
@@ -497,7 +497,7 @@ export const GateChoiceSummarySchema = z.strictObject({
 });
 export type GateChoiceSummary = z.infer<typeof GateChoiceSummarySchema>;
 
-/** One gate, as the panel and CLI see it. The decision fields are present only once decided. */
+/** One gate, as a client sees it. The decision fields are present only once decided. */
 export const GateSummarySchema = z.strictObject({
   runId: z.string().min(1),
   gateId: z.string().min(1),
@@ -540,7 +540,7 @@ export const StepSummarySchema = z.strictObject({
 export type StepSummary = z.infer<typeof StepSummarySchema>;
 
 /**
- * One launch attempt of a step (`GET /runs/:id` only). Attempt history is what the panel's step log
+ * One launch attempt of a step (`GET /runs/:id` only). Attempt history is what the UI's step log
  * is built from; `agentId` and `requestId` stay private, `target` is just `provider/model`.
  */
 export const StepAttemptSummarySchema = z.strictObject({
@@ -614,7 +614,7 @@ export const RunSummarySchema = z.strictObject({
    */
   usage: z.record(z.string(), z.number()).optional(),
   steps: z.array(StepSummarySchema),
-  /** Every gate of the run, pending and decided; the CLI/panel filters pending ones. */
+  /** Every gate of the run, pending and decided; the CLI and the UI filter pending ones. */
   gates: z.array(GateSummarySchema),
   after: z.array(AfterSummarySchema),
   createdAt: z.number(),
@@ -636,7 +636,7 @@ export type HistoryEvent = z.infer<typeof HistoryEventSchema>;
 
 /**
  * `GET /runs/:id`. `gates` are the gate documents projected to {@link GateSummary}; `steps` carry
- * the attempt/output detail the panel renders as a step log; `history` is the bounded (≤500) event
+ * the attempt/output detail the UI renders as a step log; `history` is the bounded (≤500) event
  * log. Still no prompts or transcripts.
  */
 export const RunDetailSchema = RunSummarySchema.extend({

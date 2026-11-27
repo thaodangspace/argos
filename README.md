@@ -20,7 +20,6 @@ only do the work inside a step.
 - A running Paseo daemon (`ws://127.0.0.1:6767/ws` by default) with at least one provider ready —
   only for Paseo runs; an `hc` run never touches it.
 - `git` for worktree isolation and the read-only guard.
-- Paseo `>=0.15.3` for the panel/chat-tool plugin.
 - Optional: a running herdr-core core (`hc`, protocol generation 1) for `executor: hc` runs. Argos
   talks to its socket (`HC_SOCKET`, or `HC_SESSION`'s socket) and never spawns `hc` itself.
 
@@ -34,8 +33,8 @@ npx @thaodangspace/argos --help
 
 Both published packages are public on npm: `@thaodangspace/argos` (the CLI) and
 `@thaodangspace/argos-core` (the library: loader, engine, durable host, RPC server, Paseo and
-herdr-core adapters). The Paseo plugin is installed from a checkout, not through npm (see
-[Paseo plugin](#paseo-plugin)).
+herdr-core adapters). The web UI ships inside the CLI tarball and is served by `argos serve` under
+`/ui`.
 
 ## Build from source
 
@@ -59,8 +58,7 @@ npm link ./packages/cli   # then `argos ...`
 ## Release (maintainers)
 
 Versions are kept in lockstep: the root, `@thaodangspace/argos-core`, `@thaodangspace/argos`, and
-the private plugin and web UI all share one version, and every workspace pins the core version it
-ships with.
+the private web UI all share one version, and every workspace pins the core version it ships with.
 
 ```sh
 npm run version:bump -- patch         # 0.1.1 -> 0.1.2 in every manifest + the lockfile
@@ -101,7 +99,7 @@ a pane while it runs (space `argos`, one tab per run). No other client reads a l
 without the app keeps them as data; `ARGOS_HERDR=0` turns them off, `ARGOS_HERDR_SPACE` /
 `ARGOS_HERDR_TAB` override the two ids.
 
-The CLI and plugin talk HTTP to this process; they never open the database. If the server is not
+The CLI and the web UI talk HTTP to this process; they never open the database. If the server is not
 running, `argos run` tells you to start it and exits with code `3`.
 
 ## Web UI
@@ -126,7 +124,7 @@ To rebuild this checkout and restart a locally running server in one step, use
 
 The browser never holds the bearer token: the server issues a per-process `HttpOnly` session cookie
 (see `docs/architecture.md#browser-session-web-ui`). The UI is a projection of the same read model
-as the CLI and panel — it never shows prompts or agent transcripts, which the API does not expose.
+as the CLI — it never shows prompts or agent transcripts, which the API does not expose.
 
 ## A minimal playbook
 
@@ -356,29 +354,6 @@ terminal task records (the bulk of the file) and the expired idempotency receipt
 never deleted by a purge — `argos worktree rm` / `gc` owns those. Nothing runs on a timer: the
 window is always explicit.
 
-## Paseo plugin
-
-`packages/paseo-plugin` is a thin HTTP client of `argos serve` (manifest `id: argos`, requires
-Paseo `>=0.15.3`). It adds a sidebar row/panel for runs, step statuses, and pending gates, plus the
-chat tools `argos_start_playbook`, `argos_run_status`, `argos_decide_gate`, and
-`argos_cancel_run`.
-
-Install it from the directory (Paseo bundles the TypeScript source itself):
-
-```sh
-argos serve                                      # first: creates $ARGOS_HOME/token
-paseo plugin install /path/to/argos/packages/paseo-plugin
-paseo plugin ls                                  # argos should be "running"
-paseo plugin logs argos                          # load errors, if any
-paseo plugin reload argos                        # after changing plugin source
-```
-
-The Paseo daemon and `argos serve` must agree on `ARGOS_HOME`/`ARGOS_PORT`. The plugin's server half
-reads the token; the chat tools call `argos serve` over HTTP, and the panel calls the plugin's RPC
-handlers (`argos.runs.list`, `argos.gates.decide`, …), which run beside the server. That is why the
-panel works across remote hosts even though `argos serve` binds `127.0.0.1`. Because the engine
-lives in `argos serve`, reloading the plugin cannot kill a run; it reconnects and re-renders.
-
 ## Isolation and read-only roles
 
 ```yaml
@@ -408,7 +383,7 @@ the step runs (see [docs/compat.md](docs/compat.md)).
 ## Development
 
 ```sh
-npm test            # build + 900+ loader/engine/host/adapters/RPC/plugin tests, no external processes
+npm test            # build + 900+ loader/engine/host/adapters/RPC tests, no external processes
 npm run typecheck   # tsc for every workspace and test graph
 npm run test:e2e    # build + real `argos serve`, SIGKILL, restart (step, gate, schedule, delay, hc)
 ```
@@ -423,7 +398,7 @@ so no daemon, opencode or model is needed.
 |---|---|---|
 | `packages/core` | `@thaodangspace/argos-core` | loader/IR, pure engine, durable host, RPC server, Paseo and herdr-core adapters (npm) |
 | `packages/cli` | `@thaodangspace/argos` | `argos` CLI (HTTP client of `argos serve`; npm, `bin: argos`) |
-| `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel and chat tools (HTTP client; private, installed by path) |
+| `packages/web` | `@thaodangspace/argos-web` | SvelteKit browser UI served by `argos serve` under `/ui` (HTTP client; private) |
 
 More: [AGENTS.md](AGENTS.md) for the implementation contract, storage layout, task kinds, error
 codes, and test commands.

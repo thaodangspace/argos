@@ -3,7 +3,7 @@
  *
  * A playbook targets hc exactly the way it targets Paseo — `agent: { provider: hc, model:
  * <template-name> }` — so the canonical target is `hc/<template>` and every existing surface
- * (`model_unavailable` at start, `StepRecord.attempts[].target`, the panel's target column) works
+ * (`model_unavailable` at start, `StepRecord.attempts[].target`, the UI's target column) works
  * with no new IR field and no new config file. The catalog itself is `templates.list`: a template
  * the core does not offer is refused before any task exists, by the same host check that refuses an
  * off-catalog `provider/model`, so there is no second code path (FR18).

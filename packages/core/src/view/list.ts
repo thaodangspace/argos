@@ -3,7 +3,7 @@
  *
  * `run-view.ts` renders one run; this module decides which runs the list shows, in what order, and
  * how the facets (project, workflow, trigger, executor) are offered. It is pure and DOM-free for the
- * same reason: both clients render the same list, and the tests pin every label.
+ * same reason: every client renders the same list, and the tests pin every label.
  *
  * The two axes exist because a schedule fires the same playbook every hour *and* an Argos server
  * hosts many projects: grouping by playbook alone answers "which runs of this workflow" but loses

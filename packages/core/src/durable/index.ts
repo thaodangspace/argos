@@ -2,8 +2,8 @@
  * Durable host surface (`@thaodangspace/argos-core/durable`).
  *
  * This subpath is deliberately separate from the package root: importing it is the only way to
- * pull `@earendil-works/*` and the SQLite writer into a process. The CLI and Paseo plugin talk
- * HTTP and must never import it (FR3, Phase 9 import-graph rule).
+ * pull `@earendil-works/*` and the SQLite writer into a process. The CLI and the web UI talk HTTP
+ * and must never import it (FR3, Phase 9 import-graph rule).
  */
 
 export * from "./context.js";

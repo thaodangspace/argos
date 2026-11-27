@@ -21,7 +21,6 @@ herdr-core adapter come from
 |---|---|---|
 | `packages/core` | `@thaodangspace/argos-core` | loader, engine, durable host, git helpers, RPC server, Paseo + herdr-core adapters |
 | `packages/cli` | `@thaodangspace/argos` | `argos` CLI; HTTP client of `argos serve`, never opens SQLite (`templates/packs/` carries the bundled hc template packs: plain `.mjs`, outside `tsc -b`) |
-| `packages/paseo-plugin` | `argos-paseo-plugin` | Paseo panel + chat tools; HTTP client, never opens SQLite |
 | `packages/web` | `@thaodangspace/argos-web` | SvelteKit SPA served by `argos serve` under `/ui`; HTTP client, never opens SQLite |
 
 No source files live outside `packages/*`. TypeScript ESM, `module`/`moduleResolution`
@@ -35,7 +34,7 @@ anything.
 `packages/core/src/schedule/` holds the two scheduler primitives: `next.ts` is the **only**
 `croner` user (built paused, with no callback, so it is a calculator and never arms a timer) and
 `model.ts` is the zod-only schedule model (ids, bounds, fire entries, `catchUp`/`keep`
-normalization) that `rpc/contracts.ts` imports, so the CLI and the plugin bundle neither `croner`
+normalization) that `rpc/contracts.ts` imports, so the CLI and the web UI bundle neither `croner`
 nor a timer.
 
 `packages/core/src/executor/` is the Node-free executor model (`model.ts`: `EXECUTOR_IDS` in
@@ -48,9 +47,8 @@ compilation and `parseStepResult`), which both adapters use.
 `packages/core/src/view/` is the shared, DOM-free UI projection (`@thaodangspace/argos-core/view`):
 status labels/tones/glyphs, filters, `sortRuns`/`pendingGates`, `runView`/`groupRuns`/`panelView`,
 `buildStepLog`/`buildRunLog`/`historyText`, `gateView`, the timestamp formatters, and
-`parseStartForm`. The Paseo panel re-exports it and the SvelteKit UI imports it, so a new status or
-history event is one edit for both (and the Paseo plugin's exhaustive `historyText` switch is now the
-core one). It imports only `rpc/contracts` — never the durable host, engine, adapters, or a Node
+`parseStartForm`. The SvelteKit UI and `argos chart` import it, so a new status or history event is
+one edit for every client. It imports only `rpc/contracts` — never the durable host, engine, adapters, or a Node
 built-in (`test/view/purity.test.ts`).
 
 `view/graph.ts` is the graph renderer: `escapeMermaidLabel`/`mermaidNodeKey`/`renderMermaid`
@@ -81,8 +79,8 @@ a `live` flag: a facet is in use when one of its runs is active or its workflow 
 by `formatDate` so a header never disagrees with the `3h ago` label under it, and `Yesterday` is a
 calendar step, not 86 400 000 ms), and `scopeTitle`/`scopeSubtitle`.
 `panelView` returns `list`/`days`/`facets`/`query`/`sort` beside the older `groups`, and its status
-chips count **inside** the scope. `groups`/`groupRuns` stay for the Paseo panel's native CI view
-(the web list is flat, `packages/web/src/lib/components/RunList.svelte`).
+chips count **inside** the scope. `groups`/`groupRuns` are the CI-style grouping (the web list is
+flat, `packages/web/src/lib/components/RunList.svelte`).
 
 `packages/web` is deliberately outside the root `tsc -b` graph (Svelte files are not `tsc` inputs):
 it typechecks with `svelte-kit sync && svelte-check` and builds with Vite/`adapter-static` under
@@ -158,14 +156,14 @@ the IR as **types** only, never Paseo, the engine, git, or RPC (`test/hc/isolati
 
 - **No LLM in control flow.** Readiness, transitions, loop limits, gates, retries, and timeouts are
   decided by the pure engine. A model only does the work inside a step.
-- **One writer.** Only `argos serve` opens `$ARGOS_HOME/argos.sqlite`. The CLI and plugin talk
+- **One writer.** Only `argos serve` opens `$ARGOS_HOME/argos.sqlite`. The CLI and the web UI talk
   HTTP; a second live owner is refused with `storage_locked` naming `serve.pid`.
 - **Loopback + token.** The server binds `127.0.0.1` and requires
   `Authorization: Bearer <token>`; tokens and secrets never reach the database or logs.
 - **Stable codes.** Callers match on `ArgosError.code`, never on message text.
 - **One view model.** Status labels/tones, grouping, the step log, and the history text live in
-  `@thaodangspace/argos-core/view`; the Paseo panel re-exports it and the web UI imports it, so a new
-  status or history event is one edit for every client.
+  `@thaodangspace/argos-core/view`; the web UI imports it, so a new status or history event is one
+  edit for every client.
 - **The substrate is frozen in the run.** A run resolves its executor once (request > schedule >
   playbook > server default, which is `hc` when its adapter registered and `paseo` otherwise) and
   stores the canonical id in `RunRecord.executor` (`paseo` omitted, so older records stay
@@ -212,7 +210,6 @@ npx vitest run --project core packages/core/test/paseo
 npx vitest run --project core packages/core/test/hc
 npx vitest run --project core packages/core/test/rpc
 npx vitest run --project cli
-npx vitest run --project paseo-plugin
 npx vitest run --project web
 npx vitest run --config vitest.e2e.config.ts
 npx vitest run --config vitest.perf.config.ts
@@ -226,7 +223,7 @@ Package `exports` point at `dist/`, so anything importing a sibling workspace ne
 `packages/core/bench/` measures the three hot paths that are ordinary deterministic code, so a
 regression in them would be invisible to the behaviour suites: the reducer `next()` (every task
 wake), `loadPlaybook` (every start and every fire), and the shared read model (`toRunSummary`,
-`stepDetailSummaries`, `runView`/`panelView`, `buildStepLog`) that both clients render.
+`stepDetailSummaries`, `runView`/`panelView`, `buildStepLog`) that every client renders.
 Fixtures come from `bench/support.ts` (fixed epoch, generated playbooks, no clock, no socket, no
 SQLite), so a bench run describes Argos and not the machine's disk or daemon.
 
@@ -253,22 +250,21 @@ overhead, `mean` vs `p99`, what is deliberately not measured) live in [`docs/ben
 
 ## Publishing (npm)
 
-Two workspaces are public on npm and two are not:
+Two workspaces are public on npm and one is not:
 
 | Package | npm | Notes |
 |---|---|---|
 | `@thaodangspace/argos-core` | yes | the library; published first |
 | `@thaodangspace/argos` | yes | the CLI, `bin: {"argos": "dist/index.js"}` |
-| `argos-paseo-plugin` | no (`private`) | Paseo bundles its TypeScript source; installed with `paseo plugin install <path>` |
 | `@thaodangspace/argos-web` | no (`private`) | the SvelteKit UI; `packages/cli/scripts/copy-ui.mjs` copies its build into `packages/cli/ui`, which ships inside the CLI tarball |
 
 The bare names `argos` and `argos-cli` are taken on npm by unrelated projects, which is why both
 packages live under the `@thaodangspace` scope. `argos` remains the command name.
 
-- **Lockstep versions.** The root (private), the two published packages, the plugin, and the web UI
-  share one version; the CLI, the plugin, and the web UI pin `@thaodangspace/argos-core` to exactly
-  that version, because npm resolves a workspace by specifier + version. `scripts/bump-version.mjs`
-  (`npm run version:bump -- 0.2.0|patch|minor|major`) moves all five manifests and all three pins in
+- **Lockstep versions.** The root (private), the two published packages, and the web UI share one
+  version; the CLI and the web UI pin `@thaodangspace/argos-core` to exactly that version, because
+  npm resolves a workspace by specifier + version. `scripts/bump-version.mjs`
+  (`npm run version:bump -- 0.2.0|patch|minor|major`) moves all four manifests and both pins in
   one command and then runs `npm install --package-lock-only`, because the lockfile embeds the same
   versions and `npm ci` (the first release step) refuses a mismatch. `--dry-run` prints the plan and
   writes nothing.
@@ -400,8 +396,8 @@ read model's schema): `run_started`, `select`, `dispatch`, `settle`, `gate`, `ga
 `script_repinned` (FR3.4 — one line per re-pinned script, `detail` = `<name>: <from> -> <to>`), and
 `forked_from` (the first event after `run_started` on a forked run; `stepId` is the fork point and
 `detail` = `<parentRunId>@<stepId>`; the hashes live in `RunRecord.forkedFrom`). Adding an event is
-two edits, not one: the list in `src/history.ts` and the plugin's exhaustive `historyText`/
-`historyTone` switches in `shared/panel.ts` (the compiler requires the second).
+two edits, not one: the list in `src/history.ts` and the shared `historyText`/`historyTone`
+switches in `view/step-log.ts` (the compiler requires the second).
 
 ## Error codes
 
@@ -602,7 +598,7 @@ next(record: RunRecord, event: EngineEvent): { record: RunRecord; effects: reado
 
 `packages/core/src/durable/` is the only importer of `@earendil-works/*` (and `src/git/`). The
 public surface is the `@thaodangspace/argos-core/durable` subpath; it is deliberately **not** re-exported from
-the package root so the CLI and plugin cannot open SQLite by accident.
+the package root so the CLI and the web UI cannot open SQLite by accident.
 
 **Executor registry (executor spec FR1–FR7).** `ArgosHost` holds `#executors` (`paseo` from the
 `executor` option plus every registered id), `#defaultExecutor`, and one `TargetCatalog` per id.
@@ -1091,7 +1087,7 @@ does not change), and ignored paths are invisible.
 ## RPC + CLI
 
 `packages/core/src/rpc/` has two subpaths: `@thaodangspace/argos-core/rpc` (`contracts.ts` + `client.ts`; no
-durable imports, safe for CLI/plugin) and `@thaodangspace/argos-core/rpc/server` (`server.ts`; imports the
+durable imports, safe for the CLI and the web UI) and `@thaodangspace/argos-core/rpc/server` (`server.ts`; imports the
 durable host and is imported only by `argos serve`). `rpc/summary.ts` projects mirrored documents
 to the public read model. The CLI source never imports `@thaodangspace/argos-core/durable`, `@thaodangspace/argos-core/git`,
 `@thaodangspace/argos-core/hc`, `node:sqlite`, `node:net`, or `@earendil-works/*`; only
@@ -1117,11 +1113,11 @@ say so instead of inventing news. The
 list projection stays lean; `RunDetail.steps` use `StepDetailSummary` instead of `StepSummary` and
 add each step's `attempts` (`n`, timing, `target`, `usage`, `outcome`, `errorCode`), its `outcome`,
 and its declared `outputs` (credential-shaped names dropped, values cut at
-`STEP_OUTPUT_VALUE_LIMIT` = 4,000) — that is what the panel renders as a step log. Each
+`STEP_OUTPUT_VALUE_LIMIT` = 4,000) — that is what the UI renders as a step log. Each
 `StepSummary.usage` aggregates that step's attempts and `RunSummary.usage` is the workflow total
 over every main step (counters summed, `contextWindow*` gauges peaked, absent when nothing was
 reported); `argos ls` adds a COST column and `argos status` a `usage` line when there is one, and
-the panel shows the run total in its meta row and each agent step's cost on its row. All
+the UI shows the run total in its header and each agent step's cost on its row. All
 bodies are strict zod schemas; `RPC_ERROR_STATUS` is the single code → HTTP map; bodies are capped
 at 1 MiB. `ScheduleSummary` is the document without `uid`, `runIds`, and `fires` (inputs filtered
 by `publicInputs`); `ScheduleDetail` adds `fires` and the 10 newest `recentRunIds`.
@@ -1162,10 +1158,8 @@ absolute, NUL-free, exist, and be a directory (a git repository is not required)
 route answers 400 `invalid_request` and creates no run, task, or worktree. A fire validates the
 stored `cwd` again, every time. `/schedules/...` is claimed by `handleSchedules` before the
 `/runs` 404 guard, so an unknown schedule path is the protocol-only 404 (`not_found`) and never
-falls through to the run routes. The plugin's start tool confines an agent-supplied `cwd` to the
-calling agent's working directory (see the plugin section). The security model — what the token
-grants, the env rules, script pinning, record-only worktree paths, unattended schedules, and
-plugin confinement — is documented in
+falls through to the run routes. The security model — what the token grants, the env rules, script
+pinning, record-only worktree paths, and unattended schedules — is documented in
 [`docs/architecture.md`](docs/architecture.md#security).
 
 **Auth/idempotency.** `ensureToken()` writes 32 random bytes as hex to `$ARGOS_HOME/token`
@@ -1259,107 +1253,6 @@ a refusal is exit 2 (`template_conflict`, `pack_unknown`, `pack_missing`, `pack_
 `manifest_invalid`, `node_too_old`, `invalid_floor`, `unsupported_protocol`, `link_unsupported`,
 `program_missing`, `pack_duplicate`) and writes nothing.
 
-## Paseo plugin
-
-`packages/paseo-plugin` is a thin client: a sidebar row, a GitHub-CI-style screen (run list grouped
-by playbook, filter chips, a run page with one row per step and an expandable step log), and four
-chat tools. It never opens SQLite and keeps no run state, so a plugin reload cannot kill a run (the
-engine lives in `argos serve`). The **chat tools** call `argos serve` over HTTP from the plugin
-server (Node), while the **panel** calls the plugin server over Paseo RPC. That is deliberate: the
-client bundle cannot read `$ARGOS_HOME/token`, browser CORS would block a direct HTTP call, and the
-app may run on a different machine than the daemon.
-
-| File | Role |
-|---|---|
-| `paseo-plugin.json` | manifest: `id: argos`, `requirements.paseo: ">=0.15.3"` |
-| `index.server.ts` | default-exports `contribute(server)`; `agent.open.before` + the panel RPC handlers; teardown removes the hook and closes the client |
-| `index.client.tsx` | `addSidebarHeaderItem` + `addScreen` (`ARGOS_SCREEN_ID = "argos"`), `SidebarRow` with the Lucide `Workflow` icon, theme tokens, `useRpc()` |
-| `client/screen.tsx` | header (live pill, refresh, start form), error banner, list-or-run-page switch |
-| `client/RunList.tsx` | filter chips + one collapsible group per playbook (newest run per row, older runs on demand) |
-| `client/RunDetail.tsx` | run header/actions, pending-gate callouts, step rows with the log console, run log, after tasks |
-| `client/GateCard.tsx` / `client/StartRunForm.tsx` | gate choices with a comment box / the start-run form |
-| `client/ui.tsx` | theme-token React Native primitives (`Row`, `Txt`, `Button`, `PressableRow`, `Pill`, `StatusGlyph`, `RunId`, `StepProgress`) and `usePanel` |
-| `client/react-native-host.d.ts` | narrow, strict types for the host-provided `react-native` module (client typecheck only) |
-| `server/plugin.ts` | `createArgosRuntime` / `createArgosContribution` / `withArgosTools` |
-| `server/tools.ts` | four `defineAgentTool` definitions + `appendArgosTools` |
-| `server/connection.ts` | Node-only: resolves `ARGOS_HOME`/`ARGOS_PORT` + token, builds the tools client |
-| `server/rpc.ts` | panel RPC handlers (`argos.runs.*`, `argos.gates.decide`) over the same client |
-| `shared/rpc-api.ts` | zod RPC contracts + `{ok, data}` / `{ok:false, error}` result envelope |
-| `shared/rpc-bridge.ts` | panel `ArgosRpc` over RPC: unwraps envelopes, polls snapshots every 2 s |
-| `shared/rpc-client.ts` | portable `createArgosClient({url, token})` for the tools/HTTP path |
-| `shared/panel.ts` | pure panel model: `loadPanel`, `decideGateOnce`, `subscribeRuns`, selection/detail sync, `groupRuns`, `buildStepLog`, `runView`/`panelView` |
-| `shared/format.ts` | locale-free labels: duration, clock, relative time, short id, token/cost usage |
-| `shared/panel-hub.ts` | one ref-counted panel per plugin instance (sidebar + screen share one poll loop) |
-| `shared/identity.ts` | `PLUGIN_ID`, `REQUIRED_PASEO_VERSION` |
-
-Tool names (exact): `argos_start_playbook` (`POST /runs`; playbook errors render as
-`playbook_invalid`), `argos_run_status` (`GET /runs/:id`; never prompts), `argos_decide_gate`,
-`argos_cancel_run`. Tools never throw; failures become `{error:{code,message}}`. A start call
-generates a `clientRequestId` unless supplied. `argos_start_playbook` takes `execute(input,
-context)`: it defaults `cwd` to `context.agent.cwd` and confines an explicit `cwd` to that directory
-or a subdirectory (lexically: no `..` segment, absolute, exact match or `agentCwd + "/"` prefix); an
-empty agent cwd is refused. A local refusal is `invalid_request` with **no** HTTP call, and a server
-`invalid_request` stays `invalid_request` (not `playbook_invalid`). The confinement is lexical, not
-a sandbox (symlinks pass); see `docs/architecture.md#security`.
-
-`createArgosContribution({createClient?})` is the test seam. One call creates one runtime, registers
-exactly one `agent.open.before` hook that appends the tools, and registers the panel RPCs
-(`argos.runs.list`, `argos.runs.get`, `argos.runs.start`, `argos.runs.cancel`,
-`argos.runs.remove`, `argos.runs.retry`, `argos.gates.decide`). Finished runs get a two-click
-**Remove** button (no `window.confirm`: it does not exist on native). Teardown removes the hook and closes the client (aborting streams). No
-settings screen: the **server** half resolves `ARGOS_PORT`/`ARGOS_HOME` + `$ARGOS_HOME/token`
-lazily on first use (a plugin reload before `argos serve` still loads). RPC results are envelopes,
-so stable codes such as `gate_already_decided` reach the panel unchanged. The panel publishes an
-in-flight model before deciding (buttons disable), calls `decideGate` exactly once, treats an
-already-decided gate as refresh-without-retry, and reconnects with capped exponential backoff (1 s
-doubling to 8 s). Since Paseo RPC has no server push, `shared/rpc-bridge.ts` polls
-`argos.runs.list` every 2 s and feeds the panel the same `snapshot` frames the SSE endpoint uses.
-
-The screen is a two-level CI view. The list groups runs by playbook (a schedule would otherwise
-flood it) with `All|Running|Failed|Completed` filter chips and one row per run (status glyph,
-`#shortId`, trigger, relative time, duration, per-step progress); opening a run calls
-`argos.runs.get` once and renders the run page: header + actions, pending-gate callouts, one row
-per step, the selected step's log, the run log, and after tasks. The log is a pure projection of
-`RunDetail` — the step's history events, its attempts (target, duration, usage), its declared
-outputs, its outcome/error, and its gates — built by `buildStepLog`; agent transcripts are not
-stored, so an agent step's log ends at its declared outputs. `selectRun` keeps the last detail
-while refreshing and re-fetches only when the run's summary `seq` moved (`syncDetail`), so the 2 s
-poll does not multiply requests. Copy-to-clipboard uses the host's `copyText` (no
-`navigator.clipboard` assumption).
-
-**Install (Paseo 0.15.4):** start `argos serve` first (it creates `$ARGOS_HOME/token`), then
-`paseo plugin install /Users/dt/code/github.com/argos/packages/paseo-plugin`. Paseo bundles the
-TypeScript **source** itself, so `npm run build` is not required for the plugin, and every module
-must live in `server/`, `client/`, or `shared/` (Paseo rejects `src/`). Reload with
-`paseo plugin reload argos`; check `paseo plugin ls` / `paseo plugin logs argos`.
-
-Import-graph rule (`test/import-graph.test.ts`): no file under `packages/paseo-plugin/server/`,
-`shared/`, `client/`, or either entry may import `@thaodangspace/argos-core/durable`, `@thaodangspace/argos-core/git`,
-`@thaodangspace/argos-core/paseo`, `@thaodangspace/argos-core/hc`, `@thaodangspace/argos-core/engine`, `@thaodangspace/argos-core/playbook`, `@thaodangspace/argos-core/rpc/server`, the
-`@thaodangspace/argos-core` root, `@earendil-works/*`, `node:sqlite`, or `node:child_process`. Only `server/` may
-import `node:fs` (it reads the token); `shared/` and the client entry must stay portable. The only
-`@thaodangspace/argos-core` subpaths are `@thaodangspace/argos-core/rpc`, `@thaodangspace/argos-core/rpc/contracts`
-(the latter is Node-free), and `@thaodangspace/argos-core/view`; other imports are limited to
-`@getpaseo/*`, `react`, and `zod`, plus `react-native` in the client half only.
-
-**The client half is React Native, never DOM.** Paseo renders plugin UI natively on iOS/Android
-and through react-native-web on desktop, so a DOM element (`<div>`, `<span>`, `<button>`) or a CSS
-value (`padding: "0 8px"`, `lineHeight: "18px"`, `cursor`) works on desktop and breaks on mobile.
-Build with `View`/`Text`/`Pressable` from `react-native` and `ScrollView`/`TextInput`/`copyText`
-from `@getpaseo/plugin/client/ui` (the host resolves both at load time). Every string sits in a
-`Text`; every outermost `Text` sets a color (native `Text` does not inherit it from a `View`); a
-`View` is a column unless it says `row`. Three guards: `tsconfig.client.json` has no `DOM` lib and
-types `react-native` through the strict `client/react-native-host.d.ts` (Paseo's template
-installs `react-native` for types instead, ~290 packages); `test/import-graph.test.ts` rejects
-lowercase JSX tags under `client/`; and `test/native-render.test.tsx` renders the list, form,
-error banner, run page, and sidebar contribution with bare host components and checks the native
-rules (host components only, text in `Text`, native style keys/values, explicit text color).
-
-`react`/`@types/react` and `react-test-renderer`/`@types/react-test-renderer` are exact dev
-dependencies for the `.tsx` typecheck and the native render test. Typecheck is split
-(`tsconfig.json`, `tsconfig.test.json`, `tsconfig.entry.json`, `tsconfig.client.json`) so JSX never
-leaks into the server graph.
-
 ## Tests
 
 ```sh
@@ -1371,7 +1264,6 @@ npx vitest run --project core packages/core/test/durable
 npx vitest run --project core packages/core/test/paseo
 npx vitest run --project core packages/core/test/rpc
 npx vitest run --project cli
-npx vitest run --project paseo-plugin
 npx vitest run --project web
 ```
 
@@ -1411,10 +1303,7 @@ poll, kill-before-`rm` on settle, the production-side fake's block/release knobs
 restart adoption, and the adapter's isolation rules. The RPC suite
 covers auth, idempotency, SSE, retry, gates, response projection, and the `/schedules` routes
 (codes, statuses, projections); `test/rpc/db.test.ts` runs `/db/stats`, `/db/purge` (dry then
-real), `/db/vacuum`, and the 404/401 cases over a file-backed host. The plugin suite covers
-manifest, hook/teardown, decide-once/SSE reconnect, tool names/errors, reload survival, the
-CI-style grouping/filters/step log and the one-fetch detail sync (`test/detail.test.ts`), and the
-import graph. The web suite (`packages/web`) covers the API client (schema validation, stable codes, the 401 hook),
+real), `/db/vacuum`, and the 404/401 cases over a file-backed host. The web suite (`packages/web`) covers the API client (schema validation, stable codes, the 401 hook),
 the SSE client (frames, malformed payloads, capped backoff), the run/detail reducers, the typed start
 form, the list query round trip in the URL (`lib/list-query.test.ts`), the timeline list (day sections,
 `Load more`, the scope rail, the facet selects, the order toggle), and component rendering of the run
@@ -1494,16 +1383,13 @@ suite green.
 | `@earendil-works/pi-durable` | `1.5.2` | core | durable task host |
 | `@earendil-works/chord` | `1.5.2` | core | pinned alongside pi-durable |
 | `@earendil-works/pi-ai` | `1.5.2` | core | exact version pi-durable depends on |
-| `@getpaseo/client` | `0.15.4` | core, plugin | Paseo adapter / RPC client |
-| `@getpaseo/plugin` | `0.15.4` | plugin | plugin runtime + panel |
+| `@getpaseo/client` | `0.15.4` | core | Paseo adapter / RPC client |
 | `croner` | `11.0.0` | core | cron next-fire calculator; it never arms its own timer |
 | `typescript` | `7.0.2` | root dev | compiler |
 | `vitest` | `5.1.0` | root dev | test runner |
 | `@types/node` | `26.6.6` | root dev | Node types |
 | `yaml` | `2.9.1` | core | playbook parser |
-| `zod` | `4.6.7` | core, plugin, cli | schema, RPC contract, tool inputs, pack/manifest schemas |
-| `react` | `19.3.0` | plugin dev | `.tsx` client entry |
-| `@types/react` | `19.3.0` | plugin dev | JSX types |
+| `zod` | `4.6.7` | core, cli | schema, RPC contract, pack/manifest schemas |
 | `tailwindcss` | `4.3.5` | web dev | utilities for every component; nothing is hand-written |
 | `@tailwindcss/vite` | `4.3.5` | web dev | the Vite plugin that compiles the one CSS entry |
 | `@skeletonlabs/skeleton` | `5.0.6` | web dev | component/utility CSS and the Vintage theme |
@@ -1517,7 +1403,7 @@ suite green.
   call until the step deadline (then fails with that code), exactly as a poll-time outage parks; a
   `launch()` that hangs without throwing is not bounded by that deadline.
 - **Gate role deciders are metadata only.** `decider: {by: role}` is parsed/validated/preserved,
-  but v1 gates always wait for an external decision (CLI/plugin/HTTP). Human gates and loop-limit
+  but v1 gates always wait for an external decision (CLI/web UI/HTTP). Human gates and loop-limit
   gates are fully implemented.
 - **Manual after-tasks have no RPC route.** `ArgosHost.startAfterTask` exists and is tested, but
   the v1 HTTP surface does not expose it; `auto` after-tasks run normally.
@@ -1563,7 +1449,7 @@ suite green.
 - **Nothing fires while `argos serve` is down.** The timer lives in that process; the next start
   applies the catch-up rule once per schedule instead of replaying every missed fire time.
 - **A schedule is unattended execution as the operator.** Only token-authenticated RPC (CLI or
-  HTTP) creates, edits, or runs one; the Paseo plugin has no schedule panel or chat tool. `cwd` is
+  HTTP) creates, edits, or runs one; the web UI has no schedule screen. `cwd` is
   validated at add/edit and again at every fire, scripts are pinned and re-hashed as for any run,
   and the document never stores environment values — but the work itself runs as the local user.
 - **An aborted fire can leave an orphan worktree.** A fire that cuts `<home>/worktrees/<runId>`
@@ -1614,12 +1500,9 @@ suite green.
   reports drift and never refuses a run. A new pack version installs beside the old
   `packs/<name>@<version>/`, so installed templates move only when `install` rewrites them. See
   [`docs/hc-templates.md`](docs/hc-templates.md).
-- **The plugin reads `ARGOS_HOME`/`ARGOS_PORT` once per client** and has no settings screen; the
-  server must be started with matching values.
-
 - **The web UI covers watching, gates, and run controls, not the operator console.** It has no
-  schedules, worktrees, database, or doctor screen, and no run deletion; those stay in the CLI (and
-  the Paseo panel for removal). It reads the schedule roster only to label a workflow "in use" — it
+  schedules, worktrees, database, or doctor screen, and no run deletion; those stay in the CLI. It
+  reads the schedule roster only to label a workflow "in use" — it
   cannot create, pause, or remove one. It renders the same read model as the CLI, so it never shows
   agent prompts or transcripts — a step's log ends at its declared outputs, attempts, and history.
   The gate inbox (`/ui/gates`) is one oldest-first list with no filter, pagination, bulk action, or
@@ -1630,14 +1513,14 @@ suite green.
   work that waits for a person.
 - **Hiding a workflow in the UI is a view preference, not an archive.** `✕` in the rail writes a
   workflow id into this browser's `localStorage`; the workflow keeps its schedule and can still be
-  started from the CLI, another browser profile, or the Paseo panel, and the hidden list is not
+  started from the CLI or another browser profile, and the hidden list is not
   shared. The real cleanup for a dead workflow is removing its runs (`argos rm`) or letting
   `argos db purge --older-than` retire them — the rail is derived from runs, so it shrinks when the
   runs go.
 - **The timezone choice is per browser and display-only.** It changes labels, log clocks, and day
   headers, never a stored timestamp (records, history, and the API stay epoch ms) and never the
-  schedule's `tz`. It is remembered only in this browser, so the Paseo panel and the CLI keep their
-  own host's zone, and two people looking at the same run may legitimately see different hours.
+  schedule's `tz`. It is remembered only in this browser, so the CLI keeps its host's zone, and two
+  people looking at the same run may legitimately see different hours.
 - **The UI is a static SPA that needs a built artifact.** A published CLI carries one in `ui/`; a
   development checkout must `npm run build:ui` and set `ARGOS_UI_DIR` (or run
   `node packages/cli/scripts/copy-ui.mjs`). Without it `argos serve` is API-only with one warning.

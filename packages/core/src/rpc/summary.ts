@@ -3,7 +3,7 @@
  *
  * The mirror is the complete `RunRecord`; this module projects it down to what a UI or CLI may
  * see. It never copies `ir`, a step prompt, an agent id, or a transcript: the summary is display
- * metadata and counts only, which is what keeps `GET /runs` safe to render in a panel.
+ * metadata and counts only, which is what keeps `GET /runs` safe to render in a browser.
  */
 
 import type { RunRecord, StepRecord } from "../engine/index.js";
@@ -91,7 +91,7 @@ function boundedOutput(value: StepRecord["outputs"][string]): StepRecord["output
 }
 
 /**
- * The detail-only step fields (`GET /runs/:id`): what the panel's per-step log renders. Declared
+ * The detail-only step fields (`GET /runs/:id`): what the UI's per-step log renders. Declared
  * outputs go through {@link publicInputs} (a credential-shaped output name is dropped) and a long
  * string is truncated, so one detail response stays small. No prompt, agent id, or transcript.
  */
@@ -241,7 +241,7 @@ export function toRunDetail(
 
 /**
  * FR8: the graph of one frozen IR, memoized by object identity. A frozen IR is immutable, so the
- * cache needs no invalidation; `GET /runs/:id` is polled every 2 s by two clients and the graph is
+ * cache needs no invalidation; `GET /runs/:id` is polled by every open run page and the graph is
  * cheap but not free. Deep-frozen, because every detail of one IR shares this one object.
  */
 const graphCache = new WeakMap<PlaybookIR, PlaybookGraph>();

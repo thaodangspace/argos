@@ -9,8 +9,8 @@
  *   npm run version:bump -- patch
  *
  * Two things make this more than an `npm version`: the repository is a lockstep workspace (root,
- * two published packages, two private ones) and every internal pin of `@thaodangspace/argos-core`
- * (CLI, Paseo plugin, web) must name exactly the version being released. The lockfile embeds the same
+ * two published packages, one private one) and every internal pin of `@thaodangspace/argos-core`
+ * (CLI, web) must name exactly the version being released. The lockfile embeds the same
  * versions, so the bump ends with `npm install --package-lock-only` unless `--no-lock` is passed;
  * skipping it leaves `npm ci` failing on a fresh checkout, which is what the release workflow runs
  * first.
@@ -30,7 +30,6 @@ const MANIFESTS = [
   "package.json",
   "packages/core/package.json",
   "packages/cli/package.json",
-  "packages/paseo-plugin/package.json",
   "packages/web/package.json",
 ];
 

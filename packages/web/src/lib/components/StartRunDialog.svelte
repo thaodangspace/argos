@@ -52,7 +52,7 @@
 
   const selected = $derived(playbooks.find((playbook) => playbook.id === selectedId) ?? null);
 
-  /** The panel's own surface: `card` is only a radius, so the border and padding are utilities. */
+  /** The dialog's own surface: `card` is only a radius, so the border and padding are utilities. */
   const PANEL = "card w-full max-w-[620px] border border-surface-200-800 bg-surface-100-900 p-0";
 
   function reset(): void {

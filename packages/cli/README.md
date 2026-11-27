@@ -44,8 +44,8 @@ itself. Every command supports `--json`.
 
 - `@thaodangspace/argos-core` — loader, IR, pure engine, durable host, RPC server, Paseo and
   herdr-core adapters.
-- `argos-paseo-plugin` — the Paseo panel and chat tools (installed from a checkout with
-  `paseo plugin install`, not from npm).
+- `@thaodangspace/argos-web` — the SvelteKit browser UI `argos serve` hosts under `/ui` (private;
+  built with `npm run build:ui` and copied into this CLI's tarball).
 
 ## License
 

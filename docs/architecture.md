@@ -10,7 +10,7 @@ and what "durable" does — and does not — mean.
 ```
 argos CLI ─────────────── HTTP ──┐
                                  ├──► argos serve (one process, one writer)
-Paseo plugin (panel + tools) ────┘        ├── $ARGOS_HOME/argos.sqlite   (pi-durable)
+web UI (`/ui`) ──────────────────┘        ├── $ARGOS_HOME/argos.sqlite   (pi-durable)
                                           ├── engine tasks: run / step / gate / script
                                           └── executor registry ──► Paseo daemon / herdr-core
 ```
@@ -19,12 +19,12 @@ Paseo plugin (panel + tools) ────┘        ├── $ARGOS_HOME/argos.
 |---|---|---|
 | `argos serve` | SQLite, the pi-durable harness, the schedule runner (one timer over durable schedule documents), the executor registry (the Paseo client plus an optional herdr-core client), the loopback RPC server, the bearer token | nothing outside its home; no agent work itself |
 | `argos` CLI | argument parsing, HTTP calls, human/JSON rendering | open SQLite, import the durable host, launch agents |
-| Paseo plugin (`id: argos`) | a sidebar row, a run/gate panel, four chat tools | open SQLite, hold run state, keep a run alive, touch schedules |
+| Web UI (`/ui`, `packages/web`) | a browser view of runs, gates, and run controls | open SQLite, hold run state, decide a gate twice, touch schedules |
 
-The split exists so that a plugin reload, a CLI exit, or a closed terminal cannot kill an
-in-flight run. It also enforces the single-writer rule mechanically: the CLI and plugin have no
+The split exists so that a UI reload, a CLI exit, or a closed terminal cannot kill an
+in-flight run. It also enforces the single-writer rule mechanically: the CLI and the web UI have no
 storage dependency at all (`packages/cli/test/import-graph.test.ts`,
-`packages/paseo-plugin/test/import-graph.test.ts`, and the CLI sentinel test).
+`packages/web/src/lib/import-graph.test.ts`, and the CLI sentinel test).
 
 `argos serve` binds `127.0.0.1` (default `7676`, `ARGOS_PORT`), creates
 `$ARGOS_HOME/token` on first use (`0600`), and requires `Authorization: Bearer <token>` on every
@@ -35,7 +35,7 @@ server is created with an allow-list.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ control surfaces   CLI · HTTP/SSE · Paseo plugin · chat tools         │
+│ control surfaces   CLI · HTTP/SSE · web UI (`/ui`)                    │
 ├──────────────────────────────────────────────────────────────────────┤
 │ RPC               contracts (zod) · server · summary projection      │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -389,7 +389,7 @@ The prompt is delivered exactly once with no extra checkpoint state: `terminal.r
 existing poll tick (`poll_ms`), never an event subscription: `working`/`idle`/`blocked` keep the
 step running (`blocked` carries a `blocked: <msg>` detail and the deadline still governs), and a
 `done` status or a finished terminal settles it with its exit code. Declared outputs are read from
-the terminal text with the shared fenced-JSON parser (see `docs/compat.md` row 37). A terminal that
+the terminal text with the shared fenced-JSON parser (see `docs/compat.md` row 36). A terminal that
 disappears gets exactly one handover relaunch (new name, `argos/handover=1`, a handover note), then
 `agent_missing`.
 
@@ -463,7 +463,7 @@ not prevent (see `docs/compat.md`).
 HTTP clients of `argos serve` (except `validate`, which only reads files, and `doctor`, which also
 inspects the local home when the server is down). `POST` writes accept `clientRequestId`; the
 lookup and create share one commit, so a retried request returns the same run. `GET /events` is
-commit-driven SSE with a snapshot frame and reconnecting clients; the plugin re-fetches on
+commit-driven SSE with a snapshot frame and reconnecting clients; the web UI re-fetches on
 reconnect.
 
 The substrate is selected per run (`argos run --executor`, `POST /runs {executor}`), per schedule
@@ -486,9 +486,9 @@ usage), its declared outputs (credential-shaped output names dropped, long value
 outcome, and the run's bounded history; the list projection stays lean. Usage also rolls up: a
 step's `usage` aggregates its attempts and the run's `usage` aggregates every main step
 (`engine/usage.ts`), which is what `argos ls`'s COST column, `argos status`'s `usage` line, and the
-panel's run meta/step rows render; after tasks are separate runs and are not counted in the
-parent. The plugin holds no durable state: teardown closes only its HTTP client and streams, and a
-new plugin instance reconnects to the same `argos serve` run.
+UI's run header/step rows render; after tasks are separate runs and are not counted in the
+parent. The UI holds no durable state: it opens one SSE stream per page and reconnects to the same
+`argos serve` run.
 
 ## Web UI (`/ui`)
 
@@ -515,7 +515,7 @@ answers `404`.
   `Host` (and refuses `Sec-Fetch-Site: cross-site`), because `SameSite` compares sites, not ports —
   a page on another loopback port would otherwise be "same-site" with the server. A restart
   invalidates every session; the SPA reloads once to obtain a fresh cookie.
-- **Data.** The UI is a projection of the same read model as the CLI and panel: `GET /runs`,
+- **Data.** The UI is a projection of the same read model as the CLI: `GET /runs`,
   `GET /runs/:id` (attempts, declared outputs, bounded history), `GET /events` (SSE), gate decisions,
   cancel/retry/fork, and `GET /playbooks?cwd=` for the "Run workflow" form. It renders steps, status,
   duration, attempts, usage/cost, declared outputs, gates, and history — never prompts or agent
@@ -539,9 +539,9 @@ answers `404`.
   GitHub-Actions colours; it ships system font stacks and zero `@font-face`, so the UI downloads no
   font and requests no new origin.
 - **Shared view model.** Labels, tones, glyphs, filters, grouping, the step log and history text live
-  in `@thaodangspace/argos-core/view`; the Paseo panel re-exports them and the web UI imports them, so
-  a new status or history event is one edit for both clients (`core/test/view/purity.test.ts` keeps
-  that module free of Node, storage, and adapter imports).
+  in `@thaodangspace/argos-core/view`; the web UI imports them, so a new status or history event is
+  one edit for every client (`core/test/view/purity.test.ts` keeps that module free of Node,
+  storage, and adapter imports).
 
 The playbook DAG follows the same shape: **one projector, two renderers.** `playbook/graph.ts`
 (`buildPlaybookGraph`) turns a frozen `PlaybookIR` into the structural `PlaybookGraph` — nodes,
@@ -594,7 +594,7 @@ something*, not about containing what the run does.
 |---|---|
 | The operator's account, `$ARGOS_HOME` (`0700`), the token file (`0600`), the `argos serve` process | A repository's playbook or script contents (they are code, reviewed like code), a compromised Paseo daemon or agent, a local herdr-core core, a process running as the same user |
 | The local loopback listener | Remote network peers (the server binds `127.0.0.1` and never advertises itself) |
-| The CLI/plugin as the operator | Agents the run launches: they inherit only the granted environment and act inside the run `cwd`/worktree, but they are not kernel-isolated |
+| The CLI and the web UI as the operator | Agents the run launches: they inherit only the granted environment and act inside the run `cwd`/worktree, but they are not kernel-isolated |
 
 The main risks are (a) someone who obtains the token starting an arbitrary run, (b) a playbook
 leaking secrets into a child process, and (c) a script or agent changing files outside what the
@@ -625,8 +625,6 @@ returned by a route.
 a directory (`invalid_request`, HTTP 400, before the loader runs, so no run or worktree is
 created). A git repository is deliberately **not** required: Argos can run a playbook in any
 directory the operator names, and `isolation: worktree` is what asks for a git checkout.
-Because the API accepts any existing directory, the plugin (not the server) is where a calling
-agent is confined — see *Plugin confinement*.
 
 ### Environment rules
 
@@ -685,31 +683,12 @@ This is deliberately equivalent to the token in capability, not broader:
   and the shell is what delivers the cookie). Only `/ui*` is claimed that way; every API route keeps
   the bearer/cookie check.
 
-### Plugin confinement
-
-The plugin's panel is human-driven, so its `argos.runs.start` RPC is not confined (the operator
-chooses the directory). The **agent chat tool** is different: `argos_start_playbook` fills `cwd`
-from the calling agent's working directory (A2, verified against Paseo 0.15.4 — `AgentToolContext`
-carries `agent.cwd: string`) and refuses a request outside it.
-
-- Omitted `cwd` → the agent's own working directory.
-- An explicit `cwd` must be that directory or a subdirectory of it (`agentCwd + "/"` prefix),
-  after the tool rejects any path containing a `..` segment, and it must be absolute.
-- An empty or missing agent cwd is refused (`invalid_request`); there is **no** fallback to the
-  server's cwd.
-
-The check is **lexical and not a sandbox**: it stops a model from pointing a run at an unrelated
-directory, but a symlink inside the agent cwd that resolves elsewhere still passes, as does a
-subdirectory whose own contents are symlinks. A refusal is local: the tool returns
-`{error:{code:"invalid_request"}}` and makes no HTTP call. A server-side `invalid_request` stays
-`invalid_request` (it is not collapsed into `playbook_invalid`).
-
 ### Unattended schedules
 
 A schedule is executable intent stored on disk: it makes `argos serve` start a playbook with no
 operator present. It is therefore created and changed only through the token-authenticated RPC
-surface (`argos schedule …`, `POST /schedules…`); the plugin exposes no schedule panel or chat
-tool, so an agent cannot register, edit, or run one.
+surface (`argos schedule …`, `POST /schedules…`); the web UI has no schedule screen, so a browser
+cannot register, edit, or run one.
 
 - `cwd` is validated when the schedule is added or edited **and again at every fire**
   (`resolveRunRequest`), so a deleted, moved, or replaced directory is a refused fire, not a run
@@ -731,7 +710,7 @@ tool, so an agent cannot register, edit, or run one.
 - **No LLM in control flow.** Transitions, readiness, loop limits, gates, retries, and timeouts
   are decided by the engine. A model only works inside a step.
 - **One writer.** Only `argos serve` opens `$ARGOS_HOME/argos.sqlite`. A second live owner is
-  refused with `storage_locked` naming `serve.pid`; the CLI and plugin never open storage.
+  refused with `storage_locked` naming `serve.pid`; the CLI and the web UI never open storage.
 - **Loopback and token.** The server binds `127.0.0.1` and requires a bearer token on every
   request; secrets never reach the database or logs.
 - **Stable codes.** Callers match on `ArgosError.code`, never on message text. See the table in

@@ -3,8 +3,8 @@
  * every surface shares.
  *
  * This module imports **only** `zod` and the error type, exactly like `schedule/model.ts`: the CLI,
- * the Paseo plugin (through `rpc/contracts.ts`), and the durable host must agree on one normalizer,
- * and the plugin bundles the RPC contract but must never load a durable layer or an adapter.
+ * the web UI (through `rpc/contracts.ts`), and the durable host must agree on one normalizer, and a
+ * client bundles the RPC contract but must never load a durable layer or an adapter.
  *
  * Two ids, two meanings of "default". `hc` (herdr-core terminals) is the substrate a server starts
  * runs on when nothing overrides it ({@link PREFERRED_EXECUTOR_ID}); `paseo` is the legacy substrate
