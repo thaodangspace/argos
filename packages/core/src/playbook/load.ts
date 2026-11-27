@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { parse as parseYaml } from "yaml";
@@ -71,7 +71,17 @@ export interface LoadOptions {
    * keeps the loader silent and byte-identical.
    */
   readonly warnings?: LoadWarning[];
+  /**
+   * Validate this text as if it were the bytes of `source.file` (FR7). Only the bytes are
+   * substituted: the path identity — playbook/role family, origin, the `.paseo` unknown-key rule —
+   * still comes from the path, which is why a temp file cannot stand in for it. The text never
+   * reaches the IR, so the hash of a valid buffer is the hash the same bytes on disk produce.
+   */
+  readonly source?: { readonly file: string; readonly text: string };
 }
+
+/** The buffer a load validates instead of one file's bytes, when a caller gave one (FR7). */
+type SourceText = LoadOptions["source"];
 
 /** `argos validate` and other callers import the warning shape from here. */
 export type { LoadWarning, PlaybookOrigin, WarningCode, WarningSink } from "./resolve.js";
@@ -220,10 +230,38 @@ export function defaultsFile(repoDir: string, home?: string): string | undefined
   return existsSync(file) ? file : undefined;
 }
 
-function parseFile(file: string, repoDir: string): unknown {
+/**
+ * The one read point for a playbook document: a matching `source` supplies the bytes, everything
+ * else reads the file. Role files and `defaults/main.yaml` never come through here with a source,
+ * so a buffer load cannot accidentally substitute text for a role.
+ */
+function readSource(file: string, options: { readonly source?: SourceText }): string {
+  const source = options.source;
+  if (source !== undefined && samePath(file, source.file)) return source.text;
+  return readFileSync(file, "utf8");
+}
+
+/**
+ * The same file reached by two spellings: a relative path, or a symlinked prefix (`/tmp` on macOS)
+ * that a caller resolved with `realpath`. The `realpath` fallback only runs when both paths exist.
+ */
+function samePath(left: string, right: string): boolean {
+  if (resolve(left) === resolve(right)) return true;
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+function parseFile(
+  file: string,
+  repoDir: string,
+  options: { readonly source?: SourceText } = {},
+): unknown {
   let text: string;
   try {
-    text = readFileSync(file, "utf8");
+    text = readSource(file, options);
   } catch (error) {
     throw argosError(
       "playbook_missing",
@@ -400,6 +438,8 @@ interface LoadContext {
   /** Role ids already reported as `role_shadowed`, so one load warns once (FR8.4). */
   readonly shadowWarned: Set<string>;
   readonly warn: WarningSink | undefined;
+  /** The buffer a load validates instead of the bytes of its own file, when one was given (FR7). */
+  readonly source: SourceText;
 }
 
 /** The family of one playbook file (FR8.2). */
@@ -527,7 +567,7 @@ function build(
   depth: number,
   family: RoleFamily,
 ): UnhashedPlaybookIR {
-  const document = parseFile(file, ctx.repoDir);
+  const document = parseFile(file, ctx.repoDir, ctx);
   const origin = originOf(file, ctx.home);
   const raw = parseSchema(RawPlaybookSchema, document, { file, origin, warn: ctx.warn });
   const referencedRoles = new Map<string, RoleIR>();
@@ -582,6 +622,8 @@ function build(
  * a global playbook keeps its global roles.
  * `warnings` is an optional sink (FR7): a `.paseo/` file with unknown keys loads and warns, and
  * alias conflicts are reported — the IR and its hash never depend on whether it is passed.
+ * `source` substitutes the bytes of one file (FR7): the IR, errors, and warnings of a buffer load
+ * are the ones the same bytes written to that path produce, because only the text read changes.
  */
 export function loadPlaybook(repoDir: string, id: string, options: LoadOptions = {}): PlaybookIR {
   const base = absolute(repoDir);
@@ -602,6 +644,10 @@ export function loadPlaybook(repoDir: string, id: string, options: LoadOptions =
     roleSources: new Map(),
     shadowWarned: new Set(),
     warn,
+    source:
+      options.source === undefined
+        ? undefined
+        : { file: resolve(base, options.source.file), text: options.source.text },
   };
   const book = build(ctx, id, entry.file, [id], 0, familyOf(entry.file, home));
   const hash = playbookHash(book);
