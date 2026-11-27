@@ -3,8 +3,8 @@
  *
  * Agent transcripts are never stored by Argos, so a step's log is its history events, its attempts
  * (target, duration, usage, outcome), its **declared** outputs, its outcome/error, and the gates
- * opened for it. One implementation serves the Paseo panel and the web UI so adding a history event
- * stays a two-edit change (the event list and this switch).
+ * opened for it. One implementation serves the web UI and the CLI's read model so adding a history
+ * event stays a two-edit change (the event list and this switch).
  */
 
 import type {

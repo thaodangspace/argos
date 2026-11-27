@@ -204,7 +204,7 @@ export interface RunDetailView {
 
 export interface PanelView {
   readonly runs: readonly RunView[];
-  /** Runs the status chip keeps, grouped by playbook (the Paseo panel's CI view). */
+  /** Runs the status chip keeps, grouped by playbook (CI-style, newest activity first). */
   readonly groups: readonly WorkflowGroupView[];
   /** The visible timeline: every facet of `query`, ordered by `sort`. */
   readonly list: readonly RunView[];
@@ -235,7 +235,7 @@ export interface PanelView {
 }
 
 /**
- * The state `panelView` needs. Both clients' stores satisfy it structurally, so the projection does
+ * The state `panelView` needs. A client's store satisfies it structurally, so the projection does
  * not depend on a store implementation.
  */
 export interface PanelViewInput {
@@ -529,8 +529,8 @@ export function panelView(
     ...(model.trigger === undefined ? {} : { trigger: model.trigger }),
     ...(model.executor === undefined ? {} : { executor: model.executor }),
   };
-  // The CI grouping the Paseo panel renders keeps its own order (newest *activity* first), so the
-  // timeline's sort never changes what that surface shows.
+  // The CI grouping keeps its own order (newest *activity* first), so the timeline's sort never
+  // changes what that projection shows.
   const statusOnly = runs.filter((run) => runMatchesFilter(run.status, model.filter));
   const list = sortRunViews(filterRunViews(runs, query), sort);
   const running = runs.filter((run) => run.status === "running").length;

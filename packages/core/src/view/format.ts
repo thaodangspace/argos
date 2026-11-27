@@ -1,9 +1,9 @@
 /**
- * Pure formatting for the panel (no React, no theme, no `Date.now()`): the tests pin every label.
+ * Pure formatting for a client (no framework, no theme, no `Date.now()`): the tests pin every label.
  *
- * Keeping this out of the client entry means the CI-style rows and the step log are snapshot
- * testable, and the strings stay locale-independent (`en-CA` parts, never `toLocaleString`), which
- * matters because a pane may render on a different host than the daemon.
+ * Keeping this out of a client entry means the list rows and the step log are snapshot testable, and
+ * the strings stay locale-independent (`en-CA` parts, never `toLocaleString`), which matters
+ * because a page may render on a different host than the daemon.
  *
  * Every timestamp takes an optional IANA `timeZone`; `undefined` means **the runtime's own zone**
  * (the browser's, or the daemon's `TZ`). A client that rendered UTC for a reader eight hours east

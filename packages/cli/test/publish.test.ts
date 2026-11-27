@@ -3,8 +3,8 @@
  * manifests, their lockstep versions, the licence files npm packs next to `dist`, and the release
  * guard (scripts/check-version.mjs) are all contracts, not conventions.
  *
- * The plugin stays private on purpose: Paseo installs it from a checkout (`server/`, `shared/`,
- * `client/`, `*.tsx`), so it is not part of the npm surface.
+ * The web UI stays private on purpose: it is built separately (`npm run build:ui`) and copied into
+ * the CLI tarball, so it is not part of the npm surface on its own.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -36,7 +36,6 @@ const manifest = (directory: string): Manifest =>
 const root = manifest(".");
 const core = manifest("packages/core");
 const cli = manifest("packages/cli");
-const plugin = manifest("packages/paseo-plugin");
 const web = manifest("packages/web");
 const published = [core, cli];
 
@@ -45,7 +44,7 @@ describe("npm package manifests", () => {
     const version = root.version;
     expect(version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(version).not.toBe("0.0.0");
-    for (const packageManifest of [core, cli, plugin, web]) {
+    for (const packageManifest of [core, cli, web]) {
       expect(packageManifest.version, packageManifest.name).toBe(version);
     }
   });
@@ -54,8 +53,6 @@ describe("npm package manifests", () => {
     expect(core.name).toBe("@thaodangspace/argos-core");
     expect(cli.name).toBe("@thaodangspace/argos");
     expect(cli.dependencies?.["@thaodangspace/argos-core"]).toBe(core.version);
-    expect(plugin.dependencies?.["@thaodangspace/argos-core"]).toBe(core.version);
-    expect(plugin.private).toBe(true);
     // The UI is an implementation detail of `argos serve`, shipped inside the CLI tarball.
     expect(web.name).toBe("@thaodangspace/argos-web");
     expect(web.private).toBe(true);
@@ -260,7 +257,7 @@ describe("scripts/bump-version.mjs", () => {
   // The release switch: "merge into main publishes" is only true when one command moves the whole
   // lockstep graph, including every internal pin of the core package.
   it("moves every manifest and every core pin, writing nothing on a dry run", () => {
-    const before = [".", "packages/core", "packages/cli", "packages/paseo-plugin", "packages/web"].map(
+    const before = [".", "packages/core", "packages/cli", "packages/web"].map(
       (directory) => readFileSync(join(repoRoot, directory, "package.json"), "utf8"),
     );
 
@@ -271,15 +268,14 @@ describe("scripts/bump-version.mjs", () => {
     const next = `${Number(root.version?.split(".")[0]) + 1}.0.0`;
     const planned = bump([next, "--dry-run"]);
     expect(planned.status).toBe(0);
-    for (const directory of [".", "packages/core", "packages/cli", "packages/paseo-plugin", "packages/web"]) {
+    for (const directory of [".", "packages/core", "packages/cli", "packages/web"]) {
       expect(planned.stdout).toContain(`version:bump: ${directory === "." ? "package.json" : `${directory}/package.json`}`);
     }
     expect(planned.stdout).toContain(`packages/cli/package.json @thaodangspace/argos-core`);
-    expect(planned.stdout).toContain(`packages/paseo-plugin/package.json @thaodangspace/argos-core`);
     expect(planned.stdout).toContain(`packages/web/package.json @thaodangspace/argos-core`);
     expect(planned.stdout).toContain("dry run; nothing written");
 
-    const after = [".", "packages/core", "packages/cli", "packages/paseo-plugin", "packages/web"].map(
+    const after = [".", "packages/core", "packages/cli", "packages/web"].map(
       (directory) => readFileSync(join(repoRoot, directory, "package.json"), "utf8"),
     );
     expect(after).toEqual(before);

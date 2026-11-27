@@ -27,7 +27,7 @@ const PUBLISHED = [
   { dir: "packages/cli", dependsOn: { "@thaodangspace/argos-core": null } },
 ];
 /** Workspaces that stay private (installed by path, not by npm). */
-const UNPUBLISHED = ["packages/paseo-plugin", "packages/web"];
+const UNPUBLISHED = ["packages/web"];
 const ALL_WORKSPACES = [...PUBLISHED.map((entry) => entry.dir), ...UNPUBLISHED];
 
 /** The internal dependency every workspace pins to the released version. */

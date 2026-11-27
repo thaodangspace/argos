@@ -1,7 +1,7 @@
 /**
  * Typed HTTP client for `argos serve` (FR3, FR25).
  *
- * One process — `argos serve` — owns SQLite. The CLI, the Paseo plugin, and tests use this client
+ * One process — `argos serve` — owns SQLite. The CLI, the web UI, and tests use this client
  * and nothing else: it imports no durable module and never opens a database. The bearer token is
  * read from `$ARGOS_HOME/token` (FR27); the port from `ARGOS_PORT` (D2).
  *
@@ -88,7 +88,7 @@ export interface RpcClientOptions {
 }
 
 /**
- * Build a client for `argos serve`. The CLI, the Paseo plugin, and tests all go through this
+ * Build a client for `argos serve`. The CLI, the web UI, and tests all go through this
  * factory instead of `new RpcClient(...)` so the `ARGOS_PORT` / `$ARGOS_HOME/token` defaults (D2,
  * FR27) live in exactly one place.
  */
