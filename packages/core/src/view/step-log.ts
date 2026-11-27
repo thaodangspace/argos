@@ -2,9 +2,10 @@
  * The step log, built only from the `RunDetail` projection (spec FR6, FR10).
  *
  * Agent transcripts are never stored by Argos, so a step's log is its history events, its attempts
- * (target, duration, usage, outcome), its **declared** outputs, its outcome/error, and the gates
- * opened for it. One implementation serves the web UI and the CLI's read model so adding a history
- * event stays a two-edit change (the event list and this switch).
+ * (target, duration, usage, outcome, the reason line, and the bounded stdout/stderr tails), its
+ * **declared** outputs, its outcome/error, and the gates opened for it. One implementation serves
+ * the web UI and the CLI's read model so adding a history event stays a two-edit change (the event
+ * list and this switch).
  */
 
 import type {
@@ -32,6 +33,15 @@ export interface StepAttemptView {
   readonly target?: string;
   readonly outcome?: string;
   readonly errorCode?: string;
+  /** The attempt's own reason line (`the script exited 1: …`), already normalized and bounded. */
+  readonly detail?: string;
+  /** The attempt's last exit code, when the executor reported one (a script step). */
+  readonly exitCode?: number;
+  /**
+   * The attempt's own program output, each side a bounded tail with the marker `… (truncated)`
+   * first when it was cut. Never an agent prompt, a transcript, or an hc terminal text.
+   */
+  readonly streams?: StepDetailSummary["attempts"][number]["streams"];
   readonly usageLabel: string | null;
   readonly running: boolean;
 }
@@ -147,6 +157,15 @@ function continuationEntry(base: number | null, text: string, tone: StatusTone):
   };
 }
 
+/**
+ * A stream tail's line: no timestamp of its own, and it sits **immediately** after the label that
+ * introduced it (`stdout:`), so a tail never drifts below a later attempt's lines. It shares the
+ * label's instant and is ordered by insertion (the sort's index tie-break).
+ */
+function tailEntry(sortAt: number, text: string, tone: StatusTone): PendingLogEntry {
+  return { at: null, sortAt, text, tone };
+}
+
 function historyEntry(event: HistoryEvent): PendingLogEntry {
   return pendingEntry(event.at, historyText(event), historyTone(event.type));
 }
@@ -180,6 +199,9 @@ export function attemptViews(
       ...(attempt.target === undefined ? {} : { target: attempt.target }),
       ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome }),
       ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+      ...(attempt.detail === undefined ? {} : { detail: attempt.detail }),
+      ...(attempt.exitCode === undefined ? {} : { exitCode: attempt.exitCode }),
+      ...(attempt.streams === undefined ? {} : { streams: attempt.streams }),
       usageLabel: formatUsage(attempt.usage),
       running: ended === undefined,
     };
@@ -196,8 +218,9 @@ export function outputViews(outputs: StepDetailSummary["outputs"]): StepOutputVi
 
 /**
  * The step's log, built from the detail projection alone: its history events, its attempts (with
- * target + usage), its declared outputs, its outcome/error, and the gates opened for it. `timeZone`
- * is the reader's zone (`undefined` = this runtime's), applied to every line's timestamp.
+ * target, usage, the reason line, and the stream tails), its declared outputs, its outcome/error,
+ * and the gates opened for it. `timeZone` is the reader's zone (`undefined` = this runtime's),
+ * applied to every line's timestamp.
  */
 export function buildStepLog(input: {
   readonly step: StepSummary;
@@ -230,6 +253,7 @@ export function buildStepLog(input: {
           ? "finished"
           : (OUTCOME_WORDS[attempt.outcome] ?? attempt.outcome);
       const code = attempt.errorCode === undefined ? "" : ` (${attempt.errorCode})`;
+      const reason = attempt.detail === undefined ? "" : `: ${attempt.detail}`;
       const failed =
         attempt.outcome === "failed" ||
         attempt.outcome === "timeout" ||
@@ -237,15 +261,22 @@ export function buildStepLog(input: {
       entries.push(
         pendingEntry(
           attempt.endedAt,
-          `Attempt ${attempt.n} ${word} in ${attempt.durationLabel}${code}`,
+          `Attempt ${attempt.n} ${word} in ${attempt.durationLabel}${code}${reason}`,
           failed ? "danger" : "success",
         ),
       );
     }
+    const tailAt = attempt.endedAt ?? attempt.startedAt;
     if (attempt.usageLabel !== null) {
-      entries.push(
-        pendingEntry(attempt.endedAt ?? attempt.startedAt, `Usage: ${attempt.usageLabel}`, "neutral"),
-      );
+      entries.push(pendingEntry(tailAt, `Usage: ${attempt.usageLabel}`, "neutral"));
+    }
+    for (const side of ["stdout", "stderr"] as const) {
+      const value = attempt.streams?.[side];
+      if (value === undefined || value === "") continue;
+      entries.push(pendingEntry(tailAt, `${side}:`, "neutral"));
+      for (const line of value.replace(/\n$/, "").split("\n")) {
+        entries.push(tailEntry(tailAt, line, "neutral"));
+      }
     }
   }
 
