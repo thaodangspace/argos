@@ -517,6 +517,32 @@ describe("PUT /playbooks/file (FR9–FR13)", () => {
     expect(readFileSync(harness.good, "utf8")).toBe(EDITED_YAML);
   });
 
+  it.skipIf(process.getuid?.() === 0)(
+    "answers 500 and leaves no temp file when the write itself fails",
+    async () => {
+      const harness = await startHarness();
+      const before = listing(harness.playbookDir);
+      const read = await readFile(harness.base, harness.repo, harness.good);
+      // The file stays readable; only creating the sibling temp file is refused (a real I/O failure,
+      // which is `500 internal_error` and not a refusal the client can act on).
+      chmodSync(harness.playbookDir, 0o500);
+      try {
+        const response = await save(
+          harness.base,
+          saveBody(harness, harness.good, EDITED_YAML, read.sha256),
+        );
+        expect(response.status, response.text).toBe(500);
+        expect(errorOf(response.body).code).toBe("internal_error");
+      } finally {
+        chmodSync(harness.playbookDir, 0o755);
+      }
+
+      expect(tempFiles(harness.playbookDir)).toEqual([]);
+      expect(listing(harness.playbookDir)).toEqual(before);
+      expect(readFileSync(harness.good, "utf8")).toBe(GOOD_YAML);
+    },
+  );
+
   it("answers 405 for a method the path does not have", async () => {
     const harness = await startHarness();
     const response = await raw(harness.base, "DELETE", "/playbooks/file", AUTH);

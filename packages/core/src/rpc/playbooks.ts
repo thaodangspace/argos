@@ -286,7 +286,8 @@ export function validatePlaybookBuffer(input: {
  * 2. a home playbook is read-only (FR5/FR18) — the sole writable roots are the repository's;
  * 3. the text cap (FR15), the same helper read and validate use;
  * 4. the digest precondition (FR10): `baseSha256` must be the digest of the bytes on disk, so a
- *    second tab cannot be silently overwritten;
+ *    second tab cannot be silently overwritten — compared once at containment and again immediately
+ *    before the write, so the check covers the bytes about to be replaced;
  * 5. the verdict (FR9/FR11): an invalid buffer rethrows the loader's own error — code, file, step,
  *    and issues — and writes nothing;
  * 6. the atomic write, which returns the digest of the bytes just written so a client can chain a
@@ -310,7 +311,7 @@ export function writePlaybookFile(input: {
     throw argosError(
       "invalid_request",
       { file: target.file },
-      "a home playbook is read-only; only .argos/playbooks and .paseo/plugins/playbooks are writable",
+      "read-only; only a repository .argos/playbooks or .paseo/plugins/playbooks file is writable",
     );
   }
   assertPlaybookTextWithinLimit(input.yaml);
@@ -329,6 +330,19 @@ export function writePlaybookFile(input: {
   });
   // The loader's error is the answer: re-wrapping its message in a new code would lose the issues.
   if (!verdict.valid) throw failure;
+  // The precondition is verified again here, at the last moment reachable without a lock: the
+  // containment read and the loader both took time, and a change in that window would otherwise be
+  // replaced silently. It is the same single read the read route uses, so the digest compared is the
+  // digest of the bytes about to be replaced.
+  if (readPlaybookSource(target).sha256 !== input.baseSha256) {
+    throw argosError(
+      "playbook_conflict",
+      { file: target.file },
+      "the playbook changed on disk since it was read",
+      undefined,
+      { reason: "changed" },
+    );
+  }
   const written = writePlaybookAtomically(target, input.yaml);
   return {
     ...verdict,

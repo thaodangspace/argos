@@ -170,12 +170,19 @@
   /**
    * The conflict panel's second action (FR25): re-read the digest only, keep the buffer, and send a
    * second `PUT` with the fresh `baseSha256`. The buffer is what the operator chose to keep.
+   *
+   * A blocked save must say why instead of dropping the panel: `save()` returns early when the
+   * buffer is no longer saveable (invalid, clean, read-only), so clearing `conflict` first would
+   * hide the panel and write nothing. Only a save that really starts clears it.
    */
   async function overwrite(): Promise<void> {
+    if (saving || !eligibility.canSave) {
+      saveError = { code: eligibility.reason ?? "save_blocked", message: eligibility.hint };
+      return;
+    }
     try {
       const fresh = await api.getPlaybookFile({ cwd, file });
       sha256 = fresh.sha256;
-      conflict = null;
       await save();
     } catch (error) {
       conflict = null;

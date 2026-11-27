@@ -215,6 +215,41 @@ describe("PlaybookEditor", () => {
     ]);
   });
 
+  it("says why an overwrite cannot start instead of dropping the conflict panel", async () => {
+    const validatePlaybook = vi.fn(async () => verdict());
+    const savePlaybook = vi.fn(async () => {
+      throw new ArgosApiError("playbook_conflict", "the playbook changed on disk", 409, {
+        reason: "changed",
+      });
+    });
+    await openEditor({ validatePlaybook, savePlaybook });
+    await edit(validatePlaybook);
+    await waitFor(() => expect(saveButton()?.disabled).toBe(false));
+    await fireEvent.click(saveButton() as HTMLButtonElement);
+    const panel = await waitFor(() => screen.getByRole("alert", { name: "Save conflict" }));
+    expect(savePlaybook).toHaveBeenCalledTimes(1);
+
+    // The buffer is edited into an invalid one while the panel is open, so no save can start.
+    validatePlaybook.mockImplementation(async () =>
+      verdict({
+        valid: false,
+        errors: [{ file: FILE, code: "playbook_invalid", message: "the playbook is broken" }],
+      }),
+    );
+    await fireEvent.input(textarea(), { target: { value: `${EDITED}\n  bad: [\n` } });
+    await waitFor(() => expect(validatePlaybook).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(saveButton()?.disabled).toBe(true));
+
+    await fireEvent.click(within(panel).getByRole("button", { name: "Overwrite" }));
+    // The panel survives (nothing was saved) and a notice carries the model's own sentence, so the
+    // operator is never left with a vanished panel and no message.
+    expect(screen.getByRole("alert", { name: "Save conflict" })).toBe(panel);
+    const notices = screen.getAllByRole("alert").filter((alert) => alert !== panel);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.textContent).toContain("Fix the issues before saving");
+    expect(savePlaybook).toHaveBeenCalledTimes(1);
+  });
+
   it("offers no Save for a read-only home playbook", async () => {
     await openEditor({}, "/home/me/.argos/playbooks/home.yaml");
     expect(saveButton()).toBeNull();

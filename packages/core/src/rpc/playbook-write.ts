@@ -30,9 +30,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 
-import { argosError } from "../errors.js";
+import { argosError, type ArgosError } from "../errors.js";
 import { discoverPlaybooks, type PlaybookEntry } from "../playbook/load.js";
 import { PLAYBOOK_TEXT_LIMIT } from "./contracts.js";
 
@@ -60,9 +60,10 @@ export interface PlaybookTarget {
   readonly root: string;
   /**
    * Where the file came from, and therefore whether a save may replace it: `repo` is one of the two
-   * writable repository roots, `home` is `<home>/playbooks` (read-only). `writable` is exactly
-   * `mode === "repo"`, so the two fields are one decision stated twice — a caller checks `writable`
-   * and a message can say "home".
+   * writable repository roots **and** the resolved file is inside the repository; `home` is
+   * `<home>/playbooks`, and so is any root whose file resolves outside the repository — read-only.
+   * `writable` is exactly `mode === "repo"`, so the two fields are one decision stated twice — a
+   * caller checks `writable` and a message can say "home".
    */
   readonly mode: "repo" | "home";
   readonly writable: boolean;
@@ -92,6 +93,34 @@ function realpathOf(file: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The one `409 deleted` a save answers when its file is gone, so code, message, and detail agree. */
+function deletedConflict(file: string): ArgosError {
+  return argosError(
+    "playbook_conflict",
+    { file },
+    "playbook file no longer exists",
+    undefined,
+    { reason: "deleted" },
+  );
+}
+
+/**
+ * The one answer for a playbook that is not there: a read refuses it as `invalid_request`, a save as
+ * `409 deleted` (editor FR10). Both the missing `realpath` and a file that disappears before the
+ * `lstat` come through here, so the codes and the wording cannot drift apart.
+ */
+function refuseMissing(file: string, whenMissing: "invalid_request" | "deleted" | undefined): never {
+  if (whenMissing === "deleted") throw deletedConflict(file);
+  refuse("playbook file is not readable");
+}
+
+/** `true` for a filesystem `ENOENT`, the only stat failure a vanished playbook is allowed to cause. */
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
+  );
 }
 
 /**
@@ -125,8 +154,9 @@ function digestOf(bytes: Buffer): string {
  *
  * Steps, in the spec's order: the cheap shape refusals (NUL, relative, `..`), then
  * `discoverPlaybooks(cwd, home)` as the only source of truth, then `realpathSync(file)` matched
- * against exactly one entry's realpath, then the entry's root decides writability, then an `lstat`
- * re-check (a regular file, never a symlink), then the cap and the digest.
+ * against exactly one entry's realpath, then the entry's root decides writability — only when the
+ * resolved file is inside the repository — then an `lstat` re-check (a regular file, never a
+ * symlink), then the cap and the digest.
  *
  * `..` is refused on the raw spelling on purpose: `…/playbooks/../playbooks/x.yaml` collapses onto a
  * discovered file, and a path that wanders is not one discovery produced, so it is never accepted.
@@ -154,18 +184,7 @@ export function resolvePlaybookTarget(input: {
 
   const listing = discoverPlaybooks(repoDir, input.home);
   const resolved = realpathOf(requested);
-  if (resolved === undefined) {
-    if (input.whenMissing === "deleted") {
-      throw argosError(
-        "playbook_conflict",
-        { file: requested },
-        "playbook file no longer exists",
-        undefined,
-        { reason: "deleted" },
-      );
-    }
-    refuse("file is not a discovered playbook of this repository");
-  }
+  if (resolved === undefined) refuseMissing(requested, input.whenMissing);
   const matches = listing.filter((candidate) => realpathOf(candidate.file) === resolved);
   const entry: PlaybookEntry | undefined = matches.length === 1 ? matches[0] : undefined;
   if (entry === undefined) refuse("file is not a discovered playbook of this repository");
@@ -181,13 +200,26 @@ export function resolvePlaybookTarget(input: {
   }
   if (requestedStat.isSymbolicLink()) refuse("file must not be a symlink");
   if (!requestedStat.isFile()) refuse("file must be a regular file");
-  const targetStat = lstatSync(resolved);
+  // The file can be gone by now (a listing entry, then a delete): the same answer as a missing
+  // `realpath`, never an `ENOENT` escaping as a 500.
+  let targetStat;
+  try {
+    targetStat = lstatSync(resolved);
+  } catch (error) {
+    if (isEnoent(error)) refuseMissing(resolved, input.whenMissing);
+    refuse("playbook file is not readable");
+  }
   if (!targetStat.isFile()) refuse("file must be a regular file");
 
-  // (5) The matched root decides writability. A root that is neither of the two repository roots is
-  // read-only, which `home` means: the safe default for anything new.
+  // (5) The matched root decides writability: one of the two repository roots, **and** the resolved
+  // file really inside the repository. `entry.root` is only the root's label, so a symlinked
+  // `.argos/playbooks` (or a symlinked `.argos`) would otherwise be "repo" while pointing anywhere.
+  // A root that fails either half is read-only, which `home` means: the safe default.
+  const repoReal = realpathOf(repoDir) ?? repoDir;
+  const repoPrefix = repoReal.endsWith(sep) ? repoReal : `${repoReal}${sep}`;
+  const insideRepo = resolved.startsWith(repoPrefix);
   const mode: PlaybookTarget["mode"] =
-    !isAbsolute(entry.root) && WRITABLE_ROOTS.has(entry.root) ? "repo" : "home";
+    !isAbsolute(entry.root) && WRITABLE_ROOTS.has(entry.root) && insideRepo ? "repo" : "home";
 
   const sha256 = digestOf(readCapped(resolved));
   return {
@@ -216,6 +248,20 @@ export function readPlaybookSource(target: PlaybookTarget): {
   return { yaml: bytes.toString("utf8"), sha256: digestOf(bytes) };
 }
 
+/**
+ * The mode to keep. A file that vanished between the resolver's digest and this call is a `409
+ * deleted` (the same answer the resolver gives), never an `ENOENT` escaping as a 500; any other
+ * stat failure is a real I/O error and stays one.
+ */
+function modeOf(file: string): number {
+  try {
+    return statSync(file).mode & 0o777;
+  } catch (error) {
+    if (isEnoent(error)) throw deletedConflict(file);
+    throw error;
+  }
+}
+
 /** The result of one atomic write: what is on disk now, and the mode the file kept (FR12/FR13). */
 export interface WrittenPlaybook {
   readonly sha256: string;
@@ -236,7 +282,7 @@ export interface WrittenPlaybook {
  * `0740` playbook `0740` under a stricter umask.
  */
 export function writePlaybookAtomically(target: PlaybookTarget, text: string): WrittenPlaybook {
-  const mode = statSync(target.file).mode & 0o777;
+  const mode = modeOf(target.file);
   const temp = `${target.file}.argos-tmp-${randomBytes(8).toString("hex")}`;
   try {
     writeFileSync(temp, text, { mode });

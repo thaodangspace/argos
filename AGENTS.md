@@ -1282,8 +1282,9 @@ passes `validateRunCwd` and `file` is never trusted:
 
 `rpc/playbook-write.ts` owns the containment: `discoverPlaybooks(cwd, home)` is the only source of
 truth, the request's `realpath` must equal one entry's, an `lstat` re-check refuses a symlink or a
-non-file, and the playbook id comes from the matched entry, never from the request. Anything else
-is `invalid_request`.
+non-file, and only when the resolved path is inside the repository is the file writable (a
+symlinked playbooks root is listed and readable, never writable); the playbook id comes from the
+matched entry, never from the request. Anything else is `invalid_request`.
 
 - **Writable roots.** A save may replace only `<cwd>/.argos/playbooks/<id>.yaml` or
   `<cwd>/.paseo/plugins/playbooks/<id>.yaml`. A `<home>/playbooks` entry is listed and readable, and

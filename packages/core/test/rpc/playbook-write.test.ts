@@ -9,6 +9,7 @@
 
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -25,10 +26,18 @@ import { join, relative, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { isArgosError, type ArgosError } from "../../src/errors.js";
-import { loadPlaybook } from "../../src/playbook/load.js";
+import { discoverPlaybooks, loadPlaybook } from "../../src/playbook/load.js";
 import { PLAYBOOK_TEXT_LIMIT } from "../../src/rpc/contracts.js";
-import { readPlaybookFile, validatePlaybookBuffer } from "../../src/rpc/playbooks.js";
-import { readPlaybookSource, resolvePlaybookTarget } from "../../src/rpc/playbook-write.js";
+import {
+  readPlaybookFile,
+  validatePlaybookBuffer,
+  writePlaybookFile,
+} from "../../src/rpc/playbooks.js";
+import {
+  readPlaybookSource,
+  resolvePlaybookTarget,
+  writePlaybookAtomically,
+} from "../../src/rpc/playbook-write.js";
 
 const roots: string[] = [];
 
@@ -43,6 +52,7 @@ afterAll(() => {
 });
 
 const GOOD_YAML = "title: Good\nsteps:\n  - id: a\n    prompt: hi\n";
+const EDITED_YAML = "title: Good\nsteps:\n  - id: a\n    prompt: edited\n";
 const FALLBACK_YAML = "title: Fallback\nsteps:\n  - id: a\n    prompt: hi\n";
 const GLOBAL_YAML = "title: Global\nsteps:\n  - id: a\n    prompt: hi\n";
 const BROKEN_YAML = "title: Broken\nunknown_key_here: true\nsteps:\n  - id: a\n    prompt: hi\n";
@@ -271,6 +281,80 @@ describe("resolvePlaybookTarget containment (FR4, FR18)", () => {
     );
     expect(error.code).toBe("invalid_request");
   });
+
+  it("treats a symlinked playbooks root as read-only, so a save cannot leave the repository (FR18)", () => {
+    const outside = tempRoot("argos-editor-outside-");
+    const escapedFile = join(outside, "escaped.yaml");
+    writeFileSync(escapedFile, GOOD_YAML, "utf8");
+    const repo = tempRoot("argos-editor-symlinked-root-");
+    mkdirSync(join(repo, ".argos"), { recursive: true });
+    symlinkSync(outside, join(repo, ".argos", "playbooks"));
+    const requested = join(repo, ".argos", "playbooks", "escaped.yaml");
+
+    // Discovery follows the link, so the entry exists and its root label is a writable one.
+    expect(discoverPlaybooks(repo).map((entry) => entry.id)).toEqual(["escaped"]);
+
+    const target = resolvePlaybookTarget({ cwd: repo, file: requested });
+    expect(target.file).toBe(realpathSync(escapedFile));
+    expect(target.root).toBe(".argos/playbooks");
+    expect(target.mode).toBe("home");
+    expect(target.writable).toBe(false);
+
+    // Readable, exactly like a home playbook: the editor still shows the text.
+    const read = readPlaybookFile({ cwd: repo, file: requested });
+    expect(read.yaml).toBe(GOOD_YAML);
+    expect(read.sha256).toBe(sha256(GOOD_YAML));
+
+    const before = snapshot(outside);
+    const error = refusal(() =>
+      writePlaybookFile({
+        cwd: repo,
+        file: requested,
+        yaml: EDITED_YAML,
+        baseSha256: read.sha256,
+      }),
+    );
+    expect(error.code).toBe("invalid_request");
+    expect(error.message).toContain("read-only");
+    expect(snapshot(outside)).toEqual(before);
+    expect(readFileSync(escapedFile, "utf8")).toBe(GOOD_YAML);
+  });
+});
+
+describe("a playbook that disappears or cannot be read (FR10)", () => {
+  it("answers 409 deleted, not an ENOENT, when the file vanishes before the write", () => {
+    const fixture = writeFixture();
+    const target = resolvePlaybookTarget({ cwd: fixture.repo, file: fixture.good });
+    rmSync(fixture.good);
+
+    const error = refusal(() => writePlaybookAtomically(target, EDITED_YAML));
+    expect(error.code).toBe("playbook_conflict");
+    expect(error.reason).toBe("deleted");
+    expect(error.file).toBe(target.file);
+    // The refusal happens before the temp file exists, so there is nothing to clean up.
+    expect(readdirSync(fixture.playbookDir).sort()).toEqual([
+      "alias.yaml",
+      "broken.yaml",
+      "oversized.yaml",
+    ]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "refuses an unreadable file as 400 invalid_request, never an ENOENT",
+    () => {
+      const fixture = writeFixture();
+      chmodSync(fixture.good, 0o000);
+      try {
+        const error = refusal(() =>
+          resolvePlaybookTarget({ cwd: fixture.repo, file: fixture.good }),
+        );
+        expect(error.code).toBe("invalid_request");
+        expect(error.message).toContain("not readable");
+      } finally {
+        chmodSync(fixture.good, 0o644);
+      }
+    },
+  );
 });
 
 describe("readPlaybookFile (FR1, FR2)", () => {

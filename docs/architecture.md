@@ -712,10 +712,13 @@ section above is the whole argument.
 - The precondition is the digest of the bytes the buffer was edited from (`baseSha256`, mandatory):
   a changed file is `playbook_conflict` with `details.reason = "changed"`, a deleted one the same
   code with `reason = "deleted"`, so two tabs cannot silently overwrite each other.
-- **Residual limit: detect-only.** A symlinked *parent* directory is trusted once `realpath` agrees,
-  and a parent swapped between the containment check and the `rename` is not prevented — the check
-  is a snapshot, not a lock. The write itself is atomic (a sibling temp plus `rename`), so a reader
-  never sees half a playbook, the file's mode is preserved, and the temp file is removed on failure.
+- **Residual limit: detect-only.** A symlinked *playbooks* root (or a symlinked `.argos`) is listed
+  and readable but never writable: a save needs the resolved file to be inside the repository, so
+  such a file answers the same read-only `invalid_request` as `<home>/playbooks`. The residual is a
+  parent directory swapped between the containment check and the `rename`, which is not prevented —
+  the check is a snapshot, not a lock. The write itself is atomic (a sibling temp plus `rename`), so
+  a reader never sees half a playbook, the file's mode is preserved, and the temp file is removed on
+  failure.
 - The Web UI's read-only badge (`isWritablePlaybook`, `packages/web/src/lib/playbook-editor.ts`) is
   a path-prefix check. The server is the enforcement point; the badge only decides whether to draw
   the button.
