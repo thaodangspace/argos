@@ -23,3 +23,14 @@ export function workflowHref(workflowId: string): string {
 export function stepHref(runId: string, stepId: string): string {
   return `${runHref(runId)}?step=${encodeURIComponent(stepId)}`;
 }
+
+/**
+ * The playbook editor, scoped to a directory when one is known (editor FR20/FR21). The `cwd` is what
+ * the header link passes: the most recent directory this browser used, so the editor opens on the
+ * repository the operator was last working in.
+ */
+export function playbooksHref(cwd?: string): string {
+  const base = href("/playbooks");
+  const value = cwd?.trim() ?? "";
+  return value === "" ? base : `${base}?cwd=${encodeURIComponent(value)}`;
+}

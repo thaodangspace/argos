@@ -14,7 +14,10 @@ import {
   CancelRunResponseSchema,
   ErrorResponseSchema,
   GateDecisionResponseSchema,
+  PlaybookFileResponseSchema,
   PlaybookListResponseSchema,
+  PlaybookSaveResponseSchema,
+  PlaybookVerdictSchema,
   RunDetailSchema,
   RunListResponseSchema,
   ScheduleListResponseSchema,
@@ -22,7 +25,12 @@ import {
   StartRunResponseSchema,
   type CancelRunResponse,
   type GateDecisionResponse,
+  type PlaybookFileResponse,
   type PlaybookListResponse,
+  type PlaybookSaveRequest,
+  type PlaybookSaveResponse,
+  type PlaybookValidateRequest,
+  type PlaybookVerdict,
   type RunDetail,
   type RunListResponse,
   type RunSummary,
@@ -33,16 +41,29 @@ import {
 } from "@thaodangspace/argos-core/rpc/contracts";
 import type { z } from "zod";
 
-/** The UI's stable failure shape: the server code when there is one. */
+/**
+ * The UI's stable failure shape: the server code when there is one.
+ *
+ * `details` is passed through as the error body's own record, so a surface that needs a reason
+ * (`playbook_conflict`) reads it instead of re-parsing the message. It stays optional, so every
+ * existing `new ArgosApiError(code, message, status)` call site is unchanged.
+ */
 export class ArgosApiError extends Error {
   readonly code: string;
   readonly status: number;
+  readonly details: Record<string, unknown> | undefined;
 
-  constructor(code: string, message: string, status: number) {
+  constructor(
+    code: string,
+    message: string,
+    status: number,
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "ArgosApiError";
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -80,6 +101,37 @@ export interface ArgosApi {
   info(): Promise<ServerInfo>;
 }
 
+/**
+ * The playbook editor's surface (editor spec FR20–FR25): read one file with its digest, validate a
+ * buffer, and save it. A separate interface on purpose — `ArgosApi` is what every screen already
+ * consumes, and a client (or a test fake) that predates the editor keeps implementing exactly it.
+ */
+export interface PlaybookApi {
+  /**
+   * The discovered playbooks of one directory. With no `cwd` the server answers for its own working
+   * directory and echoes it in `cwd`, which is the editor's fallback scope (editor spec FR21).
+   */
+  listPlaybooks(cwd?: string): Promise<PlaybookListResponse>;
+  /** One discovered playbook's raw text, digest, and verdict (`GET /playbooks/file`). */
+  getPlaybookFile(
+    query: { readonly cwd: string; readonly file: string; readonly graph?: boolean },
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<PlaybookFileResponse>;
+  /** The verdict for a buffer, writing nothing (`POST /playbooks/validate`). */
+  validatePlaybook(
+    request: PlaybookValidateRequest,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<PlaybookVerdict>;
+  /** Validate then write one playbook atomically (`PUT /playbooks/file`). */
+  savePlaybook(
+    request: PlaybookSaveRequest,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<PlaybookSaveResponse>;
+}
+
+/** What {@link createApi} returns: the run/schedule client plus the editor's calls. */
+export type ArgosClient = ArgosApi & PlaybookApi;
+
 const RELOAD_KEY = "argos:ui:reloaded-at";
 const RELOAD_COOLDOWN_MS = 10_000;
 
@@ -97,7 +149,7 @@ export function reloadForSession(): void {
   window.location.reload();
 }
 
-export function createApi(options: ArgosApiOptions = {}): ArgosApi {
+export function createApi(options: ArgosApiOptions = {}): ArgosClient {
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const baseUrl = options.baseUrl ?? "";
   const onUnauthorized = options.onUnauthorized ?? reloadForSession;
@@ -112,7 +164,7 @@ export function createApi(options: ArgosApiOptions = {}): ArgosApi {
   async function request<T>(
     path: string,
     schema: z.ZodType<T>,
-    init?: { readonly method?: string; readonly body?: unknown },
+    init?: { readonly method?: string; readonly body?: unknown; readonly signal?: AbortSignal },
   ): Promise<T> {
     const hasBody = init?.body !== undefined;
     let response: Response;
@@ -122,6 +174,7 @@ export function createApi(options: ArgosApiOptions = {}): ArgosApi {
         credentials: "same-origin",
         ...(hasBody ? { headers: { "content-type": "application/json" } } : {}),
         ...(hasBody ? { body: JSON.stringify(init?.body) } : {}),
+        ...(init?.signal === undefined ? {} : { signal: init.signal }),
       };
       response = await fetchImpl(`${baseUrl}${path}`, requestInit);
     } catch (error) {
@@ -146,7 +199,12 @@ export function createApi(options: ArgosApiOptions = {}): ArgosApi {
     if (!response.ok) {
       const parsed = ErrorResponseSchema.safeParse(body);
       if (parsed.success) {
-        throw new ArgosApiError(parsed.data.error.code, parsed.data.error.message, response.status);
+        throw new ArgosApiError(
+          parsed.data.error.code,
+          parsed.data.error.message,
+          response.status,
+          parsed.data.error.details,
+        );
       }
       throw new ArgosApiError(
         "internal_error",
@@ -193,8 +251,32 @@ export function createApi(options: ArgosApiOptions = {}): ArgosApi {
         GateDecisionResponseSchema,
         { method: "POST", body },
       ),
-    listPlaybooks: (cwd) =>
-      request(`/playbooks?cwd=${encodeURIComponent(cwd)}`, PlaybookListResponseSchema),
+    listPlaybooks: (cwd?: string) =>
+      request(
+        cwd === undefined ? "/playbooks" : `/playbooks?cwd=${encodeURIComponent(cwd)}`,
+        PlaybookListResponseSchema,
+      ),
+    getPlaybookFile: (query, options) => {
+      const params = new URLSearchParams({ cwd: query.cwd, file: query.file });
+      if (query.graph === true) params.set("graph", "1");
+      return request(
+        `/playbooks/file?${params.toString()}`,
+        PlaybookFileResponseSchema,
+        options?.signal === undefined ? undefined : { signal: options.signal },
+      );
+    },
+    validatePlaybook: (body, options) =>
+      request("/playbooks/validate", PlaybookVerdictSchema, {
+        method: "POST",
+        body,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      }),
+    savePlaybook: (body, options) =>
+      request("/playbooks/file", PlaybookSaveResponseSchema, {
+        method: "PUT",
+        body,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      }),
     listSchedules: async () => (await request("/schedules", ScheduleListResponseSchema)).schedules,
     info: () => request("/info", ServerInfoSchema),
   };

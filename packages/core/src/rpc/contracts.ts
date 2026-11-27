@@ -18,7 +18,7 @@
 
 import { z } from "zod";
 
-import { ARGOS_ERROR_CODES } from "../errors.js";
+import { ARGOS_ERROR_CODES, type ArgosErrorDetails } from "../errors.js";
 import { ForkedFromSchema, RUN_STATUSES, RunTriggerSchema, STEP_STATUSES } from "../engine/record.js";
 import { HISTORY_EVENT_TYPES } from "../history.js";
 /**
@@ -166,6 +166,8 @@ export const RPC_ERROR_STATUS: Readonly<Record<string, number>> = {
   run_active: 409,
   // Fork: the edited definition cannot be applied at the fork point.
   definition_conflict: 409,
+  // Editor FR10: the save's `baseSha256` no longer matches the file on disk.
+  playbook_conflict: 409,
   // FR17: the executor registry. `unavailable` is a refusal, `unreachable` is a transport failure.
   executor_unavailable: 422,
   executor_unreachable: 503,
@@ -695,11 +697,33 @@ export const PlaybookSummarySchema = z.strictObject({
 });
 export type PlaybookSummary = z.infer<typeof PlaybookSummarySchema>;
 
+/**
+ * One loader issue, as `GET /playbooks?issues=1` publishes it (FR8): the path inside the document,
+ * the step it belongs to, and the message. Never a YAML value (loader FR7.3).
+ */
+export const PlaybookIssueSchema = z.strictObject({
+  path: z.string(),
+  stepId: z.string().optional(),
+  message: z.string(),
+});
+export type PlaybookIssue = z.infer<typeof PlaybookIssueSchema>;
+
+/**
+ * How many loader issues one `errors[]` entry may carry (FR8). The loader caps its own list at 20
+ * (`MAX_SCHEMA_ISSUES`), so this is the same number: the projection can never grow past it.
+ */
+export const PLAYBOOK_ISSUE_LIMIT = 20;
+
 /** A playbook under `cwd`/`home` that failed to load. One bad file never hides the others. */
 export const PlaybookLoadErrorSchema = z.strictObject({
   file: z.string(),
   code: z.string().min(1),
   message: z.string(),
+  /**
+   * FR8: the loader's per-issue detail, present only on `GET /playbooks?issues=1`. Additive and
+   * optional, so the default listing stays byte-identical and an older client keeps parsing.
+   */
+  issues: z.array(PlaybookIssueSchema).optional(),
 });
 export type PlaybookLoadError = z.infer<typeof PlaybookLoadErrorSchema>;
 
@@ -1001,6 +1025,76 @@ export const ValidateReportSchema = z.strictObject({
   warnings: z.array(ValidateWarningSchema),
 });
 export type ValidateReport = z.infer<typeof ValidateReportSchema>;
+
+// ------------------------------------------------------------------ playbook editor (spec FR1–FR15)
+
+/**
+ * The largest YAML buffer the editor accepts on read, validate, and save (FR15). The request body
+ * cap (1 MiB) still applies; this one is the editor's own, smaller limit.
+ */
+export const PLAYBOOK_TEXT_LIMIT = 512 * 1024;
+
+/** Why a save lost its precondition (FR10). */
+export const PLAYBOOK_CONFLICT_REASONS = [
+  "changed",
+  "deleted",
+] as const satisfies readonly NonNullable<ArgosErrorDetails["reason"]>[];
+export type PlaybookConflictReason = (typeof PLAYBOOK_CONFLICT_REASONS)[number];
+
+/** `POST /playbooks/validate` (FR6): validate this buffer as if it were the bytes of `file`. */
+export const PlaybookValidateRequestSchema = z.strictObject({
+  /** Repository root; validated like `POST /runs` before any file is read. */
+  cwd: z.string(),
+  /** Absolute path of a discovered playbook. Never trusted: the route resolves it by discovery. */
+  file: z.string(),
+  yaml: z.string().max(PLAYBOOK_TEXT_LIMIT),
+  graph: z.boolean().optional(),
+});
+export type PlaybookValidateRequest = z.infer<typeof PlaybookValidateRequestSchema>;
+
+/**
+ * The one verdict shape read, validate, and save share (FR6/FR13), so the browser renders one
+ * thing. A file that does not load is still a verdict (`valid: false`), never an error response.
+ */
+export const PlaybookVerdictSchema = z.strictObject({
+  playbookId: z.string(),
+  valid: z.boolean(),
+  errors: z.array(PlaybookLoadErrorSchema),
+  warnings: z.array(ValidateWarningSchema),
+  /** Present only when the buffer is valid. */
+  hash: z.string().optional(),
+  /** Present only when the request asked for it (`graph: true` / `graph=1`). */
+  graph: PlaybookGraphSchema.optional(),
+});
+export type PlaybookVerdict = z.infer<typeof PlaybookVerdictSchema>;
+
+/** `GET /playbooks/file` (FR1): the raw text, its digest, and the verdict for it. */
+export const PlaybookFileResponseSchema = PlaybookVerdictSchema.extend({
+  cwd: z.string(),
+  /** The resolved (`realpath`) path of the discovered entry. */
+  file: z.string(),
+  yaml: z.string(),
+  /** Digest of the bytes on disk; a save must send it back as `baseSha256`. */
+  sha256: z.string(),
+});
+export type PlaybookFileResponse = z.infer<typeof PlaybookFileResponseSchema>;
+
+/** `PUT /playbooks/file` (FR9): a validate request plus the precondition the save is based on. */
+export const PlaybookSaveRequestSchema = PlaybookValidateRequestSchema.extend({
+  /** Lowercase hex sha256 of the bytes the buffer was edited from (FR10). */
+  baseSha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+export type PlaybookSaveRequest = z.infer<typeof PlaybookSaveRequestSchema>;
+
+/** The success body of a save (FR13). `sha256` is the digest of the bytes just written. */
+export const PlaybookSaveResponseSchema = PlaybookVerdictSchema.extend({
+  file: z.string(),
+  sha256: z.string(),
+  written: z.literal(true),
+  /** The mode the file kept (`0o644` = 420). */
+  mode: z.number(),
+});
+export type PlaybookSaveResponse = z.infer<typeof PlaybookSaveResponseSchema>;
 
 /** SSE frame names (FR26). */
 export const SSE_SNAPSHOT_EVENT = "snapshot";

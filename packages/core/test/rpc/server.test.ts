@@ -14,6 +14,7 @@ import { createRpcServer, type RpcServer } from "../../src/rpc/server.js";
 import {
   ExecutorInfoSchema,
   GcWorktreesResponseSchema,
+  PlaybookListResponseSchema,
   RPC_ERROR_STATUS,
   RunSummarySchema,
   ServerInfoSchema,
@@ -989,6 +990,44 @@ describe("worktree cleanup (FR4)", () => {
     const sweptBody = GcWorktreesResponseSchema.parse(swept.body);
     expect(sweptBody.removed).toEqual([{ runId: started.runId, path, branchDeleted: true }]);
     expect(existsSync(path)).toBe(false);
+  });
+});
+
+describe("GET /playbooks?issues=1 (editor FR8)", () => {
+  it("publishes the loader issues only when the query asks for them", async () => {
+    const harness = await startHarness(new FakeExecutor());
+    const directory = makeTempHome();
+    repos.push(directory);
+    const playbookDir = join(directory.home, ".argos", "playbooks");
+    mkdirSync(playbookDir, { recursive: true });
+    writeFileSync(
+      join(playbookDir, "good.yaml"),
+      "title: Good\nsteps:\n  - id: a\n    prompt: hi\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(playbookDir, "broken.yaml"),
+      "title: Broken\nunknown_key_here: true\nsteps:\n  - id: a\n    prompt: hi\n",
+      "utf8",
+    );
+    const query = `cwd=${encodeURIComponent(directory.home)}`;
+
+    // The default body is what every existing client parses: no `issues` key at all.
+    const plain = await call(harness.base, "GET", `/playbooks?${query}`);
+    expect(plain.status).toBe(200);
+    const plainBody = PlaybookListResponseSchema.parse(plain.body);
+    expect(plainBody.errors).toHaveLength(1);
+    expect(plainBody.errors[0]).not.toHaveProperty("issues");
+
+    const detailed = await call(harness.base, "GET", `/playbooks?${query}&issues=1`);
+    expect(detailed.status).toBe(200);
+    const detailedBody = PlaybookListResponseSchema.parse(detailed.body);
+    expect(detailedBody.errors[0]?.issues).toEqual([
+      { path: "unknown_key_here", message: 'unrecognized key "unknown_key_here"' },
+    ]);
+
+    // The flag adds detail to the error entries and changes nothing else.
+    expect(detailedBody.playbooks).toEqual(plainBody.playbooks);
   });
 });
 

@@ -46,6 +46,9 @@ export const ARGOS_ERROR_CODES = [
   // FR17: the registered executor's transport cannot connect (HTTP 503). Paseo keeps
   // `paseo_unreachable`; this is the adapter-neutral code for every other substrate.
   "executor_unreachable",
+  // Playbook editor FR10: the buffer was loaded from bytes the file no longer has (HTTP 409).
+  // `details.reason` says whether the file changed or disappeared; nothing was written.
+  "playbook_conflict",
 ] as const;
 
 export type ArgosErrorCode = (typeof ARGOS_ERROR_CODES)[number];
@@ -67,8 +70,16 @@ export interface ArgosErrorDetails {
   readonly stepId?: string;
   /** Every schema issue the loader found, capped at 20 (FR1.4). */
   readonly issues?: readonly ArgosIssue[];
+  /**
+   * Why a `playbook_conflict` was raised: `changed` when the bytes on disk differ from the
+   * `baseSha256` the save was based on, `deleted` when the file is gone. Absent on every other code.
+   */
+  readonly reason?: PlaybookConflictReason;
   readonly cause?: unknown;
 }
+
+/** The two ways a playbook save can lose its precondition (editor FR10). */
+export type PlaybookConflictReason = "changed" | "deleted";
 
 /**
  * The only error type Argos throws on purpose. `message` always names the file and, when it
@@ -80,6 +91,8 @@ export class ArgosError extends Error {
   readonly stepId: string | undefined;
   /** Every issue behind a loader failure; `undefined` for errors that have no schema issues. */
   readonly issues: readonly ArgosIssue[] | undefined;
+  /** Why a `playbook_conflict` was raised; `undefined` for every other code (editor FR10). */
+  readonly reason: PlaybookConflictReason | undefined;
 
   constructor(code: ArgosErrorCode, message: string, details: ArgosErrorDetails = {}) {
     super(message, details.cause === undefined ? undefined : { cause: details.cause });
@@ -88,6 +101,7 @@ export class ArgosError extends Error {
     this.file = details.file;
     this.stepId = details.stepId;
     this.issues = details.issues;
+    this.reason = details.reason;
   }
 }
 
@@ -108,13 +122,14 @@ export function argosError(
   location: { file?: string | undefined; stepId?: string | undefined },
   detail: string,
   cause?: unknown,
-  extra?: { readonly issues?: readonly ArgosIssue[] },
+  extra?: { readonly issues?: readonly ArgosIssue[]; readonly reason?: PlaybookConflictReason },
 ): ArgosError {
   const message = `${errorLocation(location.file, location.stepId)}${detail}`;
   const details: ArgosErrorDetails = {};
   if (location.file !== undefined) Object.assign(details, { file: location.file });
   if (location.stepId !== undefined) Object.assign(details, { stepId: location.stepId });
   if (extra?.issues !== undefined) Object.assign(details, { issues: extra.issues });
+  if (extra?.reason !== undefined) Object.assign(details, { reason: extra.reason });
   if (cause !== undefined) Object.assign(details, { cause });
   return new ArgosError(code, message, details);
 }

@@ -143,6 +143,14 @@ hidden list, because it is a *rendering* choice, not a *scope* — the URL answe
 answers "which clock". The default is the browser's own zone, so a reader eight hours east of
 Greenwich no longer sees UTC; `argos` never learns the zone, and nothing but the labels changes.
 
+**The playbook editor is `/ui/playbooks`, the only screen that writes.** `?cwd=&file=` lives in the
+URL (`src/lib/playbook-query.ts`, in the style of `list-query.ts`), the decisions live in the pure
+`src/lib/playbook-editor.ts` (`isDirty`, `saveEligibility`, `issueList`, `lineForIssue`,
+`conflictText`, `isWritablePlaybook`), and `routes/playbooks/+page.svelte` renders
+`components/PlaybookRail.svelte` beside `components/PlaybookEditor.svelte`. Save is offered only for
+a dirty, valid, writable buffer; `isWritablePlaybook` is a path-prefix check, while the server is
+the enforcement point.
+
 `packages/core/src/hc/` is the herdr-core adapter, exposed on `@thaodangspace/argos-core/hc`, never
 from the package root: `port.ts` (the typed JSON-RPC surface and the one `kind` → Argos code table),
 `client.ts` (**the only `node:net` user**; plain-mode JSON-RPC, request-id correlation, endpoint
@@ -440,6 +448,7 @@ Every deliberate failure is an `ArgosError` with one of these codes. The HTTP co
 | `schedule_unknown` | unknown schedule id (index read, show/edit/pause/resume/run/rm) | 404 |
 | `schedule_exists` | `POST /schedules` / `argos schedule add` for an id already in the index | 409 |
 | `definition_conflict` | a fork's reloaded definition differs outside the set the fork re-runs, or changes `inputs`/`isolation`/`after`/the step set; `issues` names the surfaces and step ids | 409 |
+| `playbook_conflict` | `PUT /playbooks/file` with a `baseSha256` the file no longer has; `details.reason` is `changed` or `deleted`, and nothing is written | 409 |
 
 Protocol-only responses (`not_found`, `method_not_allowed`, `internal_error`) are not
 `ArgosErrorCode`s; unknown codes map to HTTP 500.
@@ -515,6 +524,11 @@ the IR — it never adds a key, never touches the hash, and its contract lives i
   `playbook_shadowed` (a repository playbook hides a home playbook with the same id) are emitted
   only when the sink is present; identical role copies are silent. `argos validate` prints them
   after the errors and exits 0 when there are only warnings.
+- Buffer source (FR7, editor): `LoadOptions.source = { file, text }` validates `text` as if it were
+  the bytes of `source.file` — the path identity (file family, origin, role family, the `.paseo`
+  unknown-key rule) stays real, so the verdict for a buffer equals the verdict for the same bytes on
+  disk. It adds no key to the IR and moves no hash, and an absent `source` leaves every existing
+  caller unchanged.
 - Errors are `ArgosError` with the plan's stable code; loader/validator failures are
   `playbook_invalid`, `playbook_cycle`, or `playbook_missing` and always name file + step
   (`details.issues` carries the per-issue `{path, stepId?, message}` list).
@@ -1253,6 +1267,48 @@ a refusal is exit 2 (`template_conflict`, `pack_unknown`, `pack_missing`, `pack_
 `manifest_invalid`, `node_too_old`, `invalid_floor`, `unsupported_protocol`, `link_unsupported`,
 `program_missing`, `pack_duplicate`) and writes nothing.
 
+## Playbook editor
+
+`/ui/playbooks` is the editor, and `PUT /playbooks/file` is the only route in Argos that writes a
+repository file. Three routes sit beside `GET /playbooks` in `rpc/server.ts`, each scoping to a
+`cwd` and a `file` (query parameters for the `GET`, a strict JSON body for `POST`/`PUT`); `cwd`
+passes `validateRunCwd` and `file` is never trusted:
+
+| Route | Behavior |
+|---|---|
+| `GET /playbooks/file?cwd=&file=[&graph=1]` | `readPlaybookFile` (`rpc/playbooks.ts`): the raw YAML, the sha256 of those same bytes, the loader's verdict, its warnings, and the graph on request. A file that does not load is still `200` with `valid: false` and `errors[]` |
+| `POST /playbooks/validate` | `validatePlaybookBuffer`: the verdict for a buffer against the file's identity, writing nothing — the loader is the only validator |
+| `PUT /playbooks/file` | `writePlaybookFile`: containment → read-only → cap → digest → verdict → atomic write, in that order, so no future route can write before validating |
+
+`rpc/playbook-write.ts` owns the containment: `discoverPlaybooks(cwd, home)` is the only source of
+truth, the request's `realpath` must equal one entry's, an `lstat` re-check refuses a symlink or a
+non-file, and only when the resolved path is inside the repository is the file writable (a
+symlinked playbooks root is listed and readable, never writable); the playbook id comes from the
+matched entry, never from the request. Anything else is `invalid_request`.
+
+- **Writable roots.** A save may replace only a file discovery lists under `<cwd>/.argos/playbooks`
+  or `<cwd>/.paseo/plugins/playbooks` **whose resolved path is inside the repository's real tree** —
+  the root label alone is not enough, so a symlinked playbooks root is listed and readable but never
+  writable. A `<home>/playbooks` entry is listed and readable too, and a `PUT` to it (or to any
+  non-writable root) is `invalid_request` naming the file (`PlaybookTarget.writable`).
+- **Size cap.** `PLAYBOOK_TEXT_LIMIT` = 512 KiB (`rpc/contracts.ts`) applies to read, validate, and
+  save; the request body cap stays 1 MiB.
+- **The digest precondition.** `baseSha256` (`/^[0-9a-f]{64}$/`) is mandatory — the sha256 of the
+  bytes the buffer was edited from. A mismatch is `playbook_conflict` (409) with
+  `details.reason = "changed"`; a file that is gone is the same code with `details.reason =
+  "deleted"` (`PLAYBOOK_CONFLICT_REASONS`). So two tabs cannot silently overwrite each other.
+- **The write.** Atomic: a sibling `<file>.argos-tmp-<16 hex>`, then `rename` over the target, so a
+  reader sees the old playbook or the new one; the existing mode is kept (an explicit `chmod`, since
+  `writeFileSync`'s mode goes through the umask) and the temp file is removed on any failure. An
+  invalid buffer is `playbook_invalid` (422) with `details.file`, `details.stepId`, and
+  `details.issues[]`, and writes nothing; warnings never block a save. The success body carries the
+  digest of the bytes just written, so a second save can chain it.
+- **Issue detail on the listing.** `GET /playbooks?issues=1` adds `issues[]` to each `errors[]`
+  entry, capped at `PLAYBOOK_ISSUE_LIMIT` = 20. It is opt-in like `graph=1`: without the flag the
+  body is byte-identical to the pre-editor listing, and `ARGOS_RPC_VERSION` stays `1`.
+- **No trace.** The server adds no log line for a save and logs neither playbook content nor a
+  refused path; Git is the audit trail (see [`docs/architecture.md`](docs/architecture.md#security)).
+
 ## Tests
 
 ```sh
@@ -1500,9 +1556,9 @@ suite green.
   reports drift and never refuses a run. A new pack version installs beside the old
   `packs/<name>@<version>/`, so installed templates move only when `install` rewrites them. See
   [`docs/hc-templates.md`](docs/hc-templates.md).
-- **The web UI covers watching, gates, and run controls, not the operator console.** It has no
-  schedules, worktrees, database, or doctor screen, and no run deletion; those stay in the CLI. It
-  reads the schedule roster only to label a workflow "in use" — it
+- **The web UI covers watching, gates, run controls, and playbook edits, not the operator console.**
+  It has no schedules, worktrees, database, or doctor screen, and no run deletion; those stay in the
+  CLI. It reads the schedule roster only to label a workflow "in use" — it
   cannot create, pause, or remove one. It renders the same read model as the CLI, so it never shows
   agent prompts or transcripts — a step's log ends at its declared outputs, attempts, and history.
   The gate inbox (`/ui/gates`) is one oldest-first list with no filter, pagination, bulk action, or
@@ -1511,6 +1567,13 @@ suite green.
   falls back to `run.updatedAt` per gate, which makes the order approximate because a gated run can
   keep advancing other steps. The rail's `✕` never hides an inbox card: hiding hides list rows, not
   work that waits for a person.
+- **The playbook editor is a plain textarea over one file.** No CodeMirror or syntax highlighting
+  (the named later upgrade), no create, rename, or delete, no graph preview and no start button, no
+  multi-file edit, and no editing of roles, `defaults/main.yaml`, or scripts. A home playbook
+  (`<home>/playbooks/*.yaml`) is listed and readable, never writable. Nothing is stored server-side:
+  an unsaved buffer lives only in the tab, and Argos keeps no version of a playbook — Git is the
+  undo. Saving during a live run is safe by construction (the run holds its frozen IR and hash), and
+  a schedule loads the file again at its next fire.
 - **Hiding a workflow in the UI is a view preference, not an archive.** `✕` in the rail writes a
   workflow id into this browser's `localStorage`; the workflow keeps its schedule and can still be
   started from the CLI or another browser profile, and the hidden list is not

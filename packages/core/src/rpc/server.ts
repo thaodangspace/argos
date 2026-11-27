@@ -52,7 +52,12 @@ import {
   DEFAULT_ARGOS_PORT,
   GateDecisionResponseSchema,
   ForkRequestSchema,
+  PlaybookFileResponseSchema,
   PlaybookListResponseSchema,
+  PlaybookSaveRequestSchema,
+  PlaybookSaveResponseSchema,
+  PlaybookValidateRequestSchema,
+  PlaybookVerdictSchema,
   RetryRequestSchema,
   RunDetailSchema,
   RunListResponseSchema,
@@ -87,7 +92,13 @@ import {
   type GateDocumentView,
 } from "./summary.js";
 import { cookieAuthAllowed, createUiSession } from "./session.js";
-import { listPlaybooks } from "./playbooks.js";
+import {
+  listPlaybooks,
+  readPlaybookFile,
+  toPlaybookIssues,
+  validatePlaybookBuffer,
+  writePlaybookFile,
+} from "./playbooks.js";
 import { isUiAttempt, isUiPath, resolveUiFile, serveUiFile, UI_BASE } from "./ui.js";
 
 // `@thaodangspace/argos-core/rpc/server` re-exports the one storage owner so the CLI's `serve` command can open it
@@ -253,6 +264,11 @@ function sendError(res: ServerResponse, error: unknown, log: (message: string) =
     const details: Record<string, unknown> = {};
     if (error.file !== undefined) details["file"] = error.file;
     if (error.stepId !== undefined) details["stepId"] = error.stepId;
+    // Editor FR8/FR10: the per-issue list an invalid buffer carries, and the reason a save lost
+    // its precondition, so the browser can pick a panel without parsing a message.
+    const issues = toPlaybookIssues(error.issues);
+    if (issues.length > 0) details["issues"] = issues;
+    if (error.reason !== undefined) details["reason"] = error.reason;
     sendJson(res, statusForCode(error.code), {
       error: {
         code: error.code,
@@ -840,9 +856,80 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         // only fail later, at start time.
         const cwd = url.searchParams.get("cwd") ?? options.cwd ?? process.cwd();
         validateRunCwd(cwd);
-        // FR8: the graph is opt-in, so every existing client's body stays byte-identical.
-        const listing = listPlaybooks(cwd, home, { graph: url.searchParams.get("graph") === "1" });
+        // FR8: the graph and the per-issue detail are opt-in, so every existing client's body stays
+        // byte-identical (a `false` here omits both keys, exactly like the pre-editor response).
+        const listing = listPlaybooks(cwd, home, {
+          graph: url.searchParams.get("graph") === "1",
+          issues: url.searchParams.get("issues") === "1",
+        });
         sendJson(res, 200, PlaybookListResponseSchema.parse(listing), extra);
+        return;
+      }
+
+      // The editor's read half (editor spec FR1/FR6) and its one write (FR9–FR13). Claimed beside
+      // `/playbooks` and before the `/runs` guard for the same reason: these paths are not run
+      // prefixes, so afterwards they would only ever answer `not_found`. `file` comes from the wire
+      // and is never trusted — the containment (discovery, realpath, lstat, the text cap) lives in
+      // `playbook-write.ts`.
+      if (segments.length === 2 && segments[0] === "playbooks" && segments[1] === "file") {
+        if (req.method !== "GET" && req.method !== "PUT") {
+          sendJson(
+            res,
+            405,
+            { error: { code: "method_not_allowed", message: "GET or PUT" } },
+            extra,
+          );
+          return;
+        }
+        // `PUT /playbooks/file` (FR9–FR13): the only route in Argos that writes a repository file.
+        // Same order as `POST /playbooks/validate` — the strict body first (so an absent
+        // `baseSha256` is `invalid_request`), then the cwd rules, then the one write function,
+        // which owns containment → digest → verdict → atomic write.
+        if (req.method === "PUT") {
+          const body = PlaybookSaveRequestSchema.parse(await readJson(req, maxBodyBytes));
+          validateRunCwd(body.cwd);
+          const saved = writePlaybookFile({
+            cwd: body.cwd,
+            file: body.file,
+            yaml: body.yaml,
+            baseSha256: body.baseSha256,
+            home,
+            ...(body.graph === undefined ? {} : { graph: body.graph }),
+          });
+          sendJson(res, 200, PlaybookSaveResponseSchema.parse(saved), extra);
+          return;
+        }
+        // FR3: the same cwd rules as `POST /runs`, before any file is read.
+        const cwd = url.searchParams.get("cwd") ?? options.cwd ?? process.cwd();
+        validateRunCwd(cwd);
+        const read = readPlaybookFile({
+          cwd,
+          file: url.searchParams.get("file") ?? "",
+          home,
+          // Opt-in, like the listing's `graph=1`: absent means the key is not there at all.
+          graph: url.searchParams.get("graph") === "1",
+        });
+        sendJson(res, 200, PlaybookFileResponseSchema.parse(read), extra);
+        return;
+      }
+
+      // `POST /playbooks/validate` (editor FR6): the verdict for a buffer, writing nothing. The body
+      // reader already caps the payload at 1 MiB; the editor's own 512 KiB cap is enforced below.
+      if (segments.length === 2 && segments[0] === "playbooks" && segments[1] === "validate") {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: { code: "method_not_allowed", message: "POST only" } }, extra);
+          return;
+        }
+        const body = PlaybookValidateRequestSchema.parse(await readJson(req, maxBodyBytes));
+        validateRunCwd(body.cwd);
+        const verdict = validatePlaybookBuffer({
+          cwd: body.cwd,
+          file: body.file,
+          yaml: body.yaml,
+          home,
+          ...(body.graph === undefined ? {} : { graph: body.graph }),
+        });
+        sendJson(res, 200, PlaybookVerdictSchema.parse(verdict), extra);
         return;
       }
 
