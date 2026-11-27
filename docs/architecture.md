@@ -520,6 +520,20 @@ answers `404`.
   cancel/retry/fork, and `GET /playbooks?cwd=` for the "Run workflow" form. It renders steps, status,
   duration, attempts, usage/cost, declared outputs, gates, and history — never prompts or agent
   transcripts, which the contract does not expose.
+- **Playbook editor.** `/ui/playbooks?cwd=&file=` lists one repository's discovered playbooks and
+  edits one of them. The server side is three routes claimed beside `GET /playbooks`, so they can
+  never fall through to the `/runs` guard: `GET /playbooks/file?cwd=&file=[&graph=1]` (the raw
+  YAML, the sha256 of those same bytes, and the loader's verdict — a file that does not load is
+  still `200` with `valid: false`), `POST /playbooks/validate` (the verdict for a buffer, writing
+  nothing), and `PUT /playbooks/file` (validate, then write atomically). `file` is never trusted:
+  containment is `discoverPlaybooks` → `realpath` equality with one listing entry → an `lstat`
+  re-check (see [Security](#playbook-edits-web-ui)). A save may replace only
+  `<cwd>/.argos/playbooks/<id>.yaml` or `<cwd>/.paseo/plugins/playbooks/<id>.yaml`; a
+  `<home>/playbooks` file is listed and readable but answers `invalid_request`. `baseSha256` is
+  mandatory, and a stale or vanished file is `playbook_conflict` (409) with `details.reason`
+  `changed`/`deleted`. `PLAYBOOK_TEXT_LIMIT` is 512 KiB on read, validate, and save.
+  `GET /playbooks?issues=1` adds per-issue detail (`PLAYBOOK_ISSUE_LIMIT` = 20) on request only, so
+  the default body stays byte-identical and `ARGOS_RPC_VERSION` stays `1`.
 - **Styling.** Every screen is markup plus utilities: Tailwind 4 (through `@tailwindcss/vite`, ahead
   of `sveltekit()` in the Vite plugin list) and Skeleton 5.0.6 with the Vintage theme.
   `packages/web/src/app.css` is the only stylesheet and holds exactly the four `@import`s
@@ -682,6 +696,33 @@ This is deliberately equivalent to the token in capability, not broader:
 - The static shell and its assets are served **before** authentication (they contain no run data,
   and the shell is what delivers the cookie). Only `/ui*` is claimed that way; every API route keeps
   the bearer/cookie check.
+
+### Playbook edits (Web UI)
+
+`PUT /playbooks/file` is the only route that writes a repository file, and the Web UI is its only
+caller. It accepts the bearer token and — like every write — a session cookie whose `Origin` equals
+the request's `Host`, so a cookie-authenticated call can rewrite a playbook. That is the capability
+the token already grants (start a run, run a script as the operator), never a broader one; the
+section above is the whole argument.
+
+- The write is limited to the two repository roots (`<cwd>/.argos/playbooks`,
+  `<cwd>/.paseo/plugins/playbooks`). `<home>/playbooks` is listed and readable, and a save there is
+  `invalid_request`. Containment is discovery → `realpath` equality with one listing entry → an
+  `lstat` re-check (no symlink, a regular file) → the 512 KiB `PLAYBOOK_TEXT_LIMIT`.
+- The precondition is the digest of the bytes the buffer was edited from (`baseSha256`, mandatory):
+  a changed file is `playbook_conflict` with `details.reason = "changed"`, a deleted one the same
+  code with `reason = "deleted"`, so two tabs cannot silently overwrite each other.
+- **Residual limit: detect-only.** A symlinked *parent* directory is trusted once `realpath` agrees,
+  and a parent swapped between the containment check and the `rename` is not prevented — the check
+  is a snapshot, not a lock. The write itself is atomic (a sibling temp plus `rename`), so a reader
+  never sees half a playbook, the file's mode is preserved, and the temp file is removed on failure.
+- The Web UI's read-only badge (`isWritablePlaybook`, `packages/web/src/lib/playbook-editor.ts`) is
+  a path-prefix check. The server is the enforcement point; the badge only decides whether to draw
+  the button.
+- **Git is the only undo.** Argos keeps no playbook version, no draft, and no backup, and the route
+  adds no log line: neither playbook content nor a refused path is logged. `git diff`/`git log` on
+  the checkout is the audit trail. A save cannot disturb a live run, which holds its frozen IR and
+  hash, and a schedule loads the file again at its next fire.
 
 ### Unattended schedules
 
