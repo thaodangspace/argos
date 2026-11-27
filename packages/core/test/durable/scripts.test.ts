@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import { ArgosHost } from "../../src/durable/host.js";
 import { resolveScriptPath, SCRIPT_OUTPUT_LIMIT, type ScriptCheckpoint } from "../../src/durable/tasks/script.js";
 import { isArgosError } from "../../src/errors.js";
-import type { RunRecord } from "../../src/engine/index.js";
+import { hydrateRunRecord, type RunRecord } from "../../src/engine/index.js";
 import { playbook, step } from "../../src/engine/test-util.js";
 import type { PlaybookIR } from "../../src/playbook/ir.js";
 import { FakeClock } from "../fakes/clock.js";
@@ -429,6 +429,90 @@ describe("script steps: receipt tails (FR1)", () => {
       // 3000 lines of 75 bytes plus the last line: the tail is the end, not the start.
       expect(receipt?.stdout?.length).toBe(SCRIPT_OUTPUT_LIMIT);
       expect(receipt?.stdout?.endsWith("the last line\n")).toBe(true);
+    } finally {
+      await host.close();
+      cleanup();
+      repo.cleanup();
+    }
+  });
+});
+
+describe("script steps: attempt diagnostics (FR2/FR3)", () => {
+  it("settles the stdout/stderr tails and the exit code onto the attempt record", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    writeScript(
+      repo.repo,
+      "chatty-attempt.mjs",
+      [
+        "#!/usr/bin/env node",
+        'process.stdout.write("a normal line\\n");',
+        'process.stderr.write("blocked: waiting for a review\\n");',
+        "",
+      ].join("\n"),
+    );
+    const clock = new FakeClock();
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      home,
+      clock,
+      executor: new FakeExecutor(),
+    });
+    try {
+      const { runId } = await host.startRun({
+        ir: scriptPlaybook({ script: "chatty-attempt.mjs" }),
+        inputs: {},
+        cwd: repo.repo,
+        id: "run-script-attempt-streams",
+      });
+      await waitForReal(async () => (await host.getRun(runId))?.record.status === "completed");
+
+      const record = (await host.getRun(runId))?.record;
+      const attempt = record?.steps["run"]?.attempts[0];
+      expect(attempt?.exitCode).toBe(0);
+      expect(attempt?.streams).toEqual({
+        stdout: "a normal line\n",
+        stderr: "blocked: waiting for a review\n",
+      });
+      // A successful attempt has no reason line.
+      expect(Object.hasOwn(attempt ?? {}, "detail")).toBe(false);
+      // The record survives the strict checkpoint schema it was written with.
+      expect(JSON.stringify(hydrateRunRecord(JSON.stringify(record)))).toBe(JSON.stringify(record));
+    } finally {
+      await host.close();
+      cleanup();
+      repo.cleanup();
+    }
+  });
+
+  it("settles a failed script's exit code, one-line detail, and stderr tail", async () => {
+    const repo = makeTempRepo();
+    const { home, cleanup } = makeTempHome();
+    installFixtureScript(repo.repo, "fail.mjs");
+    const clock = new FakeClock();
+    const host = await ArgosHost.open({
+      storage: new MemoryStorage(),
+      home,
+      clock,
+      executor: new FakeExecutor(),
+    });
+    try {
+      const { runId } = await host.startRun({
+        ir: scriptPlaybook({ script: "fail.mjs" }),
+        inputs: {},
+        cwd: repo.repo,
+        id: "run-script-attempt-failed",
+      });
+      await waitForReal(async () => (await host.getRun(runId))?.record.status === "failed");
+
+      const record = (await host.getRun(runId))?.record;
+      const attempt = record?.steps["run"]?.attempts[0];
+      expect(attempt?.outcome).toBe("failed");
+      expect(attempt?.errorCode).toBe("step_failed");
+      expect(attempt?.exitCode).toBe(3);
+      // FR3: one line, whitespace collapsed, no trailing newline.
+      expect(attempt?.detail).toBe("the script exited 3: boom: fixture failure");
+      expect(attempt?.streams).toEqual({ stderr: "boom: fixture failure\n" });
     } finally {
       await host.close();
       cleanup();

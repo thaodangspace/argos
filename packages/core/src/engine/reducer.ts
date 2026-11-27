@@ -18,8 +18,15 @@
 
 import type { ArgosErrorCode } from "../errors.js";
 import type { Scalar } from "../playbook/ir.js";
-import type { DraftRecord, GateChoiceRecord, GateKind, RunRecord } from "./record.js";
+import type {
+  AttemptStreams,
+  DraftRecord,
+  GateChoiceRecord,
+  GateKind,
+  RunRecord,
+} from "./record.js";
 import {
+  ATTEMPT_STREAM_KEEP,
   cloneRecord,
   freezeRecord,
   isTerminalRunStatus,
@@ -62,6 +69,12 @@ export type EngineEvent =
       readonly usage?: Readonly<Record<string, number>>;
       /** Feedback forwarded to the `goto` target (`{{ feedback }}`). */
       readonly feedback?: string;
+      /** FR3: one reason line; the reducer collapses whitespace and cuts it to 500 characters. */
+      readonly detail?: string;
+      /** The attempt's last exit code, when the executor reports one. */
+      readonly exitCode?: number;
+      /** FR2: the bounded output tails; only non-empty sides are stored (FR10 bounds how many). */
+      readonly streams?: AttemptStreams;
       readonly endedAt: number;
       readonly now?: number;
     }
@@ -160,6 +173,10 @@ export function next(record: RunRecord, event: EngineEvent): NextResult {
       onCancel(draft, event.now, effects);
       break;
   }
+
+  // FR10: one rule for every event, after the handler. `onSettled` has two exits (the errorCode
+  // path and the normal path) and the failed settle is exactly the one that carries a stream.
+  pruneAttemptStreams(draft);
 
   if (JSON.stringify(draft) !== JSON.stringify(record)) {
     draft.seq = record.seq + 1;
@@ -287,6 +304,12 @@ function onSettled(
   attempt.endedAt = event.endedAt;
   if (event.agentId !== undefined) attempt.agentId = event.agentId;
   if (event.usage !== undefined) attempt.usage = { ...event.usage };
+  // FR3/FR2: written on both exits (failure and success), so a failed attempt explains itself.
+  const detail = normalizeAttemptDetail(event.detail);
+  if (detail !== undefined) attempt.detail = detail;
+  if (event.exitCode !== undefined) attempt.exitCode = event.exitCode;
+  const streams = normalizeAttemptStreams(event.streams);
+  if (streams !== undefined) attempt.streams = streams;
   delete step.notBefore;
   delete step.feedback;
 
@@ -326,6 +349,48 @@ function onSettled(
     effects,
   );
   advance(draft, event.now ?? event.endedAt, effects);
+}
+
+/** FR3: the one shape every executor's reason line gets (`detail` is capped at this). */
+const ATTEMPT_DETAIL_LIMIT = 500;
+
+/**
+ * FR3: collapse every run of whitespace to a single space and cut to `ATTEMPT_DETAIL_LIMIT`.
+ * Returns `undefined` for an absent or blank reason, so the record never stores `""`.
+ */
+function normalizeAttemptDetail(detail: string | undefined): string | undefined {
+  if (detail === undefined) return undefined;
+  const line = detail.replace(/\s+/g, " ").trim();
+  if (line === "") return undefined;
+  return line.length > ATTEMPT_DETAIL_LIMIT ? line.slice(0, ATTEMPT_DETAIL_LIMIT) : line;
+}
+
+/**
+ * FR2: store a `streams` value only when at least one side has text; an empty side is omitted, so
+ * the record never holds `{ stdout: "" }` (the script task already drops an empty tail).
+ */
+function normalizeAttemptStreams(streams: AttemptStreams | undefined): AttemptStreams | undefined {
+  if (streams === undefined) return undefined;
+  const kept: { stdout?: string; stderr?: string } = {};
+  if (streams.stdout !== undefined && streams.stdout !== "") kept.stdout = streams.stdout;
+  if (streams.stderr !== undefined && streams.stderr !== "") kept.stderr = streams.stderr;
+  return kept.stdout === undefined && kept.stderr === undefined ? undefined : kept;
+}
+
+/**
+ * FR10: a step keeps `streams` for at most its newest `ATTEMPT_STREAM_KEEP` attempts. Older
+ * attempts keep `detail` and `exitCode`; the tails are dropped so the mirrored document stays
+ * bounded. Attempts are appended in `n` order, so array position is attempt order.
+ */
+function pruneAttemptStreams(draft: DraftRecord): void {
+  for (const step of Object.values(draft.steps)) {
+    const dropBefore = step.attempts.length - ATTEMPT_STREAM_KEEP;
+    if (dropBefore <= 0) continue;
+    for (let index = 0; index < dropBefore; index += 1) {
+      const attempt = step.attempts[index];
+      if (attempt !== undefined && attempt.streams !== undefined) delete attempt.streams;
+    }
+  }
 }
 
 function onCancel(draft: DraftRecord, now: number, effects: Effect[]): void {

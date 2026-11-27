@@ -325,6 +325,123 @@ describe("after-tasks and cancellation", () => {
   });
 });
 
+// ------------------------------------------------------------------ attempt diagnostics
+
+describe("attempt diagnostics (FR2/FR3/FR10)", () => {
+  const single = playbook({ steps: [step({ id: "a" })] });
+
+  function started(): RunRecord {
+    return tick(makeRecord(single, { now: 1_000 }), 1_000).record;
+  }
+
+  it("writes detail, exit code, and streams onto the settled attempt", () => {
+    const record = next(started(), {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+      detail: "the script exited 1: boom",
+      exitCode: 1,
+      streams: { stdout: "out\n", stderr: "err\n" },
+    }).record;
+
+    expect(record.steps["a"]?.attempts[0]).toMatchObject({
+      n: 1,
+      detail: "the script exited 1: boom",
+      exitCode: 1,
+      streams: { stdout: "out\n", stderr: "err\n" },
+    });
+  });
+
+  it("leaves the attempt unchanged when the settle carries none of them", () => {
+    const record = next(started(), {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+    }).record;
+
+    const attempt = record.steps["a"]?.attempts[0];
+    expect(attempt).toBeDefined();
+    expect(Object.hasOwn(attempt ?? {}, "detail")).toBe(false);
+    expect(Object.hasOwn(attempt ?? {}, "exitCode")).toBe(false);
+    expect(Object.hasOwn(attempt ?? {}, "streams")).toBe(false);
+  });
+
+  it("collapses a multi-line reason to one line and cuts it to 500 characters", () => {
+    const multiline = next(started(), {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+      detail: "  Fetch failed:\n\n  HTTP\t\t503  ",
+    }).record;
+    expect(multiline.steps["a"]?.attempts[0]?.detail).toBe("Fetch failed: HTTP 503");
+
+    const long = next(started(), {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+      detail: "x".repeat(600),
+    }).record;
+    const detail = long.steps["a"]?.attempts[0]?.detail ?? "";
+    expect(detail).toHaveLength(500);
+    expect(detail).toBe("x".repeat(500));
+  });
+
+  it("omits an empty stream side instead of storing an empty string", () => {
+    const onlyStderr = next(started(), {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+      streams: { stdout: "", stderr: "blocked: waiting\n" },
+    }).record;
+    expect(onlyStderr.steps["a"]?.attempts[0]?.streams).toEqual({ stderr: "blocked: waiting\n" });
+
+    const empty = next(started(), {
+      type: "stepSettled",
+      stepId: "a",
+      outcome: "success",
+      endedAt: 1_100,
+      streams: { stdout: "", stderr: "" },
+    }).record;
+    expect(Object.hasOwn(empty.steps["a"]?.attempts[0] ?? {}, "streams")).toBe(false);
+  });
+
+  it("keeps streams for only the newest 10 attempts of a step (FR10)", () => {
+    const looping = playbook({
+      steps: [step({ id: "a", outcomes: ["again", "done"], on: { again: goto("a") } })],
+    });
+    let record = tick(makeRecord(looping, { now: 1_000 }), 1_000).record;
+    for (let attempt = 1; attempt <= 11; attempt += 1) {
+      record = next(record, {
+        type: "stepSettled",
+        stepId: "a",
+        outcome: "again",
+        endedAt: 1_000 + attempt,
+        detail: `attempt ${attempt} failed`,
+        exitCode: attempt,
+        streams: { stdout: `out ${attempt}\n`, stderr: `err ${attempt}\n` },
+      }).record;
+    }
+
+    const attempts = record.steps["a"]?.attempts ?? [];
+    // 11 settled attempts plus the 12th, dispatched by the last goto.
+    expect(attempts).toHaveLength(12);
+    expect(attempts[0]?.n).toBe(1);
+    // The oldest attempts keep the one-line diagnostics and drop only the tails.
+    expect(attempts[0]?.detail).toBe("attempt 1 failed");
+    expect(attempts[0]?.exitCode).toBe(1);
+    expect(Object.hasOwn(attempts[0] ?? {}, "streams")).toBe(false);
+    expect(Object.hasOwn(attempts[1] ?? {}, "streams")).toBe(false);
+    // The newest ten keep them.
+    expect(attempts[2]?.streams).toEqual({ stdout: "out 3\n", stderr: "err 3\n" });
+    expect(attempts[10]?.streams).toEqual({ stdout: "out 11\n", stderr: "err 11\n" });
+  });
+});
+
 // ------------------------------------------------------------------ property
 
 function pick<T>(random: () => number, items: readonly T[]): T {

@@ -26,6 +26,9 @@ export function stepEvents(settlement: StepSettlement, now: number): EngineEvent
     ...(settlement.agentId === undefined ? {} : { agentId: settlement.agentId }),
     ...(settlement.feedback === undefined ? {} : { feedback: settlement.feedback }),
     ...(settlement.usage === undefined ? {} : { usage: settlement.usage }),
+    ...(settlement.detail === undefined ? {} : { detail: settlement.detail }),
+    ...(settlement.exitCode === undefined ? {} : { exitCode: settlement.exitCode }),
+    ...(settlement.streams === undefined ? {} : { streams: settlement.streams }),
   };
 }
 
@@ -53,6 +56,12 @@ export function settlementFrom(
   if (outcome.status === "completed") {
     const result = outcome.result as Partial<StepTaskResult> | undefined;
     if (result === undefined) return base;
+    // FR2: the receipt's two tails become the attempt's `streams`; an empty or absent side is
+    // omitted rather than copied as `""` (the script task already drops an empty tail).
+    const streams = {
+      ...(result.stdout === undefined || result.stdout === "" ? {} : { stdout: result.stdout }),
+      ...(result.stderr === undefined || result.stderr === "" ? {} : { stderr: result.stderr }),
+    };
     return {
       ...base,
       ...(result.outcome === undefined ? {} : { outcome: result.outcome }),
@@ -63,6 +72,11 @@ export function settlementFrom(
       ...(result.usage === undefined ? {} : { usage: result.usage }),
       ...(result.feedback === undefined ? {} : { feedback: result.feedback }),
       ...(result.exhausted === undefined ? {} : { exhausted: result.exhausted }),
+      // FR2/FR3: copied by name like every field above, so a new receipt key never leaks in
+      // unnoticed; the engine normalizes `detail` and enforces FR10 on the attempt.
+      ...(result.detail === undefined ? {} : { detail: result.detail }),
+      ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+      ...(Object.keys(streams).length === 0 ? {} : { streams }),
     };
   }
   // failed / aborted / faulted / orphaned: the child task itself broke, which is a step failure.
