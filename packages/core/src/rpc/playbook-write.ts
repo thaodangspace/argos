@@ -9,13 +9,27 @@
  * trusted from the request would accept a symlink pointing out of the repository. The id therefore
  * always comes from the matched entry, never from the request.
  *
+ * The one write is {@link writePlaybookAtomically}: a temp file in the target's own directory, then
+ * a rename over the target, so a reader never sees a half-written playbook. The verdict that must
+ * hold *before* that write lives in `playbooks.ts` (it owns the loader's projection), which imports
+ * this module — so `writePlaybookFile` sits there and this module stays the free end of that edge.
+ *
  * `cwd` is deliberately **not** validated here: `server.ts` calls `validateRunCwd` before this
  * module, which keeps it free of `../durable/*` (and of `server.ts`), so the containment matrix is
  * testable without a host. Nothing here opens storage, spawns, or logs.
  */
 
-import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import { argosError } from "../errors.js";
@@ -121,6 +135,14 @@ export function resolvePlaybookTarget(input: {
   readonly cwd: string;
   readonly file: string;
   readonly home?: string;
+  /**
+   * What a request path that no longer exists answers (editor FR10). A read refuses it as
+   * `invalid_request` (a listing entry can be a dead link); a save answers `playbook_conflict`
+   * with `reason: "deleted"`, because the operator's buffer was edited from a file that is gone.
+   * The shape refusals above (NUL, relative, `..`) stay `invalid_request` either way: a path that
+   * wanders was never produced by discovery, so it is not a deleted playbook.
+   */
+  readonly whenMissing?: "invalid_request" | "deleted";
 }): PlaybookTarget {
   const repoDir = resolve(input.cwd);
   const requested = input.file;
@@ -132,7 +154,18 @@ export function resolvePlaybookTarget(input: {
 
   const listing = discoverPlaybooks(repoDir, input.home);
   const resolved = realpathOf(requested);
-  if (resolved === undefined) refuse("file is not a discovered playbook of this repository");
+  if (resolved === undefined) {
+    if (input.whenMissing === "deleted") {
+      throw argosError(
+        "playbook_conflict",
+        { file: requested },
+        "playbook file no longer exists",
+        undefined,
+        { reason: "deleted" },
+      );
+    }
+    refuse("file is not a discovered playbook of this repository");
+  }
   const matches = listing.filter((candidate) => realpathOf(candidate.file) === resolved);
   const entry: PlaybookEntry | undefined = matches.length === 1 ? matches[0] : undefined;
   if (entry === undefined) refuse("file is not a discovered playbook of this repository");
@@ -181,4 +214,41 @@ export function readPlaybookSource(target: PlaybookTarget): {
 } {
   const bytes = readCapped(target.file);
   return { yaml: bytes.toString("utf8"), sha256: digestOf(bytes) };
+}
+
+/** The result of one atomic write: what is on disk now, and the mode the file kept (FR12/FR13). */
+export interface WrittenPlaybook {
+  readonly sha256: string;
+  readonly mode: number;
+}
+
+/**
+ * Replace a playbook's bytes atomically (FR12), keeping the mode it had.
+ *
+ * The temp file is a sibling — same directory, same filesystem — so the rename is atomic and a
+ * reader sees either the old playbook or the new one, never half of either; a temp under `/tmp`
+ * could cross devices and degrade to a copy. The temp name carries 8 random bytes so two saves of
+ * the same file cannot collide. Any failure removes the temp file and rethrows: a refused save
+ * leaves no debris behind. `rename` replaces a symlink rather than following it, which is why the
+ * containment's `lstat` refusal and this call agree about what the target is.
+ *
+ * `writeFileSync`'s `mode` is masked by the process umask, so the explicit `chmod` is what keeps a
+ * `0740` playbook `0740` under a stricter umask.
+ */
+export function writePlaybookAtomically(target: PlaybookTarget, text: string): WrittenPlaybook {
+  const mode = statSync(target.file).mode & 0o777;
+  const temp = `${target.file}.argos-tmp-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(temp, text, { mode });
+    chmodSync(temp, mode);
+    renameSync(temp, target.file);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // ENOENT: the write never created it, or the rename already moved it away.
+    }
+    throw error;
+  }
+  return { sha256: digestOf(Buffer.from(text, "utf8")), mode };
 }

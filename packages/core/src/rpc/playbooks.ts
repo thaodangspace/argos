@@ -1,6 +1,6 @@
 /**
  * The playbook read surface: `GET /playbooks` (spec FR4) and, for the editor, `GET /playbooks/file`
- * (FR1) and `POST /playbooks/validate` (FR6).
+ * (FR1), `POST /playbooks/validate` (FR6), and `PUT /playbooks/file` (FR9–FR13).
  *
  * The rules mirror `POST /runs`, because the form must never offer something a start would refuse:
  * the same cwd validation, the same repository-then-home discovery, and the same loader. A playbook
@@ -8,11 +8,14 @@
  * cannot hide the rest of the repository. The editor routes project the same loader and add no
  * second validator.
  *
- * Nothing here is execution: no task, no worktree, no run, no model check, and no write. The `file`
- * of a read or validate request is never trusted — containment lives in `playbook-write.ts`.
+ * The save is the one write in this module, and it is the **only** route in Argos that writes a
+ * repository file. It owns the order of its three checks (containment, digest, verdict) so no future
+ * route can validate after writing, and it delegates the write itself to
+ * `playbook-write.ts` (`writePlaybookAtomically`). The `file` of a request is never trusted:
+ * containment lives in that module.
  */
 
-import { isArgosError } from "../errors.js";
+import { argosError, isArgosError, type ArgosIssue } from "../errors.js";
 import { buildPlaybookGraph } from "../playbook/graph.js";
 import { discoverPlaybooks, loadPlaybook, type LoadWarning } from "../playbook/load.js";
 import type { InputDefIR, PlaybookIR } from "../playbook/ir.js";
@@ -24,6 +27,7 @@ import {
   type PlaybookIssue,
   type PlaybookListResponse,
   type PlaybookLoadError,
+  type PlaybookSaveResponse,
   type PlaybookSummary,
   type PlaybookVerdict,
   type ValidateWarning,
@@ -32,6 +36,7 @@ import {
   assertPlaybookTextWithinLimit,
   readPlaybookSource,
   resolvePlaybookTarget,
+  writePlaybookAtomically,
   type PlaybookTarget,
 } from "./playbook-write.js";
 
@@ -78,15 +83,21 @@ function errorMessage(error: unknown): string {
 /**
  * The loader's per-issue detail, capped at {@link PLAYBOOK_ISSUE_LIMIT} (FR8). Built key by key so a
  * strict parse sees exactly `path`, `stepId`, `message` — an `ArgosIssue` never carries more, and
- * this is the one place the cap is applied (the schema states the shape, not the limit).
+ * this is the one place the cap and the shape are applied (the schema states the shape, not the
+ * limit). Exported because the error projection in `server.ts` publishes the same list.
  */
-function toIssues(error: unknown): PlaybookIssue[] {
-  if (!isArgosError(error) || error.issues === undefined) return [];
-  return error.issues.slice(0, PLAYBOOK_ISSUE_LIMIT).map((issue) => ({
+export function toPlaybookIssues(issues: readonly ArgosIssue[] | undefined): PlaybookIssue[] {
+  if (issues === undefined) return [];
+  return issues.slice(0, PLAYBOOK_ISSUE_LIMIT).map((issue) => ({
     path: issue.path,
     ...(issue.stepId === undefined ? {} : { stepId: issue.stepId }),
     message: issue.message,
   }));
+}
+
+function toIssues(error: unknown): PlaybookIssue[] {
+  if (!isArgosError(error)) return [];
+  return toPlaybookIssues(error.issues);
 }
 
 /**
@@ -155,15 +166,17 @@ function toValidateWarnings(warnings: readonly LoadWarning[]): ValidateWarning[]
 }
 
 /**
- * The one verdict read, validate, and save share (FR6/FR13): the loader is the only validator, so a
- * buffer and the identical bytes on disk cannot disagree. A failure is a verdict, never a throw: the
- * loader's own `errors[]` (with its `issues[]`) is what an operator needs to fix the file.
+ * The one verdict computation read, validate, and save share (FR6/FR13): the loader is the only
+ * validator, so a buffer and the identical bytes on disk cannot disagree. A failure is a verdict,
+ * never a throw — the loader's own `errors[]` (with its `issues[]`) is what an operator needs to fix
+ * the file — and the failure itself is returned beside it so the save can rethrow the loader's own
+ * error instead of inventing a code or a message.
  */
-function toVerdict(
+function evaluate(
   target: PlaybookTarget,
   yaml: string,
   options: { readonly home?: string; readonly graph?: boolean },
-): PlaybookVerdict {
+): { readonly verdict: PlaybookVerdict; readonly failure: unknown } {
   const warnings: LoadWarning[] = [];
   try {
     const ir = loadPlaybook(target.repoDir, target.id, {
@@ -173,21 +186,35 @@ function toVerdict(
       source: { file: target.file, text: yaml },
     });
     return {
-      playbookId: ir.id,
-      valid: true,
-      errors: [],
-      warnings: toValidateWarnings(warnings),
-      hash: ir.hash,
-      ...(options.graph === true ? { graph: buildPlaybookGraph(ir) } : {}),
+      verdict: {
+        playbookId: ir.id,
+        valid: true,
+        errors: [],
+        warnings: toValidateWarnings(warnings),
+        hash: ir.hash,
+        ...(options.graph === true ? { graph: buildPlaybookGraph(ir) } : {}),
+      },
+      failure: undefined,
     };
   } catch (error) {
     return {
-      playbookId: target.id,
-      valid: false,
-      errors: [toPlaybookLoadError(target.file, error, true)],
-      warnings: toValidateWarnings(warnings),
+      verdict: {
+        playbookId: target.id,
+        valid: false,
+        errors: [toPlaybookLoadError(target.file, error, true)],
+        warnings: toValidateWarnings(warnings),
+      },
+      failure: error,
     };
   }
+}
+
+function toVerdict(
+  target: PlaybookTarget,
+  yaml: string,
+  options: { readonly home?: string; readonly graph?: boolean },
+): PlaybookVerdict {
+  return evaluate(target, yaml, options).verdict;
 }
 
 /**
@@ -246,4 +273,68 @@ export function validatePlaybookBuffer(input: {
     ...(input.home === undefined ? {} : { home: input.home }),
     ...(input.graph === true ? { graph: true } : {}),
   });
+}
+
+/**
+ * `PUT /playbooks/file` (FR9–FR13): the only place Argos writes a repository file.
+ *
+ * One function owns the whole order, so no future route can write first and validate afterwards:
+ *
+ * 1. containment ({@link resolvePlaybookTarget}), with a missing file answered
+ *    `playbook_conflict`/`deleted` — the operator's buffer was edited from a file that is gone, and
+ *    that is a different answer from a path discovery never produced;
+ * 2. a home playbook is read-only (FR5/FR18) — the sole writable roots are the repository's;
+ * 3. the text cap (FR15), the same helper read and validate use;
+ * 4. the digest precondition (FR10): `baseSha256` must be the digest of the bytes on disk, so a
+ *    second tab cannot be silently overwritten;
+ * 5. the verdict (FR9/FR11): an invalid buffer rethrows the loader's own error — code, file, step,
+ *    and issues — and writes nothing;
+ * 6. the atomic write, which returns the digest of the bytes just written so a client can chain a
+ *    second save (FR12/FR13).
+ */
+export function writePlaybookFile(input: {
+  readonly cwd: string;
+  readonly file: string;
+  readonly yaml: string;
+  readonly baseSha256: string;
+  readonly home?: string;
+  readonly graph?: boolean;
+}): PlaybookSaveResponse {
+  const target = resolvePlaybookTarget({
+    cwd: input.cwd,
+    file: input.file,
+    ...(input.home === undefined ? {} : { home: input.home }),
+    whenMissing: "deleted",
+  });
+  if (!target.writable) {
+    throw argosError(
+      "invalid_request",
+      { file: target.file },
+      "a home playbook is read-only; only .argos/playbooks and .paseo/plugins/playbooks are writable",
+    );
+  }
+  assertPlaybookTextWithinLimit(input.yaml);
+  if (target.sha256 !== input.baseSha256) {
+    throw argosError(
+      "playbook_conflict",
+      { file: target.file },
+      "the playbook changed on disk since it was read",
+      undefined,
+      { reason: "changed" },
+    );
+  }
+  const { verdict, failure } = evaluate(target, input.yaml, {
+    ...(input.home === undefined ? {} : { home: input.home }),
+    ...(input.graph === true ? { graph: true } : {}),
+  });
+  // The loader's error is the answer: re-wrapping its message in a new code would lose the issues.
+  if (!verdict.valid) throw failure;
+  const written = writePlaybookAtomically(target, input.yaml);
+  return {
+    ...verdict,
+    file: target.file,
+    sha256: written.sha256,
+    written: true,
+    mode: written.mode,
+  };
 }

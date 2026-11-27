@@ -54,6 +54,8 @@ import {
   ForkRequestSchema,
   PlaybookFileResponseSchema,
   PlaybookListResponseSchema,
+  PlaybookSaveRequestSchema,
+  PlaybookSaveResponseSchema,
   PlaybookValidateRequestSchema,
   PlaybookVerdictSchema,
   RetryRequestSchema,
@@ -90,7 +92,13 @@ import {
   type GateDocumentView,
 } from "./summary.js";
 import { cookieAuthAllowed, createUiSession } from "./session.js";
-import { listPlaybooks, readPlaybookFile, validatePlaybookBuffer } from "./playbooks.js";
+import {
+  listPlaybooks,
+  readPlaybookFile,
+  toPlaybookIssues,
+  validatePlaybookBuffer,
+  writePlaybookFile,
+} from "./playbooks.js";
 import { isUiAttempt, isUiPath, resolveUiFile, serveUiFile, UI_BASE } from "./ui.js";
 
 // `@thaodangspace/argos-core/rpc/server` re-exports the one storage owner so the CLI's `serve` command can open it
@@ -256,6 +264,11 @@ function sendError(res: ServerResponse, error: unknown, log: (message: string) =
     const details: Record<string, unknown> = {};
     if (error.file !== undefined) details["file"] = error.file;
     if (error.stepId !== undefined) details["stepId"] = error.stepId;
+    // Editor FR8/FR10: the per-issue list an invalid buffer carries, and the reason a save lost
+    // its precondition, so the browser can pick a panel without parsing a message.
+    const issues = toPlaybookIssues(error.issues);
+    if (issues.length > 0) details["issues"] = issues;
+    if (error.reason !== undefined) details["reason"] = error.reason;
     sendJson(res, statusForCode(error.code), {
       error: {
         code: error.code,
@@ -853,13 +866,37 @@ export async function createRpcServer(options: CreateRpcServerOptions): Promise<
         return;
       }
 
-      // The editor's read half (editor spec FR1/FR6). Claimed beside `/playbooks` and before the
-      // `/runs` guard for the same reason: these paths are not run prefixes, so afterwards they would
-      // only ever answer `not_found`. `file` comes from the wire and is never trusted — the
-      // containment (discovery, realpath, lstat, the text cap) lives in `playbook-write.ts`.
+      // The editor's read half (editor spec FR1/FR6) and its one write (FR9–FR13). Claimed beside
+      // `/playbooks` and before the `/runs` guard for the same reason: these paths are not run
+      // prefixes, so afterwards they would only ever answer `not_found`. `file` comes from the wire
+      // and is never trusted — the containment (discovery, realpath, lstat, the text cap) lives in
+      // `playbook-write.ts`.
       if (segments.length === 2 && segments[0] === "playbooks" && segments[1] === "file") {
-        if (req.method !== "GET") {
-          sendJson(res, 405, { error: { code: "method_not_allowed", message: "GET only" } }, extra);
+        if (req.method !== "GET" && req.method !== "PUT") {
+          sendJson(
+            res,
+            405,
+            { error: { code: "method_not_allowed", message: "GET or PUT" } },
+            extra,
+          );
+          return;
+        }
+        // `PUT /playbooks/file` (FR9–FR13): the only route in Argos that writes a repository file.
+        // Same order as `POST /playbooks/validate` — the strict body first (so an absent
+        // `baseSha256` is `invalid_request`), then the cwd rules, then the one write function,
+        // which owns containment → digest → verdict → atomic write.
+        if (req.method === "PUT") {
+          const body = PlaybookSaveRequestSchema.parse(await readJson(req, maxBodyBytes));
+          validateRunCwd(body.cwd);
+          const saved = writePlaybookFile({
+            cwd: body.cwd,
+            file: body.file,
+            yaml: body.yaml,
+            baseSha256: body.baseSha256,
+            home,
+            ...(body.graph === undefined ? {} : { graph: body.graph }),
+          });
+          sendJson(res, 200, PlaybookSaveResponseSchema.parse(saved), extra);
           return;
         }
         // FR3: the same cwd rules as `POST /runs`, before any file is read.
