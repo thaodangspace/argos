@@ -55,9 +55,11 @@ built-in (`test/view/purity.test.ts`).
 adds `detail` (the one normalized reason line), `exitCode`, and `streams` (the bounded `stdout`/
 `stderr` tails) to each attempt, and `buildStepLog` renders them per attempt in one fixed order —
 start line, end line with `: <detail>`, usage, then `stdout:`/`stderr:` labels with their lines and
-no timestamp of their own — so `logText`, which "Copy step log" copies, carries the tails in the
-CLI and the web UI at once. An agent attempt never has `streams` and has a `detail` only when its
-executor reports one (hc does; Paseo has none today), and a pre-change attempt renders as before.
+no timestamp of their own — so `logText`, which "Copy step log" copies, carries the tails. Both
+clients change at once: the web UI renders `buildStepLog`, and `argos status --json` publishes the
+same fields through `StepAttemptSummary`. An agent attempt never has `streams` and has a `detail`
+only when its executor reports one (hc does; Paseo has none today), and a pre-change attempt renders
+as before.
 
 `view/graph.ts` is the graph renderer: `escapeMermaidLabel`/`mermaidNodeKey`/`renderMermaid`
 (the diffable text form `argos chart` prints, `--run` classes included), `decorateGraph` (the pure
@@ -1044,13 +1046,14 @@ every other non-gate step keeps the agent executor.
   outcome `success` (or the first declared outcome) and exposes `stdout`, `stderr`,
   `exitCode`/`exit_code`, `runs`. Declared output names are never parsed as JSON. The receipt also
   carries `exitCode`, `runs`, `signal`, and a bounded `detail`, and its `stdout`/`stderr` are the
-  `SCRIPT_OUTPUT_LIMIT` (8 KiB) **tails** of the whole execution (one rolling tail that an exit-75
-  re-run continues, so the end of the last run is what survives), set whether or not the playbook
+  `SCRIPT_OUTPUT_LIMIT` (8 KiB) **tails** of the final execution (an exit-75 re-run starts a fresh
+  tail, so only the last run's end survives), set whether or not the playbook
   declares outputs and omitted when a side is empty (measured: a 200 KiB print leaves exactly
   8 192 characters ending on the last line). The run record keeps them
   per attempt as `AttemptRecord.streams`, beside `detail` (whitespace collapsed, cut to 500) and
   `exitCode`; `ATTEMPT_STREAM_KEEP` = 10 bounds a step's document to its newest 10 attempts, older
-  ones keeping `detail`/`exitCode` and dropping `streams`.
+  ones keeping `detail`/`exitCode` and dropping `streams`. `detail` is executor-agnostic: a script's
+  reason, or hc's exit-code/signal note; a Paseo attempt has none.
 - Env filter (FR2, `src/engine/env.ts`): a script is deny-by-default. It inherits only the
   baseline — `PATH`, `HOME`, `LANG`, `LC_*`, `TZ`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`,
   `TMP`, `TEMP`, `SystemRoot`, `PATHEXT`, `COMSPEC` (matched case-insensitively) — plus the step's

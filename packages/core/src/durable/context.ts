@@ -230,11 +230,11 @@ export interface StepTaskResult {
   readonly exitCode?: number;
   readonly runs?: number;
   /**
-   * The bounded **tail** of everything the script printed to stdout across the whole execution
-   * (`SCRIPT_OUTPUT_LIMIT` characters: an exit-75 re-run continues the same tail, so the end of the
-   * last run is what survives). This is the operator's own program output — never a prompt, a
-   * transcript, or an hc terminal. Present for a script step whether or not the playbook declares
-   * an output of that name, and absent when the script printed nothing on that side.
+   * The bounded **tail** of the script's stdout for the final execution (`SCRIPT_OUTPUT_LIMIT`
+   * characters: an exit-75 re-run starts a fresh tail, so only the last run's end survives). This is
+   * the operator's own program output — never a prompt, a transcript, or an hc terminal. Present for
+   * a script step whether or not the playbook declares an output of that name, and absent when the
+   * script printed nothing on that side.
    */
   readonly stdout?: string;
   /** The bounded **tail** of the script's stderr; same rules as `stdout`. */
